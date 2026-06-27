@@ -372,6 +372,11 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 		cs.refreshContextUsageFromRollout()
 		cs.flushPendingAsText()
 		evt := core.Event{Type: core.EventResult, SessionID: cs.CurrentSessionID(), Done: true}
+		// Populate token usage from contextUsage into Event for billing/tracking
+		if cu := cs.GetContextUsage(); cu != nil {
+			evt.InputTokens = cu.InputTokens
+			evt.OutputTokens = cu.OutputTokens
+		}
 		select {
 		case cs.events <- evt:
 		case <-cs.ctx.Done():

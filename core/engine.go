@@ -5151,6 +5151,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"output_tokens", event.OutputTokens,
 				"silent", isSilent,
 			)
+
+			// Attach token usage to bridge reply context so it reaches the Java backend.
+			if rc, ok := replyCtx.(*bridgeReplyCtx); ok {
+				rc.SetUsage(event.InputTokens, event.OutputTokens)
+			}
+
 			// DEBUG: full assistant response for in-depth debugging.
 			if slog.Default().Enabled(e.ctx, slog.LevelDebug) {
 				slog.Debug("turn response",

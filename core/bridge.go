@@ -63,6 +63,18 @@ type bridgeReplyCtx struct {
 
 	progressStyle               string `json:"-"`
 	supportsProgressCardPayload bool   `json:"-"`
+
+	// Token usage from the agent turn (set by engine before reply is sent)
+	usageInputTokens  int  `json:"-"`
+	usageOutputTokens int  `json:"-"`
+	usageSet          bool `json:"-"`
+}
+
+// SetUsage is called by the engine to attach token usage before sending the reply.
+func (rc *bridgeReplyCtx) SetUsage(inputTokens, outputTokens int) {
+	rc.usageInputTokens = inputTokens
+	rc.usageOutputTokens = outputTokens
+	rc.usageSet = true
 }
 
 func (rc *bridgeReplyCtx) progressStyleHint() string {
@@ -332,13 +344,22 @@ func (bp *BridgePlatform) Reply(ctx context.Context, replyCtx any, content strin
 	if !ok {
 		return fmt.Errorf("bridge: invalid reply context type %T", replyCtx)
 	}
-	return bp.server.sendToAdapter(rc.Platform, map[string]any{
+	payload := map[string]any{
 		"type":        "reply",
 		"session_key": rc.SessionKey,
 		"reply_ctx":   rc.ReplyCtx,
 		"content":     content,
 		"format":      "text",
-	})
+	}
+	// Include token usage if set by engine
+	if rc.usageSet && (rc.usageInputTokens > 0 || rc.usageOutputTokens > 0) {
+		payload["usage"] = map[string]any{
+			"input_tokens":  rc.usageInputTokens,
+			"output_tokens": rc.usageOutputTokens,
+			"total_tokens":  rc.usageInputTokens + rc.usageOutputTokens,
+		}
+	}
+	return bp.server.sendToAdapter(rc.Platform, payload)
 }
 
 func (bp *BridgePlatform) Send(ctx context.Context, replyCtx any, content string) error {
