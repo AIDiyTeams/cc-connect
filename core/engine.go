@@ -2606,6 +2606,15 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 			return
 		}
+		// Auto-create workspace for per-user bindings (bridge has no ChannelNameResolver)
+		if workspace == "" && strings.HasPrefix(channelID, "user-") {
+			candidate := filepath.Join(e.baseDir, channelID)
+			normalized := normalizeWorkspacePath(candidate)
+			projectKey := "project:" + e.name
+			e.workspaceBindings.Bind(projectKey, channelKey, channelID, normalized)
+			slog.Info("workspace auto-bound per-user", "channelID", channelID, "workspace", normalized)
+			workspace = normalized
+		}
 		if workspace == "" {
 			// No workspace — handle init flow (unless it's a /workspace command)
 			if !strings.HasPrefix(content, "/workspace") && !strings.HasPrefix(content, "/ws ") {
