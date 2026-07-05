@@ -2593,7 +2593,12 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	var wsSessions *SessionManager
 	var resolvedWorkspace string
 	if e.multiWorkspace {
-		channelID := effectiveChannelID(msg)
+		// Per-user workspace: use "user-{UserID}" as the workspace identifier
+		// instead of channel-based binding, so each user gets an isolated directory.
+		channelID := "user-" + msg.UserID
+		if channelID == "user-" {
+			channelID = effectiveChannelID(msg) // fallback for missing UserID
+		}
 		channelKey := effectiveWorkspaceChannelKey(msg)
 		workspace, channelName, err := e.resolveWorkspace(p, channelID)
 		if err != nil {
@@ -3518,6 +3523,14 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 
 	if ws.agent != nil {
 		return ws.agent, ws.sessions, nil
+	}
+
+	// Initialize user workspace if it doesn't exist (symlinks to shared Skills-OL)
+	if _, err := os.Stat(workspace); os.IsNotExist(err) {
+		if err := initUserWorkspace(workspace, e.baseDir); err != nil {
+			return nil, nil, fmt.Errorf("workspace init failed: %w", err)
+		}
+		slog.Info("user workspace initialized", "workspace", workspace)
 	}
 
 	// Create a new agent instance with this workspace's work_dir
@@ -15578,6 +15591,87 @@ func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string,
 	}
 
 	return "", channelName, nil
+}
+
+// initUserWorkspace creates a per-user workspace with symlinks to shared Skills-OL.
+// User-private directories (outputs/, .codex/) are created as real directories.
+// Skill files (*.mjs, skills/, node_modules/, package.json) are symlinked from
+// the shared Skills-OL directory, so a single `git pull` updates all users.
+func initUserWorkspace(workspace, baseDir string) error {
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		return fmt.Errorf("create workspace dir: %w", err)
+	}
+
+	// Create user-private directories
+	privateDirs := []string{"outputs", ".codex"}
+	for _, d := range privateDirs {
+		p := filepath.Join(workspace, d)
+		if err := os.MkdirAll(p, 0755); err != nil {
+			return fmt.Errorf("create %s: %w", d, err)
+		}
+	}
+
+	// Resolve shared Skills-OL path (parent of base_dir, or a sibling "Skills-OL")
+	sharedSkills := findSharedSkillsDir(baseDir)
+	if sharedSkills == "" {
+		slog.Warn("shared Skills-OL directory not found, workspace will have no skill symlinks", "baseDir", baseDir)
+		return nil
+	}
+
+	// Symlink shared skill files/dirs into the user workspace
+	symlinks := []string{"skills", "node_modules", "package.json"}
+	// Also link all *.mjs files
+	entries, err := os.ReadDir(sharedSkills)
+	if err == nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.Type().IsRegular() && filepath.Ext(name) == ".mjs" {
+				symlinks = append(symlinks, name)
+			}
+		}
+	}
+	for _, item := range symlinks {
+		linkPath := filepath.Join(workspace, item)
+		targetPath := filepath.Join(sharedSkills, item)
+		// Skip if already exists (real file or symlink)
+		if _, err := os.Lstat(linkPath); err == nil {
+			continue
+		}
+		if err := os.Symlink(targetPath, linkPath); err != nil {
+			slog.Warn("failed to create symlink", "link", linkPath, "target", targetPath, "err", err)
+		}
+	}
+
+	return nil
+}
+
+// findSharedSkillsDir locates the shared Skills-OL directory.
+// Checks: 1) env var SKILLS_OL_DIR, 2) ~/Skills-OL, 3) sibling of base_dir
+func findSharedSkillsDir(baseDir string) string {
+	// 1. Environment variable
+	if env := os.Getenv("SKILLS_OL_DIR"); env != "" {
+		if info, err := os.Stat(env); err == nil && info.IsDir() {
+			return env
+		}
+	}
+
+	// 2. ~/Skills-OL (standard location on cc-connect server)
+	home, err := os.UserHomeDir()
+	if err == nil {
+		candidate := filepath.Join(home, "Skills-OL")
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+	}
+
+	// 3. Sibling of base_dir
+	parent := filepath.Dir(baseDir)
+	candidate := filepath.Join(parent, "Skills-OL")
+	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+		return candidate
+	}
+
+	return ""
 }
 
 // handleWorkspaceInitFlow manages the conversational workspace setup.
