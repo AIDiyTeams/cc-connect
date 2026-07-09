@@ -263,6 +263,34 @@ Streaming delta for real-time typing preview. Only sent if the adapter declared 
 | `full_text` | string | Full accumulated text. Adapters can use this for "replace entire message" updates. |
 | `preview_handle` | string | Handle returned by `preview_ack`. Empty on first stream message. |
 | `done` | bool | `true` on the final stream message. |
+| `status` | object | Optional structured footer on the final frame (see below). Never inlined into `full_text` / `content`. |
+| `usage` | object | Optional token usage on the final frame. |
+
+#### `status` (structured reply footer)
+
+Sent on final `reply` / `reply_stream(done=true)` instead of appending italic markdown to the body.
+
+```json
+{
+  "context": "[ctx: ~6%]",
+  "context_pct": 6,
+  "model": "deepseek-v4-flash",
+  "effort": "medium",
+  "workdir": "~/workspaces/user-6",
+  "session_name": "Greeting & product ideas",
+  "text": "[ctx: ~6%] · deepseek-v4-flash · medium · ~/workspaces/user-6"
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `context` | Context usage label, e.g. `[ctx: ~6%]`. |
+| `context_pct` | Numeric percent when parseable. |
+| `model` | Model id (diagnostic; Studio UI hides it). |
+| `effort` | Reasoning effort (e.g. `medium`). |
+| `workdir` | Workspace path (diagnostic; Studio shows `session_name` instead). |
+| `session_name` | Human-readable session title (Codex summary / custom name). |
+| `text` | Original footer string (fallback for display). |
 
 #### `preview_start`
 
@@ -474,7 +502,8 @@ Notify the adapter of a server-side error.
 | `buttons` | Inline clickable buttons | `buttons` reply, `card_action` |
 | `typing` | Typing indicator | `typing_start`, `typing_stop` |
 | `update_message` | Edit existing messages | `update_message` |
-| `preview` | Streaming preview (requires `update_message`) | `preview_start`, `reply_stream` |
+| `preview` | Streaming preview (requires `update_message` or `token_stream`) | `preview_start`, `reply_stream` |
+| `token_stream` | Prefer by-token `reply_stream` for Studio chat (`reply_ctx` prefix `cmsg-`). LLM Task (`llm-`) keeps coarse `preview_start` / `update_message` + default throttle. | `reply_stream` (Studio only) |
 | `delete_message` | Delete messages | `delete_message` |
 | `reconstruct_reply` | Can reconstruct reply context from session_key | Enables cron/heartbeat messages |
 
