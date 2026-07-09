@@ -5192,6 +5192,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
+			// Agents often embed ![alt](/tmp/foo.png). Browsers 404 those paths;
+			// deliver bytes via image event and strip the broken markdown from text.
+			mediaSourceText := cleanResponse
+			if !isSilent {
+				strippedMD := strings.TrimSpace(stripLocalImageMarkdown(cleanResponse))
+				// Collapse leftover blank lines from removed image markdown.
+				for strings.Contains(strippedMD, "\n\n\n") {
+					strippedMD = strings.ReplaceAll(strippedMD, "\n\n\n", "\n\n")
+				}
+				cleanResponse = strippedMD
+				baseResponse = strippedMD
+			}
+
 			if !isSilent {
 				e.hooks.Emit(HookEvent{
 					Event:      HookEventMessageSent,
@@ -5407,10 +5420,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
 			}
 
-			// Auto-deliver workspace images created/changed this turn (Studio etc.).
-			// Independent of agent calling `cc-connect send --image`.
+			// Auto-deliver images: workspace mtime diff + paths mentioned in reply
+			// (e.g. /tmp/foo.png that workspace scan would miss).
 			if !isSilent {
-				e.harvestAndSendTurnMedia(state, p, replyCtx)
+				e.harvestAndSendTurnMedia(state, p, replyCtx, mediaSourceText)
 			}
 
 			// TTS: async voice reply if enabled (skipped for silent replies)
@@ -10536,7 +10549,8 @@ func (e *Engine) noteMediaSent(state *interactiveState, img ImageAttachment) {
 
 // harvestAndSendTurnMedia diffs the workspace against the turn-start snapshot
 // and SendImage any new/changed images the agent wrote but did not side-send.
-func (e *Engine) harvestAndSendTurnMedia(state *interactiveState, p Platform, replyCtx any) {
+// replyText is also scanned for local paths (e.g. /tmp/*.png) that live outside workDir.
+func (e *Engine) harvestAndSendTurnMedia(state *interactiveState, p Platform, replyCtx any, replyText string) {
 	if state == nil || !e.attachmentSendEnabled {
 		return
 	}
@@ -10547,15 +10561,26 @@ func (e *Engine) harvestAndSendTurnMedia(state *interactiveState, p Platform, re
 	state.mu.Lock()
 	before := state.mediaSnapshotBefore
 	already := state.mediaSentThisTurn
+	if already == nil {
+		already = make(map[string]bool)
+		state.mediaSentThisTurn = already
+	}
 	workDir := state.workspaceDir
 	state.mediaSnapshotBefore = nil
 	state.mu.Unlock()
-	if workDir == "" {
-		return
+
+	var images []ImageAttachment
+	if workDir != "" {
+		after := snapshotMediaFiles(workDir)
+		changed := diffNewOrChangedMedia(before, after)
+		images = append(images, loadHarvestImages(workDir, changed, already)...)
 	}
-	after := snapshotMediaFiles(workDir)
-	changed := diffNewOrChangedMedia(before, after)
-	images := loadHarvestImages(workDir, changed, already)
+	// Paths cited in the reply (Markdown / backticks), including /tmp.
+	cited := extractLocalImagePaths(replyText, workDir)
+	images = append(images, loadImagesFromAbsolutePaths(cited, already)...)
+	if len(images) > mediaHarvestMaxFiles {
+		images = images[:mediaHarvestMaxFiles]
+	}
 	if len(images) == 0 {
 		return
 	}
