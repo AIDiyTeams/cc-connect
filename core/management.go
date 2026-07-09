@@ -627,6 +627,8 @@ func (m *ManagementServer) handleProjectRoutes(w http.ResponseWriter, r *http.Re
 		m.handleProjectModels(w, r, engine)
 	case "model":
 		m.handleProjectModel(w, r, engine)
+	case "memory":
+		m.handleProjectMemory(w, r, engine, rest)
 	case "heartbeat":
 		m.handleProjectHeartbeat(w, r, projName, rest)
 	case "users":
@@ -1134,6 +1136,51 @@ func (m *ManagementServer) handleProjectSend(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	mgmtOK(w, "message sent")
+}
+
+func (m *ManagementServer) handleProjectMemory(w http.ResponseWriter, r *http.Request, e *Engine, rest string) {
+	if rest != "facts" {
+		mgmtError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodPost {
+		mgmtError(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	writer, ok := e.agent.(AgentMemoryWriter)
+	if !ok {
+		mgmtError(w, http.StatusNotImplemented, "agent does not support memory fact writing")
+		return
+	}
+	var req AgentMemoryWriteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.SessionKey) == "" {
+		mgmtError(w, http.StatusBadRequest, "session_key is required")
+		return
+	}
+	if len(req.Facts) == 0 {
+		mgmtError(w, http.StatusBadRequest, "facts are required")
+		return
+	}
+	// Align fact writes with the same per-user workspace used by interactive
+	// sessions (multi-workspace: {base_dir}/user-{userId}).
+	workDir, err := e.ResolveMemoryWorkDir(req.SessionKey)
+	if err != nil {
+		mgmtError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if workDir != "" {
+		req.WorkDir = workDir
+	}
+	result, err := writer.WriteMemoryFacts(r.Context(), req)
+	if err != nil {
+		mgmtError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	mgmtJSON(w, http.StatusOK, result)
 }
 
 // ── Provider endpoints ────────────────────────────────────────

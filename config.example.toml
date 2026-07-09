@@ -1449,6 +1449,12 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
+# Optional: route Tomako/cc-connect session keys to per-user Codex workspaces
+# when NOT using multi-workspace mode. Prefer projects.mode = "multi-workspace"
+# + base_dir (production Tomako path: {base_dir}/user-{userId}).
+# 可选：非 multi-workspace 时，把 session key 映射到独立用户目录。
+# 生产 Tomako 优先用 mode = "multi-workspace" + base_dir（目录为 user-{userId}）。
+# session_workspace_base = "/path/to/tomako-codex-workspaces"
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
 #
 # Mode options / 模式说明:

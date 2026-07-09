@@ -596,6 +596,63 @@ func (e *Engine) SetMultiWorkspace(baseDir, bindingStorePath string) {
 	go e.runIdleReaper()
 }
 
+// ResolveMemoryWorkDir returns the Codex cwd that memory fact writes must use
+// for the given bridge session_key.
+//
+// In multi-workspace mode this matches interactive routing:
+// {base_dir}/user-{userId} (userId from session_key's last segment).
+// The directory is created via initUserWorkspace when missing so fact writes
+// land in the same tree the next Codex session will read.
+//
+// Outside multi-workspace mode it falls back to the project agent's work_dir.
+func (e *Engine) ResolveMemoryWorkDir(sessionKey string) (string, error) {
+	if e.multiWorkspace && strings.TrimSpace(e.baseDir) != "" {
+		userID := sanitizeUserWorkspaceID(extractUserID(sessionKey))
+		if userID == "" || userID == "unknown" {
+			return "", fmt.Errorf("session_key %q has no usable user id for per-user workspace", sessionKey)
+		}
+		workspace := normalizeWorkspacePath(filepath.Join(e.baseDir, "user-"+userID))
+		if _, err := os.Stat(workspace); os.IsNotExist(err) {
+			if err := initUserWorkspace(workspace, e.baseDir); err != nil {
+				return "", fmt.Errorf("init memory workspace: %w", err)
+			}
+			slog.Info("user workspace initialized for memory write", "workspace", workspace)
+		} else if err != nil {
+			return "", fmt.Errorf("stat memory workspace: %w", err)
+		}
+		return workspace, nil
+	}
+	if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
+		return strings.TrimSpace(wd.GetWorkDir()), nil
+	}
+	return "", nil
+}
+
+// sanitizeUserWorkspaceID keeps the same character set as Codex session-key
+// sanitization so user workspace directory names stay stable and path-safe.
+func sanitizeUserWorkspaceID(raw string) string {
+	value := strings.TrimSpace(raw)
+	value = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r
+		case r >= '0' && r <= '9':
+			return r
+		case r == '.', r == '_', r == '-':
+			return r
+		default:
+			return '_'
+		}
+	}, value)
+	value = strings.Trim(value, "_")
+	if value == "" {
+		return "unknown"
+	}
+	return value
+}
+
 // SetWorkspaceIdleTimeout overrides the workspace idle reaper timeout.
 // Must be called after SetMultiWorkspace. A zero value disables reaping.
 func (e *Engine) SetWorkspaceIdleTimeout(d time.Duration) {
