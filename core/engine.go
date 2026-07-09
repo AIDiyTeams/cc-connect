@@ -5231,9 +5231,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"silent", isSilent,
 			)
 
-			// Attach token usage to bridge reply context so it reaches the Java backend.
+			// Attach token usage + session display name to bridge reply context.
 			if rc, ok := replyCtx.(*bridgeReplyCtx); ok {
 				rc.SetUsage(event.InputTokens, event.OutputTokens)
+				rc.SetSessionName(e.currentSessionDisplayName(replyAgent, sessions, session.GetAgentSessionID()))
 			}
 
 			// DEBUG: full assistant response for in-depth debugging.

@@ -263,6 +263,34 @@ token = "your-secret"     # 认证密钥，必填
 | `full_text` | string | 完整累积文本。适配器可用于"替换整条消息"的更新方式。 |
 | `preview_handle` | string | 由 `preview_ack` 返回的 handle。首条流式消息时为空。 |
 | `done` | bool | 最后一条流式消息时为 `true`。 |
+| `status` | object | 最终帧可选的结构化 footer（见下）。**不会**拼进 `full_text` / `content`。 |
+| `usage` | object | 最终帧可选的 token 用量。 |
+
+#### `status`（结构化回复 footer）
+
+在最终 `reply` / `reply_stream(done=true)` 上发送，替代把斜体 markdown 拼进正文。
+
+```json
+{
+  "context": "[ctx: ~6%]",
+  "context_pct": 6,
+  "model": "deepseek-v4-flash",
+  "effort": "medium",
+  "workdir": "~/workspaces/user-6",
+  "session_name": "Greeting & product ideas",
+  "text": "[ctx: ~6%] · deepseek-v4-flash · medium · ~/workspaces/user-6"
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `context` | 上下文用量标签，如 `[ctx: ~6%]` |
+| `context_pct` | 可解析时的百分比数字 |
+| `model` | 模型 id（诊断用；Studio UI 隐藏） |
+| `effort` | 推理强度（如 `medium`） |
+| `workdir` | 工作区路径（诊断用；Studio 改展示 `session_name`） |
+| `session_name` | 可读会话标题（Codex summary / 自定义名） |
+| `text` | 原始 footer 字符串（展示回退） |
 
 #### `preview_start`
 
@@ -474,7 +502,8 @@ token = "your-secret"     # 认证密钥，必填
 | `buttons` | 可点击的内联按钮 | `buttons` 回复、`card_action` |
 | `typing` | 正在输入指示器 | `typing_start`、`typing_stop` |
 | `update_message` | 编辑已有消息 | `update_message` |
-| `preview` | 流式预览（需要 `update_message`） | `preview_start`、`reply_stream` |
+| `preview` | 流式预览（需要 `update_message` 或 `token_stream`） | `preview_start`、`reply_stream` |
+| `token_stream` | Studio 对话（`reply_ctx` 前缀 `cmsg-`）走 by-token `reply_stream`；LLM Task（`llm-`）仍用粗粒度 `preview_start` / `update_message` + 默认节流 | `reply_stream`（仅 Studio） |
 | `delete_message` | 删除消息 | `delete_message` |
 | `reconstruct_reply` | 可从 session_key 重建回复上下文 | 启用定时任务/心跳消息 |
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -61,6 +62,16 @@ type bridgeReplyCtx struct {
 	SessionKey string `json:"session_key"`
 	ReplyCtx   string `json:"reply_ctx"`
 
+	// PreviewHandle is the platform-side streaming message id (from preview_ack
+	// or a synthetic id for token_stream auto-ack). ReplyCtx must stay as the
+	// original routing key (e.g. cmsg-… / llm-…) so adapters can fan out events.
+	PreviewHandle  string `json:"-"`
+	lastStreamText string `json:"-"` // last full_text sent via reply_stream (for delta)
+	tokenStream    bool   `json:"-"` // adapter declared token_stream → tight flush
+	// status is structured reply footer (ctx/effort/session); never inlined into content.
+	status      map[string]any `json:"-"`
+	sessionName string         `json:"-"` // Codex/custom session display name
+
 	progressStyle               string `json:"-"`
 	supportsProgressCardPayload bool   `json:"-"`
 
@@ -75,6 +86,11 @@ func (rc *bridgeReplyCtx) SetUsage(inputTokens, outputTokens int) {
 	rc.usageInputTokens = inputTokens
 	rc.usageOutputTokens = outputTokens
 	rc.usageSet = true
+}
+
+// SetSessionName attaches the human-readable session title (Codex summary / custom name).
+func (rc *bridgeReplyCtx) SetSessionName(name string) {
+	rc.sessionName = strings.TrimSpace(name)
 }
 
 func (rc *bridgeReplyCtx) progressStyleHint() string {
@@ -319,8 +335,12 @@ var (
 	_ CardSender                = (*BridgePlatform)(nil)
 	_ InlineButtonSender        = (*BridgePlatform)(nil)
 	_ MessageUpdater            = (*BridgePlatform)(nil)
+	_ StatusFooterSender        = (*BridgePlatform)(nil)
+	_ StatusFooterUpdater       = (*BridgePlatform)(nil)
+	_ StreamCompleter           = (*BridgePlatform)(nil)
 	_ PreviewStarter            = (*BridgePlatform)(nil)
 	_ PreviewCleaner            = (*BridgePlatform)(nil)
+	_ PreviewFinishPreference   = (*BridgePlatform)(nil)
 	_ TypingIndicator           = (*BridgePlatform)(nil)
 	_ AudioSender               = (*BridgePlatform)(nil)
 	_ VideoSender               = (*BridgePlatform)(nil)
@@ -359,11 +379,108 @@ func (bp *BridgePlatform) Reply(ctx context.Context, replyCtx any, content strin
 			"total_tokens":  rc.usageInputTokens + rc.usageOutputTokens,
 		}
 	}
+	attachBridgeStatus(payload, rc)
 	return bp.server.sendToAdapter(rc.Platform, payload)
 }
 
 func (bp *BridgePlatform) Send(ctx context.Context, replyCtx any, content string) error {
 	return bp.Reply(ctx, replyCtx, content)
+}
+
+// SendWithStatusFooter sends a final reply with structured status (ctx/model/…)
+// instead of appending the footer into content as italic markdown.
+func (bp *BridgePlatform) SendWithStatusFooter(ctx context.Context, replyCtx any, content, footer string) error {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok {
+		return fmt.Errorf("bridge: invalid reply context")
+	}
+	rc.status = parseBridgeStatusFooter(footer)
+	return bp.Reply(ctx, replyCtx, content)
+}
+
+// UpdateMessageWithStatusFooter updates streaming content and stores structured
+// status for the subsequent CompleteStream(done) frame — never inlines footer text.
+func (bp *BridgePlatform) UpdateMessageWithStatusFooter(ctx context.Context, replyCtx any, content, footer string) error {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok {
+		return fmt.Errorf("bridge: invalid reply context")
+	}
+	rc.status = parseBridgeStatusFooter(footer)
+	return bp.UpdateMessage(ctx, replyCtx, content)
+}
+
+// parseBridgeStatusFooter turns the engine footer string into structured fields
+// for Studio/Java. Example: "[ctx: ~6%] · deepseek-v4-flash · medium · ~/workspaces/user-6"
+// Studio displays context + effort + session_name (model/workdir kept for diagnostics only).
+func parseBridgeStatusFooter(footer string) map[string]any {
+	footer = strings.TrimSpace(footer)
+	if footer == "" {
+		return nil
+	}
+	// Legacy footer is one line; CCD-style may be multi-line — use first non-empty line for parts.
+	line := footer
+	if i := strings.IndexByte(footer, '\n'); i >= 0 {
+		line = strings.TrimSpace(footer[:i])
+	}
+	status := map[string]any{"text": footer}
+	for _, part := range strings.Split(line, " · ") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(part, "[ctx:"):
+			status["context"] = part
+			if m := ctxPctRe.FindStringSubmatch(part); len(m) == 2 {
+				if pct, err := strconv.Atoi(m[1]); err == nil {
+					status["context_pct"] = pct
+				}
+			}
+		case strings.HasPrefix(part, "effort:"):
+			status["effort"] = strings.TrimSpace(strings.TrimPrefix(part, "effort:"))
+		case part == "low" || part == "medium" || part == "high" || part == "minimal" || part == "xhigh":
+			status["effort"] = part
+		case strings.HasPrefix(part, "~/") || strings.HasPrefix(part, "/"):
+			status["workdir"] = part
+		case status["model"] == nil && !strings.HasPrefix(part, "out ") && !strings.HasPrefix(part, "in ") && !strings.HasPrefix(part, "ctx "):
+			status["model"] = part
+		}
+	}
+	// Multi-line CCD: second line is often workdir
+	if _, ok := status["workdir"]; !ok {
+		if lines := strings.Split(footer, "\n"); len(lines) > 1 {
+			if w := strings.TrimSpace(lines[len(lines)-1]); w != "" && (strings.HasPrefix(w, "~/") || strings.HasPrefix(w, "/")) {
+				status["workdir"] = w
+			}
+		}
+	}
+	return status
+}
+
+var ctxPctRe = regexp.MustCompile(`\[ctx:\s*~?(\d+)%\]`)
+
+func attachBridgeStatus(payload map[string]any, rc *bridgeReplyCtx) {
+	if rc == nil {
+		return
+	}
+	status := rc.status
+	if status == nil {
+		status = map[string]any{}
+	} else {
+		// shallow copy so we don't mutate shared map unexpectedly
+		cp := make(map[string]any, len(status)+2)
+		for k, v := range status {
+			cp[k] = v
+		}
+		status = cp
+	}
+	if rc.sessionName != "" {
+		status["session_name"] = rc.sessionName
+	}
+	if len(status) == 0 {
+		return
+	}
+	payload["status"] = status
 }
 
 func (bp *BridgePlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
@@ -394,9 +511,23 @@ func newBridgeReplyCtx(a *bridgeAdapter, sessionKey, replyCtx string) *bridgeRep
 		return rc
 	}
 	rc.Platform = a.platform
+	// Studio chat (cmsg-*) can opt into by-token reply_stream; LLM Task (llm-*)
+	// keeps the coarse preview/update_message path even if the adapter also
+	// declared token_stream.
+	rc.tokenStream = a.capabilities["token_stream"] && strings.HasPrefix(replyCtx, "cmsg-")
 	rc.progressStyle = bridgeProgressStyleForAdapter(a)
 	rc.supportsProgressCardPayload = bridgeSupportsProgressCardPayloadForAdapter(a)
 	return rc
+}
+
+// cloneBridgeReplyCtx copies routing fields for a streaming preview handle while
+// preserving the original ReplyCtx (must not be overwritten by preview_handle).
+func cloneBridgeReplyCtx(rc *bridgeReplyCtx) *bridgeReplyCtx {
+	if rc == nil {
+		return nil
+	}
+	out := *rc
+	return &out
 }
 
 func bridgeProgressStyleForAdapter(a *bridgeAdapter) string {
@@ -406,7 +537,7 @@ func bridgeProgressStyleForAdapter(a *bridgeAdapter) string {
 	if style, ok := bridgeMetadataString(a.metadata, "progress_style"); ok {
 		return normalizeProgressStyle(style)
 	}
-	if a.capabilities["preview"] && a.capabilities["update_message"] {
+	if a.capabilities["preview"] && (a.capabilities["update_message"] || a.capabilities["token_stream"]) {
 		if a.capabilities["card"] {
 			return progressStyleCard
 		}
@@ -423,7 +554,7 @@ func bridgeSupportsProgressCardPayloadForAdapter(a *bridgeAdapter) bool {
 		return supported
 	}
 	adapterName, _ := bridgeMetadataString(a.metadata, "adapter")
-	return adapterName == "bot-gateway" && a.capabilities["preview"] && a.capabilities["update_message"]
+	return adapterName == "bot-gateway" && a.capabilities["preview"] && (a.capabilities["update_message"] || a.capabilities["token_stream"])
 }
 
 func bridgeMetadataString(metadata map[string]any, key string) (string, bool) {
@@ -532,15 +663,96 @@ func (bp *BridgePlatform) UpdateMessage(ctx context.Context, replyCtx any, conte
 		return fmt.Errorf("bridge: invalid reply context")
 	}
 	a := bp.server.getAdapter(rc.Platform)
-	if a == nil || !a.capabilities["update_message"] {
+	if a == nil {
 		return ErrNotSupported
+	}
+	// Studio (cmsg- + token_stream): by-token reply_stream.
+	// LLM Task and other sessions: keep coarse update_message (Java maps it to
+	// reply_stream for fan-out, with default stream-preview throttle).
+	if rc.tokenStream {
+		return bp.sendReplyStream(rc, content, false)
+	}
+	if !a.capabilities["update_message"] {
+		// No in-place edit: fall back to reply_stream so preview still works.
+		if a.capabilities["preview"] {
+			return bp.sendReplyStream(rc, content, false)
+		}
+		return ErrNotSupported
+	}
+	previewHandle := rc.PreviewHandle
+	if previewHandle == "" {
+		previewHandle = rc.ReplyCtx
 	}
 	return bp.server.sendToAdapter(rc.Platform, map[string]any{
 		"type":           "update_message",
 		"session_key":    rc.SessionKey,
-		"preview_handle": rc.ReplyCtx,
+		"reply_ctx":      rc.ReplyCtx,
+		"preview_handle": previewHandle,
 		"content":        content,
 	})
+}
+
+// CompleteStream sends the final reply_stream frame (done=true) so adapters that
+// only listen for streaming events can close the turn without a separate reply.
+// Used for both Studio token streams and LLM Task coarse streams (Java completes
+// on reply_stream done).
+func (bp *BridgePlatform) CompleteStream(ctx context.Context, replyCtx any, content string) error {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok {
+		return fmt.Errorf("bridge: invalid reply context")
+	}
+	a := bp.server.getAdapter(rc.Platform)
+	if a == nil || !(a.capabilities["preview"] || a.capabilities["token_stream"] || a.capabilities["update_message"]) {
+		return nil
+	}
+	return bp.sendReplyStream(rc, content, true)
+}
+
+// KeepPreviewOnFinish keeps the streaming message; Java adapters render the
+// done frame in-place instead of deleting the preview and sending a fresh reply.
+func (bp *BridgePlatform) KeepPreviewOnFinish() bool { return true }
+
+// StreamPreviewOverrides tightens flush cadence only for Studio token streams.
+// LLM Task keeps DefaultStreamPreviewCfg (≈1500ms / 30 chars).
+func (rc *bridgeReplyCtx) StreamPreviewOverrides() (intervalMs, minDeltaChars int, ok bool) {
+	if rc == nil || !rc.tokenStream {
+		return 0, 0, false
+	}
+	return 50, 1, true
+}
+
+func (bp *BridgePlatform) sendReplyStream(rc *bridgeReplyCtx, content string, done bool) error {
+	delta := content
+	if strings.HasPrefix(content, rc.lastStreamText) {
+		delta = content[len(rc.lastStreamText):]
+	}
+	previewHandle := rc.PreviewHandle
+	payload := map[string]any{
+		"type":        "reply_stream",
+		"session_key": rc.SessionKey,
+		"reply_ctx":   rc.ReplyCtx,
+		"delta":       delta,
+		"full_text":   content,
+		"done":        done,
+	}
+	if previewHandle != "" {
+		payload["preview_handle"] = previewHandle
+	}
+	if done && rc.usageSet && (rc.usageInputTokens > 0 || rc.usageOutputTokens > 0) {
+		payload["usage"] = map[string]any{
+			"input_tokens":  rc.usageInputTokens,
+			"output_tokens": rc.usageOutputTokens,
+			"total_tokens":  rc.usageInputTokens + rc.usageOutputTokens,
+		}
+	}
+	if done {
+		attachBridgeStatus(payload, rc)
+	}
+	if err := bp.server.sendToAdapter(rc.Platform, payload); err != nil {
+		return err
+	}
+	rc.lastStreamText = content
+	return nil
 }
 
 func (bp *BridgePlatform) SendPreviewStart(ctx context.Context, replyCtx any, content string) (previewHandle any, err error) {
@@ -551,6 +763,18 @@ func (bp *BridgePlatform) SendPreviewStart(ctx context.Context, replyCtx any, co
 	a := bp.server.getAdapter(rc.Platform)
 	if a == nil || !a.capabilities["preview"] {
 		return nil, ErrNotSupported
+	}
+
+	handle := cloneBridgeReplyCtx(rc)
+
+	// Studio token_stream: skip preview_ack round-trip; emit first reply_stream.
+	// LLM Task keeps preview_start → preview_ack → update_message.
+	if rc.tokenStream {
+		handle.PreviewHandle = fmt.Sprintf("stream-%d", time.Now().UnixNano())
+		if err := bp.sendReplyStream(handle, content, false); err != nil {
+			return nil, err
+		}
+		return handle, nil
 	}
 
 	refID := fmt.Sprintf("prev-%d", time.Now().UnixNano())
@@ -574,8 +798,11 @@ func (bp *BridgePlatform) SendPreviewStart(ctx context.Context, replyCtx any, co
 	}
 
 	select {
-	case handle := <-ch:
-		return newBridgeReplyCtx(a, rc.SessionKey, handle), nil
+	case previewID := <-ch:
+		handle.PreviewHandle = previewID
+		// Seed lastStreamText so the first UpdateMessage delta is correct.
+		handle.lastStreamText = content
+		return handle, nil
 	case <-time.After(10 * time.Second):
 		a.previewMu.Lock()
 		delete(a.previewRequests, refID)
@@ -598,10 +825,15 @@ func (bp *BridgePlatform) DeletePreviewMessage(ctx context.Context, previewHandl
 	if a == nil || !a.capabilities["delete_message"] {
 		return ErrNotSupported
 	}
+	handle := rc.PreviewHandle
+	if handle == "" {
+		handle = rc.ReplyCtx
+	}
 	return bp.server.sendToAdapter(rc.Platform, map[string]any{
 		"type":           "delete_message",
 		"session_key":    rc.SessionKey,
-		"preview_handle": rc.ReplyCtx,
+		"reply_ctx":      rc.ReplyCtx,
+		"preview_handle": handle,
 	})
 }
 

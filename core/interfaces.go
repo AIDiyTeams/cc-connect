@@ -277,6 +277,19 @@ type MessageUpdater interface {
 	UpdateMessage(ctx context.Context, replyCtx any, content string) error
 }
 
+// StreamCompleter is an optional interface for platforms that need an explicit
+// end-of-stream signal (e.g. bridge reply_stream with done=true) when the
+// streaming preview finishes in-place without a separate final Reply/Send.
+type StreamCompleter interface {
+	CompleteStream(ctx context.Context, replyCtx any, content string) error
+}
+
+// StreamPreviewTuner is an optional interface for platforms that want tighter
+// streaming flush intervals (e.g. bridge adapters declaring token_stream).
+type StreamPreviewTuner interface {
+	StreamPreviewOverrides() (intervalMs, minDeltaChars int, ok bool)
+}
+
 // StatusFooterSender is an optional Platform extension for sending a reply
 // with a structured per-turn status footer rendered using platform-specific
 // dim/small styling (e.g. Lark `text_size: "notation"`). Platforms that do

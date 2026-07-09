@@ -146,6 +146,7 @@ type PreviewFinishPreference interface {
 }
 
 func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx context.Context, transform func(string) string) *streamPreview {
+	cfg = applyStreamPreviewOverrides(cfg, p, replyCtx)
 	return &streamPreview{
 		cfg:       cfg,
 		platform:  p,
@@ -154,6 +155,35 @@ func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx contex
 		transform: transform,
 		timerStop: make(chan struct{}),
 	}
+}
+
+func applyStreamPreviewOverrides(cfg StreamPreviewCfg, p Platform, replyCtx any) StreamPreviewCfg {
+	if tuner, ok := replyCtx.(StreamPreviewTuner); ok {
+		if intervalMs, minDeltaChars, ok := tuner.StreamPreviewOverrides(); ok {
+			if intervalMs > 0 {
+				cfg.IntervalMs = intervalMs
+			}
+			if minDeltaChars > 0 {
+				cfg.MinDeltaChars = minDeltaChars
+			}
+			return cfg
+		}
+	}
+	tuner, ok := p.(StreamPreviewTuner)
+	if !ok {
+		return cfg
+	}
+	intervalMs, minDeltaChars, ok := tuner.StreamPreviewOverrides()
+	if !ok {
+		return cfg
+	}
+	if intervalMs > 0 {
+		cfg.IntervalMs = intervalMs
+	}
+	if minDeltaChars > 0 {
+		cfg.MinDeltaChars = minDeltaChars
+	}
+	return cfg
 }
 
 // canPreview returns true if the platform supports message updating and is not disabled.
@@ -382,6 +412,11 @@ func (sp *streamPreview) finish(finalText, statusFooter string) bool {
 								statusUpdater.SetPreviewStatus(sp.previewMsgID, sp.pendingStatus)
 							}
 						}
+						if completer, ok := sp.platform.(StreamCompleter); ok {
+							if err := completer.CompleteStream(sp.ctx, sp.previewMsgID, finalText); err != nil {
+								slog.Debug("stream preview finish: CompleteStream failed", "error", err)
+							}
+						}
 						return true
 					} else {
 						slog.Debug("stream preview finish: degraded UpdateMessage failed, cleaning up", "error", err)
@@ -433,6 +468,11 @@ func (sp *streamPreview) finish(finalText, statusFooter string) bool {
 	if finalText == sp.lastSentText && sp.lastSentViaUpdate && statusFooter == "" {
 		slog.Debug("stream preview finish: text unchanged and no footer, skipping",
 			"text_len", len(finalText))
+		if completer, ok := sp.platform.(StreamCompleter); ok {
+			if err := completer.CompleteStream(sp.ctx, sp.previewMsgID, finalText); err != nil {
+				slog.Debug("stream preview finish: CompleteStream failed", "error", err)
+			}
+		}
 		return true
 	}
 
@@ -450,6 +490,11 @@ func (sp *streamPreview) finish(finalText, statusFooter string) bool {
 		if sfu, ok := sp.platform.(StatusFooterUpdater); ok {
 			if err := sfu.UpdateMessageWithStatusFooter(sp.ctx, sp.previewMsgID, finalText, statusFooter); err == nil {
 				slog.Debug("stream preview finish: success via UpdateMessageWithStatusFooter")
+				if completer, ok := sp.platform.(StreamCompleter); ok {
+					if err := completer.CompleteStream(sp.ctx, sp.previewMsgID, finalText); err != nil {
+						slog.Debug("stream preview finish: CompleteStream failed", "error", err)
+					}
+				}
 				return true
 			} else {
 				slog.Debug("stream preview finish: UpdateMessageWithStatusFooter failed, falling back", "error", err)
@@ -471,6 +516,13 @@ func (sp *streamPreview) finish(finalText, statusFooter string) bool {
 	if sp.pendingStatus != "" {
 		if statusUpdater, ok := sp.platform.(PreviewStatusUpdater); ok {
 			statusUpdater.SetPreviewStatus(sp.previewMsgID, sp.pendingStatus)
+		}
+	}
+	// Platforms that stream via reply_stream need an explicit done frame when
+	// finish keeps the preview in-place (no separate final Reply/Send).
+	if completer, ok := sp.platform.(StreamCompleter); ok {
+		if err := completer.CompleteStream(sp.ctx, sp.previewMsgID, finalText); err != nil {
+			slog.Debug("stream preview finish: CompleteStream failed", "error", err)
 		}
 	}
 	slog.Debug("stream preview finish: success via UpdateMessage")

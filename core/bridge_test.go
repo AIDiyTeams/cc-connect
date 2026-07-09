@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -916,5 +917,239 @@ func TestBridge_SessionMissingParams(t *testing.T) {
 	})
 	if r.OK {
 		t.Fatal("expected error without target in switch")
+	}
+}
+
+func TestBridge_TokenStreamReplyStream(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "preview", "token_stream", "update_message"})
+
+	bp := bs.NewPlatform("proj")
+	rc := newBridgeReplyCtx(bs.getAdapter("java-backend"), "java-backend:tn:1:project:p1", "cmsg-abc")
+	if !rc.tokenStream {
+		t.Fatal("cmsg- reply_ctx should enable tokenStream when capability present")
+	}
+
+	handle, err := bp.SendPreviewStart(context.Background(), rc, "Hel")
+	if err != nil {
+		t.Fatalf("SendPreviewStart: %v", err)
+	}
+	msg := readMsg(t, conn)
+	if msg["type"] != "reply_stream" {
+		t.Fatalf("first frame type=%v want reply_stream", msg["type"])
+	}
+	if msg["reply_ctx"] != "cmsg-abc" {
+		t.Fatalf("reply_ctx=%v want cmsg-abc (must not be overwritten by preview handle)", msg["reply_ctx"])
+	}
+	if msg["full_text"] != "Hel" {
+		t.Fatalf("full_text=%v", msg["full_text"])
+	}
+	if msg["done"] == true {
+		t.Fatal("first frame should not be done")
+	}
+
+	if err := bp.UpdateMessage(context.Background(), handle, "Hello"); err != nil {
+		t.Fatalf("UpdateMessage: %v", err)
+	}
+	msg = readMsg(t, conn)
+	if msg["type"] != "reply_stream" {
+		t.Fatalf("update frame type=%v", msg["type"])
+	}
+	if msg["delta"] != "lo" {
+		t.Fatalf("delta=%v want lo", msg["delta"])
+	}
+	if msg["full_text"] != "Hello" {
+		t.Fatalf("full_text=%v", msg["full_text"])
+	}
+
+	if err := bp.CompleteStream(context.Background(), handle, "Hello"); err != nil {
+		t.Fatalf("CompleteStream: %v", err)
+	}
+	msg = readMsg(t, conn)
+	if msg["type"] != "reply_stream" || msg["done"] != true {
+		t.Fatalf("done frame=%v", msg)
+	}
+	if msg["reply_ctx"] != "cmsg-abc" {
+		t.Fatalf("done reply_ctx=%v", msg["reply_ctx"])
+	}
+}
+
+func TestBridge_LlmTaskKeepsCoarseUpdateMessage(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "preview", "token_stream", "update_message"})
+
+	bp := bs.NewPlatform("proj")
+	rc := newBridgeReplyCtx(bs.getAdapter("java-backend"), "java-backend:tn:1", "llm-task-1")
+	if rc.tokenStream {
+		t.Fatal("llm- reply_ctx must NOT enable tokenStream (keep coarse LLM Task path)")
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		msg := readMsg(t, conn)
+		if msg["type"] != "preview_start" {
+			errCh <- fmt.Errorf("expected preview_start, got %v", msg["type"])
+			return
+		}
+		refID, _ := msg["ref_id"].(string)
+		if err := conn.WriteJSON(map[string]any{
+			"type":           "preview_ack",
+			"ref_id":         refID,
+			"preview_handle": "ph-llm-1",
+		}); err != nil {
+			errCh <- err
+			return
+		}
+		errCh <- nil
+	}()
+
+	handle, err := bp.SendPreviewStart(context.Background(), rc, "Hi")
+	if err != nil {
+		t.Fatalf("SendPreviewStart: %v", err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	h, ok := handle.(*bridgeReplyCtx)
+	if !ok || h.PreviewHandle != "ph-llm-1" {
+		t.Fatalf("handle=%#v", handle)
+	}
+	if h.ReplyCtx != "llm-task-1" {
+		t.Fatalf("ReplyCtx overwritten: %q", h.ReplyCtx)
+	}
+
+	if err := bp.UpdateMessage(context.Background(), handle, "Hi there"); err != nil {
+		t.Fatalf("UpdateMessage: %v", err)
+	}
+	msg := readMsg(t, conn)
+	if msg["type"] != "update_message" {
+		t.Fatalf("LLM Task update type=%v want update_message (coarse)", msg["type"])
+	}
+	if msg["reply_ctx"] != "llm-task-1" {
+		t.Fatalf("reply_ctx=%v", msg["reply_ctx"])
+	}
+	if msg["content"] != "Hi there" {
+		t.Fatalf("content=%v", msg["content"])
+	}
+
+	if err := bp.CompleteStream(context.Background(), handle, "Hi there"); err != nil {
+		t.Fatalf("CompleteStream: %v", err)
+	}
+	msg = readMsg(t, conn)
+	if msg["type"] != "reply_stream" || msg["done"] != true {
+		t.Fatalf("done frame=%v", msg)
+	}
+}
+
+func TestBridge_ReplyCtxStreamPreviewOverrides(t *testing.T) {
+	rc := &bridgeReplyCtx{tokenStream: true}
+	interval, minDelta, ok := rc.StreamPreviewOverrides()
+	if !ok || interval != 50 || minDelta != 1 {
+		t.Fatalf("overrides=%d,%d,%v", interval, minDelta, ok)
+	}
+	rc2 := &bridgeReplyCtx{}
+	if _, _, ok := rc2.StreamPreviewOverrides(); ok {
+		t.Fatal("expected no overrides without token_stream")
+	}
+}
+
+func TestParseBridgeStatusFooter(t *testing.T) {
+	got := parseBridgeStatusFooter("[ctx: ~6%] · deepseek-v4-flash · medium · ~/workspaces/user-6")
+	if got["context"] != "[ctx: ~6%]" {
+		t.Fatalf("context=%v", got["context"])
+	}
+	if got["context_pct"] != 6 {
+		t.Fatalf("context_pct=%v", got["context_pct"])
+	}
+	if got["model"] != "deepseek-v4-flash" {
+		t.Fatalf("model=%v", got["model"])
+	}
+	if got["effort"] != "medium" {
+		t.Fatalf("effort=%v", got["effort"])
+	}
+	if got["workdir"] != "~/workspaces/user-6" {
+		t.Fatalf("workdir=%v", got["workdir"])
+	}
+}
+
+func TestBridge_StatusFooterStructuredNotInlined(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "preview", "token_stream", "update_message"})
+
+	bp := bs.NewPlatform("proj")
+	rc := newBridgeReplyCtx(bs.getAdapter("java-backend"), "java-backend:tn:1:project:p1", "cmsg-status")
+	handle, err := bp.SendPreviewStart(context.Background(), rc, "Hello")
+	if err != nil {
+		t.Fatalf("SendPreviewStart: %v", err)
+	}
+	_ = readMsg(t, conn) // first reply_stream
+
+	footer := "[ctx: ~6%] · deepseek-v4-flash · medium · ~/workspaces/user-6"
+	if err := bp.UpdateMessageWithStatusFooter(context.Background(), handle, "Hello", footer); err != nil {
+		t.Fatalf("UpdateMessageWithStatusFooter: %v", err)
+	}
+	msg := readMsg(t, conn)
+	if msg["type"] != "reply_stream" {
+		t.Fatalf("type=%v", msg["type"])
+	}
+	if strings.Contains(fmt.Sprint(msg["full_text"]), "ctx:") {
+		t.Fatalf("footer leaked into full_text: %v", msg["full_text"])
+	}
+
+	if err := bp.CompleteStream(context.Background(), handle, "Hello"); err != nil {
+		t.Fatalf("CompleteStream: %v", err)
+	}
+	msg = readMsg(t, conn)
+	if msg["done"] != true {
+		t.Fatalf("done frame=%v", msg)
+	}
+	status, ok := msg["status"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing status: %v", msg)
+	}
+	if status["model"] != "deepseek-v4-flash" {
+		t.Fatalf("status.model=%v", status["model"])
+	}
+	if status["context"] != "[ctx: ~6%]" {
+		t.Fatalf("status.context=%v", status["context"])
+	}
+}
+
+func TestBridge_SessionNameInStatus(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "preview", "token_stream", "update_message"})
+
+	bp := bs.NewPlatform("proj")
+	rc := newBridgeReplyCtx(bs.getAdapter("java-backend"), "java-backend:tn:1:project:p1", "cmsg-sn")
+	rc.SetSessionName("Greeting & product ideas")
+	handle, err := bp.SendPreviewStart(context.Background(), rc, "Hi")
+	if err != nil {
+		t.Fatalf("SendPreviewStart: %v", err)
+	}
+	_ = readMsg(t, conn)
+
+	footer := "[ctx: ~6%] · deepseek-v4-flash · medium · ~/workspaces/user-6"
+	if err := bp.UpdateMessageWithStatusFooter(context.Background(), handle, "Hi", footer); err != nil {
+		t.Fatalf("UpdateMessageWithStatusFooter: %v", err)
+	}
+	_ = readMsg(t, conn)
+
+	if err := bp.CompleteStream(context.Background(), handle, "Hi"); err != nil {
+		t.Fatalf("CompleteStream: %v", err)
+	}
+	msg := readMsg(t, conn)
+	status, ok := msg["status"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing status: %v", msg)
+	}
+	if status["session_name"] != "Greeting & product ideas" {
+		t.Fatalf("session_name=%v", status["session_name"])
+	}
+	if status["effort"] != "medium" {
+		t.Fatalf("effort=%v", status["effort"])
 	}
 }
