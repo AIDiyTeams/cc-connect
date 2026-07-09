@@ -357,6 +357,14 @@ type interactiveState struct {
 	lastAutoCompressAt     time.Time
 	lastAutoCompressTokens int
 
+	// Turn-end media harvest: snapshot workspace images at turn start, then
+	// SendImage any new/changed files after the text reply — without relying
+	// on the agent calling `cc-connect send --image`.
+	mediaSnapshotBefore mediaFileSnapshot
+	// mediaSentThisTurn keys are mediaHarvestKey(fileName, size) for images
+	// already delivered via side-channel send (dedupe vs harvest).
+	mediaSentThisTurn map[string]bool
+
 	// Unsolicited event reader: a background goroutine that consumes agent
 	// events between user-initiated turns (e.g. background task completions).
 	// Cancel unsolicitedCancel to stop the reader; wait on unsolicitedDone
@@ -3542,7 +3550,14 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.currentMessageID = msg.MessageID
 	state.fromVoice = msg.FromVoice
 	state.sideText = ""
+	harvestDir := state.workspaceDir
 	state.mu.Unlock()
+	if harvestDir == "" {
+		if wd, ok := agent.(interface{ GetWorkDir() string }); ok {
+			harvestDir = strings.TrimSpace(wd.GetWorkDir())
+		}
+	}
+	e.beginMediaHarvest(state, harvestDir)
 
 	// Run Send concurrently with processInteractiveEvents. Some agents block inside
 	// Send until the prompt turn finishes (e.g. ACP session/prompt); they may emit
@@ -5392,6 +5407,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
 			}
 
+			// Auto-deliver workspace images created/changed this turn (Studio etc.).
+			// Independent of agent calling `cc-connect send --image`.
+			if !isSilent {
+				e.harvestAndSendTurnMedia(state, p, replyCtx)
+			}
+
 			// TTS: async voice reply if enabled (skipped for silent replies)
 			if !isSilent && e.tts != nil && e.tts.Enabled && e.tts.TTS != nil {
 				state.mu.Lock()
@@ -5502,6 +5523,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				turnStart = time.Now()
 				firstEventLogged = false
 				waitStart = time.Now()
+				// Snapshot workspace images for the queued turn's harvest.
+				queuedHarvestDir := workspaceDir
+				if queuedHarvestDir == "" {
+					state.mu.Lock()
+					queuedHarvestDir = state.workspaceDir
+					state.mu.Unlock()
+				}
+				e.beginMediaHarvest(state, queuedHarvestDir)
 				// Reassign the local replyCtx parameter to the queued message's
 				// trigger context. state.replyCtx was updated above, but the
 				// function-scope replyCtx is what gets passed to p.Send / p.Reply
@@ -10465,6 +10494,7 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 		if err := imageSender.SendImage(e.ctx, replyCtx, img); err != nil {
 			return err
 		}
+		e.noteMediaSent(state, img)
 	}
 	for _, file := range files {
 		if err := e.waitOutgoing(p); err != nil {
@@ -10475,6 +10505,78 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 		}
 	}
 	return nil
+}
+
+// beginMediaHarvest records a workspace image snapshot at turn start.
+func (e *Engine) beginMediaHarvest(state *interactiveState, workDir string) {
+	if state == nil {
+		return
+	}
+	snap := snapshotMediaFiles(workDir)
+	state.mu.Lock()
+	state.mediaSnapshotBefore = snap
+	state.mediaSentThisTurn = make(map[string]bool)
+	state.mu.Unlock()
+}
+
+// noteMediaSent records an image already delivered via side-channel send so
+// turn-end harvest can skip the same file.
+func (e *Engine) noteMediaSent(state *interactiveState, img ImageAttachment) {
+	if state == nil || len(img.Data) == 0 {
+		return
+	}
+	key := mediaHarvestKey(img.FileName, int64(len(img.Data)))
+	state.mu.Lock()
+	if state.mediaSentThisTurn == nil {
+		state.mediaSentThisTurn = make(map[string]bool)
+	}
+	state.mediaSentThisTurn[key] = true
+	state.mu.Unlock()
+}
+
+// harvestAndSendTurnMedia diffs the workspace against the turn-start snapshot
+// and SendImage any new/changed images the agent wrote but did not side-send.
+func (e *Engine) harvestAndSendTurnMedia(state *interactiveState, p Platform, replyCtx any) {
+	if state == nil || !e.attachmentSendEnabled {
+		return
+	}
+	imageSender, ok := p.(ImageSender)
+	if !ok {
+		return
+	}
+	state.mu.Lock()
+	before := state.mediaSnapshotBefore
+	already := state.mediaSentThisTurn
+	workDir := state.workspaceDir
+	state.mediaSnapshotBefore = nil
+	state.mu.Unlock()
+	if workDir == "" {
+		return
+	}
+	after := snapshotMediaFiles(workDir)
+	changed := diffNewOrChangedMedia(before, after)
+	images := loadHarvestImages(workDir, changed, already)
+	if len(images) == 0 {
+		return
+	}
+	slog.Info("media harvest: delivering workspace images",
+		"workdir", workDir,
+		"count", len(images),
+	)
+	for _, img := range images {
+		if err := e.waitOutgoing(p); err != nil {
+			slog.Warn("media harvest: waitOutgoing failed", "error", err)
+			return
+		}
+		if err := imageSender.SendImage(e.ctx, replyCtx, img); err != nil {
+			slog.Warn("media harvest: SendImage failed",
+				"file", img.FileName,
+				"error", err,
+			)
+			continue
+		}
+		e.noteMediaSent(state, img)
+	}
 }
 
 // SendTTSToSession synthesizes and sends a voice message to an active session.
