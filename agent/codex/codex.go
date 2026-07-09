@@ -38,13 +38,14 @@ type Agent struct {
 	backend         string // "exec" | "app_server"
 	appServerURL    string
 	codexHome       string
-	cliBin          string   // CLI binary name, default "codex"
-	cliExtraArgs    []string // extra args parsed from cli_path after the binary
-	providers       []core.ProviderConfig
-	activeIdx       int // -1 = no provider set
-	configEnv       []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
-	sessionEnv      []string
-	mu              sync.RWMutex
+	cliBin               string   // CLI binary name, default "codex"
+	cliExtraArgs         []string // extra args parsed from cli_path after the binary
+	sessionWorkspaceBase string
+	providers            []core.ProviderConfig
+	activeIdx            int      // -1 = no provider set
+	configEnv            []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
+	sessionEnv           []string
+	mu                   sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -58,14 +59,20 @@ func New(opts map[string]any) (core.Agent, error) {
 	backend, _ := opts["backend"].(string)
 	appServerURL, _ := opts["app_server_url"].(string)
 	codexHome, _ := opts["codex_home"].(string)
+	sessionWorkspaceBase, _ := opts["session_workspace_base"].(string)
 	mode = normalizeMode(mode)
 	backend = normalizeBackend(backend)
 	appServerURL = normalizeAppServerURL(appServerURL)
 
-	// cli_path allows overriding the binary, e.g. "omx" or "omx --flag val"
+	// cli_path allows overriding the binary, e.g. "omx" or "omx --flag val".
+	// binary_path is accepted as an alias (Tomako production config uses it).
 	cliBin := "codex"
 	var cliExtraArgs []string
-	if cliPath, _ := opts["cli_path"].(string); strings.TrimSpace(cliPath) != "" {
+	cliPath, _ := opts["cli_path"].(string)
+	if strings.TrimSpace(cliPath) == "" {
+		cliPath, _ = opts["binary_path"].(string)
+	}
+	if strings.TrimSpace(cliPath) != "" {
 		parts := strings.Fields(cliPath)
 		cliBin = parts[0]
 		if len(parts) > 1 {
@@ -95,17 +102,18 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
-		workDir:         workDir,
-		model:           model,
-		reasoningEffort: normalizeReasoningEffort(reasoningEffort),
-		mode:            mode,
-		backend:         backend,
-		appServerURL:    appServerURL,
-		codexHome:       strings.TrimSpace(codexHome),
-		cliBin:          cliBin,
-		cliExtraArgs:    cliExtraArgs,
-		configEnv:       configEnv,
-		activeIdx:       -1,
+		workDir:              workDir,
+		model:                model,
+		reasoningEffort:      normalizeReasoningEffort(reasoningEffort),
+		mode:                 mode,
+		backend:              backend,
+		appServerURL:         appServerURL,
+		codexHome:            strings.TrimSpace(codexHome),
+		cliBin:               cliBin,
+		cliExtraArgs:         cliExtraArgs,
+		sessionWorkspaceBase: strings.TrimSpace(sessionWorkspaceBase),
+		configEnv:            configEnv,
+		activeIdx:            -1,
 	}, nil
 }
 
@@ -135,7 +143,7 @@ func normalizeMode(raw string) string {
 		return "auto-edit"
 	case "full-auto", "fullauto", "full_auto", "auto":
 		return "full-auto"
-	case "yolo", "bypass", "dangerously-bypass":
+	case "yolo", "bypass", "dangerously-bypass", "bypasspermissions", "bypass-permissions", "bypass_permissions":
 		return "yolo"
 	default:
 		return "suggest"
@@ -368,6 +376,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	cliBin := a.cliBin
 	cliExtraArgs := a.cliExtraArgs
 	workDir := a.workDir
+	sessionWorkspaceBase := a.sessionWorkspaceBase
 	// Order matters for MergeEnv override semantics (later wins):
 	//   1. configEnv — static env from [projects.agent.options.env]
 	//   2. providerEnv — per-provider keys (OPENAI_API_KEY etc.)
@@ -384,6 +393,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	provName, provAPIKey, provWireAPI, provHeaders := a.activeProviderCodexConfig()
 	a.mu.Unlock()
+	workDir = resolveSessionWorkDir(workDir, sessionWorkspaceBase, envValue(extraEnv, "CC_SESSION_KEY"))
 
 	if provName != "" {
 		if err := ensureCodexProviderConfig(codexHome, provName, baseURL, provWireAPI, provHeaders); err != nil {
@@ -465,6 +475,18 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.codexHome != "" {
 		opts["codex_home"] = a.codexHome
+	}
+	if a.cliBin != "" && a.cliBin != "codex" {
+		cliPath := a.cliBin
+		if len(a.cliExtraArgs) > 0 {
+			cliPath = cliPath + " " + strings.Join(a.cliExtraArgs, " ")
+		}
+		opts["cli_path"] = cliPath
+	} else if len(a.cliExtraArgs) > 0 {
+		opts["cli_path"] = "codex " + strings.Join(a.cliExtraArgs, " ")
+	}
+	if a.sessionWorkspaceBase != "" {
+		opts["session_workspace_base"] = a.sessionWorkspaceBase
 	}
 	return opts
 }
