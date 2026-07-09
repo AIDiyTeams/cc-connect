@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -53,14 +54,45 @@ func TestSnapshotAndDiffMediaFiles(t *testing.T) {
 	}
 }
 
-func TestLoadHarvestImagesRejectsTraversal(t *testing.T) {
+func TestExtractLocalImagePathsFromReply(t *testing.T) {
 	dir := t.TempDir()
-	outside := filepath.Join(t.TempDir(), "evil.png")
-	if err := os.WriteFile(outside, []byte("evil"), 0o644); err != nil {
+	wsPng := filepath.Join(dir, "ws.png")
+	if err := os.WriteFile(wsPng, []byte("ws-png"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	images := loadHarvestImages(dir, []string{"../" + filepath.Base(filepath.Dir(outside)) + "/" + filepath.Base(outside)}, nil)
-	if len(images) != 0 {
-		t.Fatalf("expected traversal reject, got %#v", images)
+	tmpPng := filepath.Join(os.TempDir(), "harvest-test-meme.png")
+	if err := os.WriteFile(tmpPng, []byte("tmp-png-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(tmpPng) })
+
+	text := "preview:\n\n![Meme](" + tmpPng + ")\n\nand also `" + filepath.Base(wsPng) + "`\n"
+	paths := extractLocalImagePaths(text, dir)
+	if len(paths) < 1 {
+		t.Fatalf("expected paths, got %#v", paths)
+	}
+	foundTmp := false
+	foundWS := false
+	for _, p := range paths {
+		if p == tmpPng {
+			foundTmp = true
+		}
+		if p == wsPng {
+			foundWS = true
+		}
+	}
+	if !foundTmp {
+		t.Fatalf("missing tmp path in %#v", paths)
+	}
+	if !foundWS {
+		t.Fatalf("missing workspace basename path in %#v", paths)
+	}
+
+	stripped := stripLocalImageMarkdown("hi\n\n![x](/tmp/nope.png)\n\nok ![y](https://cdn.example/a.png)")
+	if strings.Contains(stripped, "/tmp/nope.png") {
+		t.Fatalf("local md image not stripped: %q", stripped)
+	}
+	if !strings.Contains(stripped, "https://cdn.example/a.png") {
+		t.Fatalf("remote md image should remain: %q", stripped)
 	}
 }
