@@ -193,7 +193,7 @@ var (
 	// ![alt](/abs/or/rel/path.png) — agents often write /tmp/... which browsers 404.
 	mdLocalImageRe = regexp.MustCompile(`!\[[^\]]*\]\(([^)\s]+)\)`)
 	// `foo.png` or `/tmp/foo.png` in backticks
-	backtickImageRe = regexp.MustCompile("`([^`\\n]+\\.(?i:png|jpe?g|webp|gif))`")
+	backtickImageRe = regexp.MustCompile("`([^`\\n]+\\.(?:[Pp][Nn][Gg]|[Jj][Pp][Ee]?[Gg]|[Ww][Ee][Bb][Pp]|[Gg][Ii][Ff]))`")
 )
 
 // extractLocalImagePaths finds filesystem image paths mentioned in assistant text.
