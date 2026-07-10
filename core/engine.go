@@ -627,6 +627,10 @@ func (e *Engine) ResolveMemoryWorkDir(sessionKey string) (string, error) {
 			slog.Info("user workspace initialized for memory write", "workspace", workspace)
 		} else if err != nil {
 			return "", fmt.Errorf("stat memory workspace: %w", err)
+		} else if shared := findSharedSkillsDir(e.baseDir); shared != "" {
+			if err := linkSharedPlatformFacts(workspace, shared); err != nil {
+				slog.Warn("refresh platform-facts links failed", "workspace", workspace, "err", err)
+			}
 		}
 		return workspace, nil
 	}
@@ -3612,6 +3616,13 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 			return nil, nil, fmt.Errorf("workspace init failed: %w", err)
 		}
 		slog.Info("user workspace initialized", "workspace", workspace)
+	} else if err == nil {
+		// Existing workspaces: refresh platform-facts symlinks (idempotent forward-only).
+		if shared := findSharedSkillsDir(e.baseDir); shared != "" {
+			if err := linkSharedPlatformFacts(workspace, shared); err != nil {
+				slog.Warn("refresh platform-facts links failed", "workspace", workspace, "err", err)
+			}
+		}
 	}
 
 	// Create a new agent instance with this workspace's work_dir
@@ -15810,6 +15821,12 @@ func initUserWorkspace(workspace, baseDir string) error {
 	if sharedSkills == "" {
 		slog.Warn("shared Skills-OL directory not found, workspace will have no skill symlinks", "baseDir", baseDir)
 		return nil
+	}
+
+	// Forward-only: symlink Skills-OL/platform-facts (AGENTS.md + platform-*.md).
+	// Product copy lives in Skills-OL; cc-connect does not embed business text.
+	if err := linkSharedPlatformFacts(workspace, sharedSkills); err != nil {
+		slog.Warn("link shared platform-facts failed", "workspace", workspace, "err", err)
 	}
 
 	// Symlink shared skill files/dirs into the user workspace
