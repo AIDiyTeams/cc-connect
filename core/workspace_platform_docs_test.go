@@ -8,7 +8,7 @@ import (
 
 func TestLinkSharedPlatformFacts(t *testing.T) {
 	shared := t.TempDir()
-	factsDir := filepath.Join(shared, sharedPlatformFactsDirName)
+	factsDir := filepath.Join(shared, "platform-facts")
 	if err := os.MkdirAll(factsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +26,8 @@ func TestLinkSharedPlatformFacts(t *testing.T) {
 	}
 
 	ws := t.TempDir()
-	if err := linkSharedPlatformFacts(ws, shared); err != nil {
+	docs := WorkspaceShareOptions{}.Normalize().PlatformDocs
+	if err := linkSharedPlatformFacts(ws, shared, docs); err != nil {
 		t.Fatal(err)
 	}
 
@@ -43,7 +44,7 @@ func TestLinkSharedPlatformFacts(t *testing.T) {
 		t.Fatalf("unexpected AGENTS.md target %q", target)
 	}
 
-	factLink := filepath.Join(ws, filepath.FromSlash(workspacePlatformFactsRel), "platform-image-generation.md")
+	factLink := filepath.Join(ws, filepath.FromSlash(docs.TargetRel), "platform-image-generation.md")
 	fi, err = os.Lstat(factLink)
 	if err != nil {
 		t.Fatal(err)
@@ -52,35 +53,59 @@ func TestLinkSharedPlatformFacts(t *testing.T) {
 		t.Fatal("platform fact should be a symlink")
 	}
 
-	// README / non-platform-*.md must not be linked into facts/
-	if _, err := os.Lstat(filepath.Join(ws, filepath.FromSlash(workspacePlatformFactsRel), "README.md")); !os.IsNotExist(err) {
+	if _, err := os.Lstat(filepath.Join(ws, filepath.FromSlash(docs.TargetRel), "README.md")); !os.IsNotExist(err) {
 		t.Fatal("README.md must not be linked into user facts")
 	}
-	if _, err := os.Lstat(filepath.Join(ws, filepath.FromSlash(workspacePlatformFactsRel), "notes.md")); !os.IsNotExist(err) {
+	if _, err := os.Lstat(filepath.Join(ws, filepath.FromSlash(docs.TargetRel), "notes.md")); !os.IsNotExist(err) {
 		t.Fatal("non-platform md must not be linked")
 	}
 
-	// Idempotent
-	if err := linkSharedPlatformFacts(ws, shared); err != nil {
+	if err := linkSharedPlatformFacts(ws, shared, docs); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLinkSharedPlatformFactsCustomPaths(t *testing.T) {
+	shared := t.TempDir()
+	src := filepath.Join(shared, "agent-docs")
+	_ = os.MkdirAll(src, 0o755)
+	_ = os.WriteFile(filepath.Join(src, "RULES.md"), []byte("# Rules\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(src, "factory-schedule.md"), []byte("# Sched\n"), 0o644)
+
+	ws := t.TempDir()
+	docs := PlatformDocsOptions{
+		SourceSubdir: "agent-docs",
+		AgentsFile:   "RULES.md",
+		FilePrefix:   "factory-",
+		TargetRel:    ".agent/facts",
+	}
+	if err := linkSharedPlatformFacts(ws, shared, docs); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(filepath.Join(ws, "RULES.md")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("RULES.md symlink missing: %v", err)
+	}
+	if fi, err := os.Lstat(filepath.Join(ws, ".agent/facts/factory-schedule.md")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("factory fact symlink missing: %v", err)
 	}
 }
 
 func TestLinkSharedPlatformFactsReplacesWrongLink(t *testing.T) {
 	shared := t.TempDir()
-	factsDir := filepath.Join(shared, sharedPlatformFactsDirName)
+	factsDir := filepath.Join(shared, "platform-facts")
 	_ = os.MkdirAll(factsDir, 0o755)
 	_ = os.WriteFile(filepath.Join(factsDir, "platform-image-generation.md"), []byte("v2\n"), 0o644)
 
 	ws := t.TempDir()
-	dstDir := filepath.Join(ws, filepath.FromSlash(workspacePlatformFactsRel))
+	docs := WorkspaceShareOptions{}.Normalize().PlatformDocs
+	dstDir := filepath.Join(ws, filepath.FromSlash(docs.TargetRel))
 	_ = os.MkdirAll(dstDir, 0o755)
 	wrong := filepath.Join(ws, "wrong.md")
 	_ = os.WriteFile(wrong, []byte("old\n"), 0o644)
 	dst := filepath.Join(dstDir, "platform-image-generation.md")
 	_ = os.Symlink(wrong, dst)
 
-	if err := linkSharedPlatformFacts(ws, shared); err != nil {
+	if err := linkSharedPlatformFacts(ws, shared, docs); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.Readlink(dst)
@@ -102,7 +127,7 @@ func TestLinkSharedPlatformFactsReplacesWrongLink(t *testing.T) {
 func TestInitUserWorkspaceLinksPlatformFacts(t *testing.T) {
 	home := t.TempDir()
 	skills := filepath.Join(home, "Skills-OL")
-	factsDir := filepath.Join(skills, sharedPlatformFactsDirName)
+	factsDir := filepath.Join(skills, "platform-facts")
 	_ = os.MkdirAll(factsDir, 0o755)
 	_ = os.WriteFile(filepath.Join(factsDir, "AGENTS.md"), []byte("# A\n"), 0o644)
 	_ = os.WriteFile(filepath.Join(factsDir, "platform-image-generation.md"), []byte("# F\n"), 0o644)
@@ -111,19 +136,22 @@ func TestInitUserWorkspaceLinksPlatformFacts(t *testing.T) {
 	base := filepath.Join(home, "workspaces")
 	_ = os.MkdirAll(base, 0o755)
 	ws := filepath.Join(base, "user-9")
-	if err := initUserWorkspace(ws, base); err != nil {
+	e := &Engine{baseDir: base, workspaceShare: WorkspaceShareOptions{}.Normalize()}
+	if err := e.initUserWorkspace(ws); err != nil {
 		t.Fatal(err)
 	}
 	if fi, err := os.Lstat(filepath.Join(ws, "AGENTS.md")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("AGENTS.md symlink missing: %v", err)
 	}
-	fact := filepath.Join(ws, filepath.FromSlash(workspacePlatformFactsRel), "platform-image-generation.md")
+	docs := e.workspaceShare.PlatformDocs
+	fact := filepath.Join(ws, filepath.FromSlash(docs.TargetRel), "platform-image-generation.md")
 	if fi, err := os.Lstat(fact); err != nil || fi.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("platform fact symlink missing: %v", err)
 	}
 }
 
 func TestIsSharedPlatformFactFile(t *testing.T) {
+	docs := WorkspaceShareOptions{}.Normalize().PlatformDocs
 	cases := map[string]bool{
 		"platform-image-generation.md": true,
 		"platform-foo.MD":              true,
@@ -134,7 +162,7 @@ func TestIsSharedPlatformFactFile(t *testing.T) {
 		"platform-foo.txt":             false,
 	}
 	for name, want := range cases {
-		if got := isSharedPlatformFactFile(name); got != want {
+		if got := isSharedPlatformFactFile(name, docs); got != want {
 			t.Errorf("%s: got %v want %v", name, got, want)
 		}
 	}

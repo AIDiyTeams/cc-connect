@@ -12,7 +12,8 @@ type AgentMemoryFact struct {
 // extension area for the session identified by SessionKey.
 //
 // WorkDir, when set by the engine/management layer, is the authoritative
-// Codex cwd for this write. In Tomako multi-workspace deployments this is
+// Codex cwd for this write. In multi-workspace deployments this is
+// typically {base_dir}/{user_dir_prefix}{userId} (default user-{id}).
 // {base_dir}/user-{userId}, matching the interactive session workspace.
 // Agents must prefer WorkDir over deriving a path from SessionKey alone.
 type AgentMemoryWriteRequest struct {

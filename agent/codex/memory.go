@@ -15,6 +15,9 @@ func (a *Agent) WriteMemoryFacts(_ context.Context, req core.AgentMemoryWriteReq
 	a.mu.RLock()
 	globalWorkDir := a.workDir
 	sessionWorkspaceBase := a.sessionWorkspaceBase
+	extension := a.memoryExtension
+	factTitle := a.memoryFactTitle
+	instructions := a.memoryInstructions
 	a.mu.RUnlock()
 
 	// Prefer engine-resolved WorkDir (multi-workspace: {base_dir}/user-{id}).
@@ -28,12 +31,13 @@ func (a *Agent) WriteMemoryFacts(_ context.Context, req core.AgentMemoryWriteReq
 		return nil, fmt.Errorf("codex memory: work_dir is empty")
 	}
 
-	tomakoDir := filepath.Join(workDir, ".codex", "memories", "extensions", "tomako")
-	factsDir := filepath.Join(tomakoDir, "facts")
+	extension = firstNonBlank(extension, "tomako")
+	extDir := filepath.Join(workDir, ".codex", "memories", "extensions", extension)
+	factsDir := filepath.Join(extDir, "facts")
 	if err := os.MkdirAll(factsDir, 0o755); err != nil {
 		return nil, fmt.Errorf("codex memory: create facts dir: %w", err)
 	}
-	if err := ensureTomakoMemoryInstructions(tomakoDir); err != nil {
+	if err := ensureMemoryInstructions(extDir, instructions, extension); err != nil {
 		return nil, err
 	}
 
@@ -42,7 +46,7 @@ func (a *Agent) WriteMemoryFacts(_ context.Context, req core.AgentMemoryWriteReq
 	if !strings.HasPrefix(filepath.Clean(target), filepath.Clean(factsDir)+string(os.PathSeparator)) {
 		return nil, fmt.Errorf("codex memory: resolved fact file escaped facts dir")
 	}
-	if err := writeFileAtomic(target, []byte(renderMemoryFacts(req)), 0o644); err != nil {
+	if err := writeFileAtomic(target, []byte(renderMemoryFacts(req, factTitle)), 0o644); err != nil {
 		return nil, fmt.Errorf("codex memory: write fact file: %w", err)
 	}
 	return &core.AgentMemoryWriteResult{File: target}, nil
@@ -93,26 +97,29 @@ func sanitizeSessionKey(raw string) string {
 	return value
 }
 
-func ensureTomakoMemoryInstructions(tomakoDir string) error {
-	if err := os.MkdirAll(tomakoDir, 0o755); err != nil {
-		return fmt.Errorf("codex memory: create tomako dir: %w", err)
+func ensureMemoryInstructions(extDir, customBody, extension string) error {
+	if err := os.MkdirAll(extDir, 0o755); err != nil {
+		return fmt.Errorf("codex memory: create extension dir: %w", err)
 	}
-	path := filepath.Join(tomakoDir, "instructions.md")
+	path := filepath.Join(extDir, "instructions.md")
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("codex memory: stat instructions: %w", err)
 	}
-	content := `# Tomako Platform Facts
+	content := strings.TrimSpace(customBody)
+	if content == "" {
+		content = fmt.Sprintf(`# Platform Facts (%s)
 
-Structured facts from completed LLM Tasks on the Tomako platform.
-
-This is a GTM/product platform. Facts about user preferences, brand
-information, target audience, and business context are HIGH VALUE.
+Structured facts written by the host platform into this Codex memory extension.
 
 Process each fact file and integrate relevant information into MEMORY.md
 and memory_summary.md for future tasks.
-`
+`, firstNonBlank(extension, "default"))
+	}
+	if !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
 	if err := writeFileAtomic(path, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("codex memory: write instructions: %w", err)
 	}
@@ -126,10 +133,10 @@ func memoryFactFileName(title, sourceTaskID string) string {
 	return strings.ToLower(ts + "-" + safeTitle + "-" + safeTask + ".md")
 }
 
-func renderMemoryFacts(req core.AgentMemoryWriteRequest) string {
+func renderMemoryFacts(req core.AgentMemoryWriteRequest, defaultTitle string) string {
 	var b strings.Builder
 	b.WriteString("# ")
-	b.WriteString(firstNonBlank(req.Title, "Tomako Memory Fact"))
+	b.WriteString(firstNonBlank(req.Title, defaultTitle, "Memory Fact"))
 	b.WriteString("\n\n")
 	b.WriteString("- Source task: ")
 	b.WriteString(firstNonBlank(req.SourceTaskID, "unknown"))

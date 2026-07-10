@@ -279,6 +279,7 @@ type Engine struct {
 	baseDir                      string
 	skipGit                      bool
 	workspaceInitAllowLocalPaths bool
+	workspaceShare               WorkspaceShareOptions
 	workspaceBindings            *WorkspaceBindingManager
 	workspacePool                *workspacePool
 	initFlows                    map[string]*workspaceInitFlow // workspace channel key → init state
@@ -598,10 +599,17 @@ const DefaultWorkspaceIdleTimeout = 15 * time.Minute
 func (e *Engine) SetMultiWorkspace(baseDir, bindingStorePath string) {
 	e.multiWorkspace = true
 	e.baseDir = baseDir
+	e.workspaceShare = WorkspaceShareOptions{}.Normalize()
 	e.workspaceBindings = NewWorkspaceBindingManager(bindingStorePath)
 	e.workspacePool = newWorkspacePool(DefaultWorkspaceIdleTimeout)
 	e.initFlows = make(map[string]*workspaceInitFlow)
 	go e.runIdleReaper()
+}
+
+// SetWorkspaceShare configures shared skill-library forwarding for multi-workspace.
+// Must be called after SetMultiWorkspace. Empty fields keep built-in defaults.
+func (e *Engine) SetWorkspaceShare(opts WorkspaceShareOptions) {
+	e.workspaceShare = opts.Normalize()
 }
 
 // ResolveMemoryWorkDir returns the Codex cwd that memory fact writes must use
@@ -619,18 +627,16 @@ func (e *Engine) ResolveMemoryWorkDir(sessionKey string) (string, error) {
 		if userID == "" || userID == "unknown" {
 			return "", fmt.Errorf("session_key %q has no usable user id for per-user workspace", sessionKey)
 		}
-		workspace := normalizeWorkspacePath(filepath.Join(e.baseDir, "user-"+userID))
+		workspace := normalizeWorkspacePath(filepath.Join(e.baseDir, e.userWorkspaceDirName(userID)))
 		if _, err := os.Stat(workspace); os.IsNotExist(err) {
-			if err := initUserWorkspace(workspace, e.baseDir); err != nil {
+			if err := e.initUserWorkspace(workspace); err != nil {
 				return "", fmt.Errorf("init memory workspace: %w", err)
 			}
 			slog.Info("user workspace initialized for memory write", "workspace", workspace)
 		} else if err != nil {
 			return "", fmt.Errorf("stat memory workspace: %w", err)
-		} else if shared := findSharedSkillsDir(e.baseDir); shared != "" {
-			if err := linkSharedPlatformFacts(workspace, shared); err != nil {
-				slog.Warn("refresh platform-facts links failed", "workspace", workspace, "err", err)
-			}
+		} else {
+			e.refreshWorkspaceShareLinks(workspace)
 		}
 		return workspace, nil
 	}
@@ -2662,10 +2668,11 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	var wsSessions *SessionManager
 	var resolvedWorkspace string
 	if e.multiWorkspace {
-		// Per-user workspace: use "user-{UserID}" as the workspace identifier
+		// Per-user workspace: use "{prefix}{UserID}" as the workspace identifier
 		// instead of channel-based binding, so each user gets an isolated directory.
-		channelID := "user-" + msg.UserID
-		if channelID == "user-" {
+		prefix := e.userDirPrefix()
+		channelID := prefix + msg.UserID
+		if channelID == prefix {
 			channelID = effectiveChannelID(msg) // fallback for missing UserID
 		}
 		channelKey := effectiveWorkspaceChannelKey(msg)
@@ -2676,7 +2683,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			return
 		}
 		// Auto-create workspace for per-user bindings (bridge has no ChannelNameResolver)
-		if workspace == "" && strings.HasPrefix(channelID, "user-") {
+		if workspace == "" && strings.HasPrefix(channelID, prefix) {
 			candidate := filepath.Join(e.baseDir, channelID)
 			normalized := normalizeWorkspacePath(candidate)
 			projectKey := "project:" + e.name
@@ -3610,19 +3617,15 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 		return ws.agent, ws.sessions, nil
 	}
 
-	// Initialize user workspace if it doesn't exist (symlinks to shared Skills-OL)
+	// Initialize user workspace if it doesn't exist (symlinks to shared skill library)
 	if _, err := os.Stat(workspace); os.IsNotExist(err) {
-		if err := initUserWorkspace(workspace, e.baseDir); err != nil {
+		if err := e.initUserWorkspace(workspace); err != nil {
 			return nil, nil, fmt.Errorf("workspace init failed: %w", err)
 		}
 		slog.Info("user workspace initialized", "workspace", workspace)
 	} else if err == nil {
-		// Existing workspaces: refresh platform-facts symlinks (idempotent forward-only).
-		if shared := findSharedSkillsDir(e.baseDir); shared != "" {
-			if err := linkSharedPlatformFacts(workspace, shared); err != nil {
-				slog.Warn("refresh platform-facts links failed", "workspace", workspace, "err", err)
-			}
-		}
+		// Existing workspaces: refresh platform-docs symlinks (idempotent forward-only).
+		e.refreshWorkspaceShareLinks(workspace)
 	}
 
 	// Create a new agent instance with this workspace's work_dir
@@ -15798,53 +15801,65 @@ func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string,
 	return "", channelName, nil
 }
 
-// initUserWorkspace creates a per-user workspace with symlinks to shared Skills-OL.
-// User-private directories (outputs/, .codex/) are created as real directories.
-// Skill files (*.mjs, skills/, node_modules/, package.json) are symlinked from
-// the shared Skills-OL directory, so a single `git pull` updates all users.
-func initUserWorkspace(workspace, baseDir string) error {
+// initUserWorkspace creates a per-user workspace with symlinks to a shared skill library.
+// User-private directories are created as real directories; shared items are symlinked so a
+// single library update reaches all users. Layout is driven by WorkspaceShareOptions.
+func (e *Engine) initUserWorkspace(workspace string) error {
+	share := e.workspaceShare.Normalize()
 	if err := os.MkdirAll(workspace, 0755); err != nil {
 		return fmt.Errorf("create workspace dir: %w", err)
 	}
 
-	// Create user-private directories
-	privateDirs := []string{"outputs", ".codex"}
-	for _, d := range privateDirs {
-		p := filepath.Join(workspace, d)
+	for _, d := range share.PrivateDirs {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+		p := filepath.Join(workspace, filepath.FromSlash(d))
 		if err := os.MkdirAll(p, 0755); err != nil {
 			return fmt.Errorf("create %s: %w", d, err)
 		}
 	}
 
-	// Resolve shared Skills-OL path (parent of base_dir, or a sibling "Skills-OL")
-	sharedSkills := findSharedSkillsDir(baseDir)
+	sharedSkills := findSharedSkillsDir(e.baseDir, share)
 	if sharedSkills == "" {
-		slog.Warn("shared Skills-OL directory not found, workspace will have no skill symlinks", "baseDir", baseDir)
+		slog.Warn("shared skill library not found, workspace will have no skill symlinks",
+			"baseDir", e.baseDir, "name", share.SharedSkillsName)
 		return nil
 	}
 
-	// Forward-only: symlink Skills-OL/platform-facts (AGENTS.md + platform-*.md).
-	// Product copy lives in Skills-OL; cc-connect does not embed business text.
-	if err := linkSharedPlatformFacts(workspace, sharedSkills); err != nil {
-		slog.Warn("link shared platform-facts failed", "workspace", workspace, "err", err)
+	docs := share.PlatformDocs
+	if err := linkSharedPlatformFacts(workspace, sharedSkills, docs); err != nil {
+		slog.Warn("link shared platform docs failed", "workspace", workspace, "err", err)
 	}
 
-	// Symlink shared skill files/dirs into the user workspace
-	symlinks := []string{"skills", "node_modules", "package.json"}
-	// Also link all *.mjs files
+	symlinks := append([]string(nil), share.SymlinkItems...)
 	entries, err := os.ReadDir(sharedSkills)
 	if err == nil {
 		for _, entry := range entries {
 			name := entry.Name()
-			if entry.Type().IsRegular() && filepath.Ext(name) == ".mjs" {
-				symlinks = append(symlinks, name)
+			if entry.IsDir() {
+				continue
+			}
+			for _, pattern := range share.SymlinkGlobs {
+				pattern = strings.TrimSpace(pattern)
+				if pattern == "" {
+					continue
+				}
+				if ok, _ := filepath.Match(pattern, name); ok {
+					symlinks = append(symlinks, name)
+					break
+				}
 			}
 		}
 	}
 	for _, item := range symlinks {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
 		linkPath := filepath.Join(workspace, item)
 		targetPath := filepath.Join(sharedSkills, item)
-		// Skip if already exists (real file or symlink)
 		if _, err := os.Lstat(linkPath); err == nil {
 			continue
 		}
@@ -15856,33 +15871,70 @@ func initUserWorkspace(workspace, baseDir string) error {
 	return nil
 }
 
-// findSharedSkillsDir locates the shared Skills-OL directory.
-// Checks: 1) env var SKILLS_OL_DIR, 2) ~/Skills-OL, 3) sibling of base_dir
-func findSharedSkillsDir(baseDir string) string {
-	// 1. Environment variable
-	if env := os.Getenv("SKILLS_OL_DIR"); env != "" {
-		if info, err := os.Stat(env); err == nil && info.IsDir() {
-			return env
+func (e *Engine) refreshWorkspaceShareLinks(workspace string) {
+	share := e.workspaceShare.Normalize()
+	shared := findSharedSkillsDir(e.baseDir, share)
+	if shared == "" {
+		return
+	}
+	docs := share.PlatformDocs
+	if err := linkSharedPlatformFacts(workspace, shared, docs); err != nil {
+		slog.Warn("refresh platform docs links failed", "workspace", workspace, "err", err)
+	}
+}
+
+func (e *Engine) userDirPrefix() string {
+	prefix := strings.TrimSpace(e.workspaceShare.UserDirPrefix)
+	if prefix == "" {
+		return "user-"
+	}
+	return prefix
+}
+
+func (e *Engine) userWorkspaceDirName(userID string) string {
+	return e.userDirPrefix() + userID
+}
+
+// findSharedSkillsDir locates the shared skill library.
+// Order: configured SharedSkillsDir → env SharedSkillsEnv → ~/{SharedSkillsName} → sibling of base_dir.
+func findSharedSkillsDir(baseDir string, share WorkspaceShareOptions) string {
+	share = share.Normalize()
+	if dir := strings.TrimSpace(share.SharedSkillsDir); dir != "" {
+		dir = expandHomePath(dir)
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return dir
 		}
 	}
-
-	// 2. ~/Skills-OL (standard location on cc-connect server)
+	if envName := strings.TrimSpace(share.SharedSkillsEnv); envName != "" {
+		if env := os.Getenv(envName); env != "" {
+			if info, err := os.Stat(env); err == nil && info.IsDir() {
+				return env
+			}
+		}
+	}
 	home, err := os.UserHomeDir()
 	if err == nil {
-		candidate := filepath.Join(home, "Skills-OL")
+		candidate := filepath.Join(home, share.SharedSkillsName)
 		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 			return candidate
 		}
 	}
-
-	// 3. Sibling of base_dir
 	parent := filepath.Dir(baseDir)
-	candidate := filepath.Join(parent, "Skills-OL")
+	candidate := filepath.Join(parent, share.SharedSkillsName)
 	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 		return candidate
 	}
-
 	return ""
+}
+
+func expandHomePath(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
 }
 
 // handleWorkspaceInitFlow manages the conversational workspace setup.

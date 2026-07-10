@@ -353,6 +353,12 @@ level = "info" # debug, info, warn, error
 # port = 9810                         # WebSocket listen port (default: 9810) / 监听端口
 # token = "your-bridge-secret"        # Auth token (required) / 认证密钥（必填）
 # path = "/bridge/ws"                 # URL path (default: "/bridge/ws") / URL 路径
+# # Which reply_ctx prefixes use by-token reply_stream (default: ["cmsg-"]).
+# # 哪些 reply_ctx 前缀走逐 token 流式（默认 ["cmsg-"]）。
+# # See config/demos/workspace-share.example.toml for factory / cross-business demos.
+# # 跨业务示例见 config/demos/workspace-share.example.toml。
+# token_stream_reply_prefixes = ["cmsg-"]
+# # token_stream_reply_prefixes = ["chat-", "job-"]  # factory MES example / 工厂示例
 
 # =============================================================================
 # Management API (External Management Tools)
@@ -662,6 +668,25 @@ level = "info" # debug, info, warn, error
 # skip_git = true # skip bind git repo, create a dir directly
 # base_dir = "~/workspace"
 # workspace_init_allow_local_paths = true  # Optional: allow /workspace init <local-dir>; default false keeps init git-URL only
+#
+# # Shared skill library forwarding (optional; defaults = Skills-OL / Tomako layout).
+# # 共享技能库转发（可选；默认兼容 Skills-OL / Tomako 布局）。
+# # Full annotated demos: config/demos/workspace-share.example.toml
+# # 完整注释示例：config/demos/workspace-share.example.toml
+# # [projects.workspace_share]
+# # shared_skills_dir = "/opt/my-skills"     # absolute path to skill library / 技能库绝对路径
+# # shared_skills_env = "SKILLS_OL_DIR"      # env override name / 环境变量名
+# # shared_skills_name = "Skills-OL"         # ~/Name and sibling-of-base_dir lookup
+# # private_dirs = ["outputs", ".codex"]
+# # symlink_items = ["skills", "node_modules", "package.json"]
+# # symlink_globs = ["*.mjs"]                # [] disables glob linking
+# # user_dir_prefix = "user-"                # → base_dir/user-{id}
+# # [projects.workspace_share.platform_docs]
+# # enabled = true
+# # source_subdir = "platform-facts"
+# # agents_file = "AGENTS.md"
+# # file_prefix = "platform-"
+# # target_rel = ".codex/memories/extensions/tomako/facts"
 #
 # [projects.agent]
 # type = "claudecode"
@@ -1449,12 +1474,17 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
-# Optional: route Tomako/cc-connect session keys to per-user Codex workspaces
-# when NOT using multi-workspace mode. Prefer projects.mode = "multi-workspace"
-# + base_dir (production Tomako path: {base_dir}/user-{userId}).
+# Optional: route session keys to per-user Codex workspaces when NOT using
+# multi-workspace mode. Prefer projects.mode = "multi-workspace" + base_dir
+# (path: {base_dir}/{user_dir_prefix}{userId}, default user-{userId}).
 # 可选：非 multi-workspace 时，把 session key 映射到独立用户目录。
-# 生产 Tomako 优先用 mode = "multi-workspace" + base_dir（目录为 user-{userId}）。
-# session_workspace_base = "/path/to/tomako-codex-workspaces"
+# 优先用 mode = "multi-workspace" + base_dir（目录为 user-{userId}，可配置前缀）。
+# session_workspace_base = "/path/to/codex-workspaces"
+# # Memory extension under .codex/memories/extensions/<name>/ (default "tomako")
+# # 记忆扩展名（默认 tomako；工厂等业务可改为 factory-sched）
+# # memory_extension = "tomako"
+# # memory_fact_title = "Memory Fact"
+# # memory_instructions = "# Platform Facts\n..."
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
 #
 # Mode options / 模式说明:

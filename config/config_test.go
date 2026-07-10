@@ -1789,6 +1789,74 @@ token = "test"
 	}
 }
 
+func TestEffectiveWorkspaceShareDefaults(t *testing.T) {
+	got := EffectiveWorkspaceShare(nil)
+	if got.SharedSkillsName != "Skills-OL" || got.SharedSkillsEnv != "SKILLS_OL_DIR" {
+		t.Fatalf("defaults = %+v", got)
+	}
+	if got.UserDirPrefix != "user-" {
+		t.Fatalf("user_dir_prefix = %q", got.UserDirPrefix)
+	}
+	if got.PlatformDocs == nil || got.PlatformDocs.TargetRel != ".codex/memories/extensions/tomako/facts" {
+		t.Fatalf("platform_docs = %+v", got.PlatformDocs)
+	}
+	if got.PlatformDocs.Enabled == nil || !*got.PlatformDocs.Enabled {
+		t.Fatal("platform_docs.enabled should default true")
+	}
+}
+
+func TestEffectiveWorkspaceShareFactoryOverride(t *testing.T) {
+	falseVal := false
+	proj := &ProjectConfig{
+		WorkspaceShare: &WorkspaceShareConfig{
+			SharedSkillsDir:  "/opt/factory-skills",
+			SharedSkillsName: "factory-skills",
+			UserDirPrefix:    "operator-",
+			SymlinkGlobs:     []string{},
+			PlatformDocs: &PlatformDocsConfig{
+				Enabled:      &falseVal,
+				SourceSubdir: "agent-docs",
+				AgentsFile:   "RULES.md",
+				FilePrefix:   "factory-",
+				TargetRel:    ".codex/memories/extensions/factory-sched/facts",
+			},
+		},
+	}
+	got := EffectiveWorkspaceShare(proj)
+	if got.SharedSkillsDir != "/opt/factory-skills" || got.UserDirPrefix != "operator-" {
+		t.Fatalf("got %+v", got)
+	}
+	if len(got.SymlinkGlobs) != 0 {
+		t.Fatalf("empty symlink_globs should stay empty, got %v", got.SymlinkGlobs)
+	}
+	if got.PlatformDocs == nil || *got.PlatformDocs.Enabled {
+		t.Fatal("enabled=false should be preserved")
+	}
+	if got.PlatformDocs.AgentsFile != "RULES.md" || got.PlatformDocs.FilePrefix != "factory-" {
+		t.Fatalf("docs = %+v", got.PlatformDocs)
+	}
+}
+
+func TestEffectiveBridgeTokenStreamPrefixes(t *testing.T) {
+	if got := EffectiveBridgeTokenStreamPrefixes(nil); len(got) != 1 || got[0] != "cmsg-" {
+		t.Fatalf("default = %v", got)
+	}
+	cfg := &Config{Bridge: BridgeConfig{TokenStreamReplyPrefixes: []string{"chat-", " job-"}}}
+	got := EffectiveBridgeTokenStreamPrefixes(cfg)
+	if len(got) != 2 || got[0] != "chat-" || got[1] != "job-" {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestValidateWorkspaceShareRejectsAbsTarget(t *testing.T) {
+	err := validateWorkspaceShare("demo", &WorkspaceShareConfig{
+		PlatformDocs: &PlatformDocsConfig{TargetRel: "/etc/passwd"},
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
 func validProject(name string) ProjectConfig {
 	return ProjectConfig{
 		Name: name,

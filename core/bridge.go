@@ -32,6 +32,10 @@ type BridgeServer struct {
 	insecure    bool // allow running without token (local dev only)
 	server      *http.Server
 
+	// tokenStreamReplyPrefixes selects reply_ctx prefixes that use by-token
+	// reply_stream when the adapter declares token_stream. Empty → ["cmsg-"].
+	tokenStreamReplyPrefixes []string
+
 	mu       sync.RWMutex
 	adapters map[string]*bridgeAdapter // platform name → adapter
 
@@ -212,14 +216,34 @@ func newBridgeServer(port int, token, path string, corsOrigins []string, insecur
 	}
 
 	return &BridgeServer{
-		port:        port,
-		token:       token,
-		path:        path,
-		corsOrigins: corsOrigins,
-		insecure:    insecure,
-		adapters:    make(map[string]*bridgeAdapter),
-		engines:     make(map[string]*bridgeEngineRef),
+		port:                     port,
+		token:                    token,
+		path:                     path,
+		corsOrigins:              corsOrigins,
+		insecure:                 insecure,
+		tokenStreamReplyPrefixes: []string{"cmsg-"},
+		adapters:                 make(map[string]*bridgeAdapter),
+		engines:                  make(map[string]*bridgeEngineRef),
 	}
+}
+
+// SetTokenStreamReplyPrefixes configures which reply_ctx prefixes enable
+// by-token reply_stream. Empty keeps the default ["cmsg-"].
+func (bs *BridgeServer) SetTokenStreamReplyPrefixes(prefixes []string) {
+	if bs == nil {
+		return
+	}
+	cleaned := make([]string, 0, len(prefixes))
+	for _, p := range prefixes {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			cleaned = append(cleaned, p)
+		}
+	}
+	if len(cleaned) == 0 {
+		cleaned = []string{"cmsg-"}
+	}
+	bs.tokenStreamReplyPrefixes = cleaned
 }
 
 // NewPlatform creates a BridgePlatform for a specific project engine.
@@ -511,13 +535,73 @@ func newBridgeReplyCtx(a *bridgeAdapter, sessionKey, replyCtx string) *bridgeRep
 		return rc
 	}
 	rc.Platform = a.platform
-	// Studio chat (cmsg-*) can opt into by-token reply_stream; LLM Task (llm-*)
-	// keeps the coarse preview/update_message path even if the adapter also
-	// declared token_stream.
-	rc.tokenStream = a.capabilities["token_stream"] && strings.HasPrefix(replyCtx, "cmsg-")
+	// Token-stream path is selected by configurable reply_ctx prefixes
+	// (default cmsg- for Tomako Studio). Other backends set bridge.token_stream_reply_prefixes
+	// or adapter metadata token_stream_reply_prefixes.
+	rc.tokenStream = a.capabilities["token_stream"] && bridgeReplyCtxMatchesTokenStream(a, replyCtx)
 	rc.progressStyle = bridgeProgressStyleForAdapter(a)
 	rc.supportsProgressCardPayload = bridgeSupportsProgressCardPayloadForAdapter(a)
 	return rc
+}
+
+func bridgeReplyCtxMatchesTokenStream(a *bridgeAdapter, replyCtx string) bool {
+	prefixes := []string{"cmsg-"}
+	if a != nil && a.server != nil && len(a.server.tokenStreamReplyPrefixes) > 0 {
+		prefixes = a.server.tokenStreamReplyPrefixes
+	}
+	if a != nil {
+		if metaPrefixes := bridgeMetadataStringList(a.metadata, "token_stream_reply_prefixes"); len(metaPrefixes) > 0 {
+			prefixes = metaPrefixes
+		}
+	}
+	for _, prefix := range prefixes {
+		if prefix != "" && strings.HasPrefix(replyCtx, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func bridgeMetadataStringList(metadata map[string]any, key string) []string {
+	if metadata == nil {
+		return nil
+	}
+	raw, ok := metadata[key]
+	if !ok || raw == nil {
+		return nil
+	}
+	switch v := raw.(type) {
+	case []string:
+		out := make([]string, 0, len(v))
+		for _, s := range v {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			s, ok := item.(string)
+			if !ok {
+				continue
+			}
+			s = strings.TrimSpace(s)
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return nil
+		}
+		return []string{s}
+	default:
+		return nil
+	}
 }
 
 // cloneBridgeReplyCtx copies routing fields for a streaming preview handle while
