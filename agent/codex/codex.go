@@ -41,6 +41,9 @@ type Agent struct {
 	cliBin               string   // CLI binary name, default "codex"
 	cliExtraArgs         []string // extra args parsed from cli_path after the binary
 	sessionWorkspaceBase string
+	memoryExtension      string // Codex memories extension name; default "tomako"
+	memoryFactTitle      string // default title for written fact files
+	memoryInstructions   string // optional instructions.md body; empty → minimal generic text
 	providers            []core.ProviderConfig
 	activeIdx            int      // -1 = no provider set
 	configEnv            []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
@@ -60,6 +63,9 @@ func New(opts map[string]any) (core.Agent, error) {
 	appServerURL, _ := opts["app_server_url"].(string)
 	codexHome, _ := opts["codex_home"].(string)
 	sessionWorkspaceBase, _ := opts["session_workspace_base"].(string)
+	memoryExtension, _ := opts["memory_extension"].(string)
+	memoryFactTitle, _ := opts["memory_fact_title"].(string)
+	memoryInstructions, _ := opts["memory_instructions"].(string)
 	mode = normalizeMode(mode)
 	backend = normalizeBackend(backend)
 	appServerURL = normalizeAppServerURL(appServerURL)
@@ -112,6 +118,9 @@ func New(opts map[string]any) (core.Agent, error) {
 		cliBin:               cliBin,
 		cliExtraArgs:         cliExtraArgs,
 		sessionWorkspaceBase: strings.TrimSpace(sessionWorkspaceBase),
+		memoryExtension:      strings.TrimSpace(memoryExtension),
+		memoryFactTitle:      strings.TrimSpace(memoryFactTitle),
+		memoryInstructions:   memoryInstructions,
 		configEnv:            configEnv,
 		activeIdx:            -1,
 	}, nil
@@ -487,6 +496,15 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.sessionWorkspaceBase != "" {
 		opts["session_workspace_base"] = a.sessionWorkspaceBase
+	}
+	if a.memoryExtension != "" {
+		opts["memory_extension"] = a.memoryExtension
+	}
+	if a.memoryFactTitle != "" {
+		opts["memory_fact_title"] = a.memoryFactTitle
+	}
+	if a.memoryInstructions != "" {
+		opts["memory_instructions"] = a.memoryInstructions
 	}
 	return opts
 }

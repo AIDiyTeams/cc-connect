@@ -77,3 +77,37 @@ func TestWriteMemoryFactsWritesTomakoExtensionFile(t *testing.T) {
 		t.Fatalf("instructions.md not written: %v", err)
 	}
 }
+
+func TestWriteMemoryFactsCustomExtension(t *testing.T) {
+	base := t.TempDir()
+	userDir := filepath.Join(base, "operator-7")
+	a := &Agent{
+		workDir:            "/fallback",
+		memoryExtension:    "factory-sched",
+		memoryFactTitle:    "Factory Fact",
+		memoryInstructions: "# Factory Schedule Facts\n",
+	}
+	result, err := a.WriteMemoryFacts(context.Background(), core.AgentMemoryWriteRequest{
+		SessionKey:   "bridge:mes:7",
+		WorkDir:      userDir,
+		SourceTaskID: "job-1",
+		Title:        "line_status",
+		Facts: []core.AgentMemoryFact{
+			{Type: "line", Value: "A1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("WriteMemoryFacts() error = %v", err)
+	}
+	wantPrefix := filepath.Join(userDir, ".codex", "memories", "extensions", "factory-sched", "facts")
+	if !strings.HasPrefix(result.File, wantPrefix+string(os.PathSeparator)) {
+		t.Fatalf("fact file = %q, want prefix %q", result.File, wantPrefix)
+	}
+	body, err := os.ReadFile(filepath.Join(userDir, ".codex", "memories", "extensions", "factory-sched", "instructions.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "Factory Schedule Facts") {
+		t.Fatalf("instructions = %q", body)
+	}
+}

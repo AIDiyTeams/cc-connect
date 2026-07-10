@@ -157,6 +157,52 @@ type BridgeConfig struct {
 	Path        string   `toml:"path,omitempty"`         // URL path; default "/bridge/ws"
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
 	Insecure    *bool    `toml:"insecure,omitempty"`     // allow running without token (local dev only); default false
+	// TokenStreamReplyPrefixes selects which reply_ctx values use by-token
+	// reply_stream when the adapter declares token_stream. Empty → ["cmsg-"]
+	// (Tomako Studio chat). Factory / other backends can set e.g. ["chat-", "job-"].
+	TokenStreamReplyPrefixes []string `toml:"token_stream_reply_prefixes,omitempty"`
+}
+
+// WorkspaceShareConfig controls how multi-workspace user dirs share a skill library.
+// Product copy (AGENTS.md, platform facts, skills) lives in the shared library;
+// cc-connect only creates directories and symlinks. See config/demos/workspace-share.example.toml.
+type WorkspaceShareConfig struct {
+	// SharedSkillsDir is an absolute/~/ path to the shared skill library.
+	// When empty, resolution uses SharedSkillsEnv then ~/SharedSkillsName then sibling of base_dir.
+	SharedSkillsDir string `toml:"shared_skills_dir,omitempty"`
+	// SharedSkillsEnv is the env var name that may override SharedSkillsDir (default SKILLS_OL_DIR).
+	SharedSkillsEnv string `toml:"shared_skills_env,omitempty"`
+	// SharedSkillsName is the directory basename used for home/sibling lookup (default Skills-OL).
+	SharedSkillsName string `toml:"shared_skills_name,omitempty"`
+	// PrivateDirs are created as real directories inside each user workspace (default: outputs, .codex).
+	PrivateDirs []string `toml:"private_dirs,omitempty"`
+	// SymlinkItems are exact names under the shared library to symlink into each user workspace
+	// (default: skills, node_modules, package.json).
+	SymlinkItems []string `toml:"symlink_items,omitempty"`
+	// SymlinkGlobs match additional files in the shared library root to symlink
+	// (default: ["*.mjs"]). Use [] to disable glob linking.
+	SymlinkGlobs []string `toml:"symlink_globs,omitempty"`
+	// UserDirPrefix prefixes per-user workspace dirs under base_dir (default "user-").
+	UserDirPrefix string `toml:"user_dir_prefix,omitempty"`
+	// PlatformDocs forwards shared platform instruction files into each user workspace.
+	PlatformDocs *PlatformDocsConfig `toml:"platform_docs,omitempty"`
+}
+
+// PlatformDocsConfig maps shared library docs into a user workspace via symlinks only.
+type PlatformDocsConfig struct {
+	// Enabled defaults to true when the [platform_docs] table is present or when
+	// EffectiveWorkspaceShare fills defaults. Set false to skip linking.
+	Enabled *bool `toml:"enabled,omitempty"`
+	// SourceSubdir under the shared skill library (default "platform-facts").
+	SourceSubdir string `toml:"source_subdir,omitempty"`
+	// AgentsFile is linked to <workspace>/<AgentsFile> (default "AGENTS.md").
+	AgentsFile string `toml:"agents_file,omitempty"`
+	// FilePrefix selects which *.md files under SourceSubdir are linked as facts
+	// (default "platform-"). README.md / AgentsFile are never linked as facts.
+	FilePrefix string `toml:"file_prefix,omitempty"`
+	// TargetRel is the destination directory inside each user workspace
+	// (default ".codex/memories/extensions/tomako/facts").
+	TargetRel string `toml:"target_rel,omitempty"`
 }
 
 // HookConfig is a single event hook rule.
@@ -541,6 +587,9 @@ type ProjectConfig struct {
 	Shell string `toml:"shell,omitempty"`
 	// ShellProfile overrides the global shell_profile for this project.
 	ShellProfile string `toml:"shell_profile,omitempty"`
+	// WorkspaceShare configures shared skill-library symlinks for multi-workspace
+	// user dirs. Nil → built-in defaults (Skills-OL layout). See demos.
+	WorkspaceShare *WorkspaceShareConfig `toml:"workspace_share,omitempty"`
 }
 
 type AgentConfig struct {
@@ -962,6 +1011,93 @@ func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
 	return "legacy"
 }
 
+// EffectiveWorkspaceShare returns a fully-defaulted WorkspaceShareConfig for
+// multi-workspace skill-library forwarding. Product-specific paths stay in
+// config; core only applies the resolved values.
+func EffectiveWorkspaceShare(proj *ProjectConfig) WorkspaceShareConfig {
+	var src WorkspaceShareConfig
+	if proj != nil && proj.WorkspaceShare != nil {
+		src = *proj.WorkspaceShare
+	}
+	out := WorkspaceShareConfig{
+		SharedSkillsDir:  strings.TrimSpace(src.SharedSkillsDir),
+		SharedSkillsEnv:  strings.TrimSpace(src.SharedSkillsEnv),
+		SharedSkillsName: strings.TrimSpace(src.SharedSkillsName),
+		UserDirPrefix:    strings.TrimSpace(src.UserDirPrefix),
+	}
+	// Preserve explicit empty slices (disable defaults); only nil means "use default".
+	if src.PrivateDirs != nil {
+		out.PrivateDirs = append([]string{}, src.PrivateDirs...)
+	}
+	if src.SymlinkItems != nil {
+		out.SymlinkItems = append([]string{}, src.SymlinkItems...)
+	}
+	if src.SymlinkGlobs != nil {
+		out.SymlinkGlobs = append([]string{}, src.SymlinkGlobs...)
+	}
+	if out.SharedSkillsEnv == "" {
+		out.SharedSkillsEnv = "SKILLS_OL_DIR"
+	}
+	if out.SharedSkillsName == "" {
+		out.SharedSkillsName = "Skills-OL"
+	}
+	if out.UserDirPrefix == "" {
+		out.UserDirPrefix = "user-"
+	}
+	if out.PrivateDirs == nil {
+		out.PrivateDirs = []string{"outputs", ".codex"}
+	}
+	if out.SymlinkItems == nil {
+		out.SymlinkItems = []string{"skills", "node_modules", "package.json"}
+	}
+	if out.SymlinkGlobs == nil {
+		out.SymlinkGlobs = []string{"*.mjs"}
+	}
+
+	var docs PlatformDocsConfig
+	if src.PlatformDocs != nil {
+		docs = *src.PlatformDocs
+	}
+	enabled := true
+	if docs.Enabled != nil {
+		enabled = *docs.Enabled
+	}
+	docs.Enabled = &enabled
+	if strings.TrimSpace(docs.SourceSubdir) == "" {
+		docs.SourceSubdir = "platform-facts"
+	}
+	if strings.TrimSpace(docs.AgentsFile) == "" {
+		docs.AgentsFile = "AGENTS.md"
+	}
+	if strings.TrimSpace(docs.FilePrefix) == "" {
+		docs.FilePrefix = "platform-"
+	}
+	if strings.TrimSpace(docs.TargetRel) == "" {
+		docs.TargetRel = ".codex/memories/extensions/tomako/facts"
+	}
+	out.PlatformDocs = &docs
+	return out
+}
+
+// EffectiveBridgeTokenStreamPrefixes returns reply_ctx prefixes that enable
+// by-token reply_stream. Empty config → ["cmsg-"] for Tomako Studio compatibility.
+func EffectiveBridgeTokenStreamPrefixes(cfg *Config) []string {
+	if cfg == nil || len(cfg.Bridge.TokenStreamReplyPrefixes) == 0 {
+		return []string{"cmsg-"}
+	}
+	out := make([]string, 0, len(cfg.Bridge.TokenStreamReplyPrefixes))
+	for _, p := range cfg.Bridge.TokenStreamReplyPrefixes {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return []string{"cmsg-"}
+	}
+	return out
+}
+
 // validatePermissive is like validate but skips the "at least one platform"
 // requirement so that commands like `cc-connect web` can operate on agent-only
 // configs before platforms have been set up.
@@ -1015,6 +1151,9 @@ func (c *Config) validateInternal(permissive bool) error {
 			}
 			if _, ok := proj.Agent.Options["work_dir"]; ok {
 				return fmt.Errorf("project %q: multi-workspace mode conflicts with agent work_dir (use base_dir instead)", proj.Name)
+			}
+			if err := validateWorkspaceShare(proj.Name, proj.WorkspaceShare); err != nil {
+				return err
 			}
 		}
 		if proj.ResetOnIdleMins != nil && *proj.ResetOnIdleMins < 0 {
@@ -1095,6 +1234,39 @@ var supportedReferenceEnclosureStyles = map[string]struct{}{
 	"angle":     {},
 	"fullwidth": {},
 	"code":      {},
+}
+
+func validateWorkspaceShare(projectName string, share *WorkspaceShareConfig) error {
+	if share == nil {
+		return nil
+	}
+	prefix := fmt.Sprintf("project %q: workspace_share", projectName)
+	if share.PlatformDocs != nil {
+		docs := share.PlatformDocs
+		if docs.TargetRel != "" {
+			rel := filepath.ToSlash(docs.TargetRel)
+			if filepath.IsAbs(docs.TargetRel) || strings.HasPrefix(rel, "../") || strings.Contains(rel, "/../") {
+				return fmt.Errorf("%s.platform_docs.target_rel must be a relative path inside the workspace", prefix)
+			}
+		}
+		if docs.SourceSubdir != "" {
+			rel := filepath.ToSlash(docs.SourceSubdir)
+			if filepath.IsAbs(docs.SourceSubdir) || strings.HasPrefix(rel, "../") || strings.Contains(rel, "/../") {
+				return fmt.Errorf("%s.platform_docs.source_subdir must be a relative path under the shared skill library", prefix)
+			}
+		}
+	}
+	for _, d := range share.PrivateDirs {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+		rel := filepath.ToSlash(d)
+		if filepath.IsAbs(d) || strings.HasPrefix(rel, "../") || strings.Contains(rel, "/../") {
+			return fmt.Errorf("%s.private_dirs entries must be relative paths inside the workspace", prefix)
+		}
+	}
+	return nil
 }
 
 func validateReferenceConfig(prefix string, rc ReferenceConfig) error {

@@ -1,0 +1,146 @@
+# =============================================================================
+# Workspace Share + Bridge Token Stream — Configuration Demo
+# 工作区共享技能库 + Bridge 流式前缀 — 配置示例
+# =============================================================================
+#
+# Purpose / 目的:
+#   Keep product copy OUT of cc-connect. Point each [[projects]] at a shared
+#   skill library; cc-connect only creates per-user dirs and symlinks.
+#   业务文案不进 cc-connect。每个项目指向共享 skill 库；cc-connect 只建用户目录和软链。
+#
+# Cross-business migration / 跨业务平迁:
+#   Factory scheduling, GTM Studio, etc. reuse the same cc-connect binary.
+#   Change [projects.workspace_share] + agent memory_* options + skill library.
+#   工厂调度 / GTM Studio 等复用同一二进制；改 workspace_share、memory_* 与 skill 库即可。
+#
+# This file is documentation only — copy snippets into your config.toml.
+# 本文件仅作示例，请把片段复制进实际 config.toml。
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Bridge: which reply_ctx prefixes use by-token reply_stream
+# Bridge：哪些 reply_ctx 前缀走逐 token 流式
+# -----------------------------------------------------------------------------
+# Default when omitted: ["cmsg-"] (Tomako Studio chat message ids).
+# 未配置时默认 ["cmsg-"]（Tomako Studio 聊天消息 id）。
+# LLM Task ids (llm-*) stay on coarse preview/update_message even if the
+# adapter also declares token_stream.
+# LLM Task（llm-*）即使声明了 token_stream 仍走粗粒度 preview。
+#
+# Adapter override: register metadata.token_stream_reply_prefixes = ["job-"]
+# 适配器也可在 register.metadata 里覆盖。
+
+[bridge]
+enabled = true
+port = 9810
+token = "change-me"
+path = "/bridge/ws"
+# Factory MES example / 工厂 MES 示例:
+# token_stream_reply_prefixes = ["chat-", "job-"]
+#
+# Tomako Studio (default-compatible) / Tomako Studio（兼容默认）:
+token_stream_reply_prefixes = ["cmsg-"]
+
+# -----------------------------------------------------------------------------
+# Example A — Tomako / Skills-OL (defaults; omit workspace_share to get these)
+# 示例 A — Tomako / Skills-OL（默认；不写 workspace_share 即为此布局）
+# -----------------------------------------------------------------------------
+
+[[projects]]
+name = "tomako-studio"
+mode = "multi-workspace"
+base_dir = "/home/ubuntu/workspaces"
+skip_git = true
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+mode = "bypassPermissions"
+cli_path = "/usr/local/bin/codex"
+model = "deepseek-v4-flash"
+# Codex memory extension under .codex/memories/extensions/<name>/facts
+# Codex 记忆扩展目录名（默认 tomako，可改为业务名）
+# memory_extension = "tomako"
+# memory_fact_title = "Tomako Memory Fact"
+# memory_instructions = """
+# # Tomako Platform Facts
+# ...
+# """
+
+# Optional explicit share block (same as defaults) / 可选显式写出（等同默认）:
+# [projects.workspace_share]
+# shared_skills_dir = "/home/ubuntu/Skills-OL"   # absolute path; wins over env/name lookup
+# shared_skills_env = "SKILLS_OL_DIR"            # env override name
+# shared_skills_name = "Skills-OL"               # ~/Skills-OL and sibling-of-base_dir lookup
+# private_dirs = ["outputs", ".codex"]           # real dirs per user workspace
+# symlink_items = ["skills", "node_modules", "package.json"]
+# symlink_globs = ["*.mjs"]                      # extra root files to symlink; [] disables
+# user_dir_prefix = "user-"                      # → base_dir/user-{id}
+#
+# [projects.workspace_share.platform_docs]
+# enabled = true
+# source_subdir = "platform-facts"               # under shared skill library
+# agents_file = "AGENTS.md"                      # → <workspace>/AGENTS.md
+# file_prefix = "platform-"                      # only platform-*.md linked as facts
+# target_rel = ".codex/memories/extensions/tomako/facts"
+
+[[projects.platforms]]
+type = "feishu"
+# [projects.platforms.options]
+# app_id = "..."
+# app_secret = "..."
+
+# -----------------------------------------------------------------------------
+# Example B — Factory production scheduling (unrelated business)
+# 示例 B — 工厂生产进度调度（与 Tomako 无关的业务）
+# -----------------------------------------------------------------------------
+# Skill library layout expected:
+#   /opt/factory-skills/
+#     AGENTS.md or agent-docs/RULES.md (via platform_docs.agents_file)
+#     agent-docs/factory-*.md
+#     skills/
+#     scripts/          (instead of *.mjs)
+#     package.json      (optional)
+#
+# 技能库布局示例见上。换库 + 改下列配置即可，无需改 cc-connect 代码。
+
+# [[projects]]
+# name = "factory-mes"
+# mode = "multi-workspace"
+# base_dir = "/var/lib/factory/workspaces"
+# skip_git = true
+#
+# [projects.agent]
+# type = "codex"
+#
+# [projects.agent.options]
+# mode = "bypassPermissions"
+# model = "deepseek-v4-flash"
+# memory_extension = "factory-sched"             # → .../extensions/factory-sched/facts
+# memory_fact_title = "Factory Schedule Fact"
+# memory_instructions = """
+# # Factory Schedule Facts
+#
+# Facts about work orders, line status, and shift plans.
+# Integrate into MEMORY.md for future scheduling turns.
+# """
+#
+# [projects.workspace_share]
+# shared_skills_dir = "/opt/factory-skills"
+# shared_skills_env = "FACTORY_SKILLS_DIR"       # optional env override
+# shared_skills_name = "factory-skills"          # fallback ~/factory-skills
+# private_dirs = ["outputs", ".codex", "data"]
+# symlink_items = ["skills", "scripts", "package.json"]
+# symlink_globs = []                             # no *.mjs in this library
+# user_dir_prefix = "operator-"                  # → base_dir/operator-{id}
+#
+# [projects.workspace_share.platform_docs]
+# enabled = true
+# source_subdir = "agent-docs"
+# agents_file = "RULES.md"                       # → <workspace>/RULES.md
+# file_prefix = "factory-"                       # factory-*.md only
+# target_rel = ".codex/memories/extensions/factory-sched/facts"
+#
+# [[projects.platforms]]
+# type = "feishu"

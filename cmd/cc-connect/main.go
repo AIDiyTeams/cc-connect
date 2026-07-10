@@ -434,6 +434,28 @@ func main() {
 			}
 			bindingStore := filepath.Join(cfg.DataDir, "workspace_bindings.json")
 			engine.SetMultiWorkspace(baseDir, bindingStore)
+			share := config.EffectiveWorkspaceShare(&proj)
+			docsDisable := share.PlatformDocs != nil && share.PlatformDocs.Enabled != nil && !*share.PlatformDocs.Enabled
+			docs := config.PlatformDocsConfig{}
+			if share.PlatformDocs != nil {
+				docs = *share.PlatformDocs
+			}
+			engine.SetWorkspaceShare(core.WorkspaceShareOptions{
+				SharedSkillsDir:  share.SharedSkillsDir,
+				SharedSkillsEnv:  share.SharedSkillsEnv,
+				SharedSkillsName: share.SharedSkillsName,
+				PrivateDirs:      share.PrivateDirs,
+				SymlinkItems:     share.SymlinkItems,
+				SymlinkGlobs:     share.SymlinkGlobs,
+				UserDirPrefix:    share.UserDirPrefix,
+				PlatformDocs: core.PlatformDocsOptions{
+					Disable:      docsDisable,
+					SourceSubdir: docs.SourceSubdir,
+					AgentsFile:   docs.AgentsFile,
+					FilePrefix:   docs.FilePrefix,
+					TargetRel:    docs.TargetRel,
+				},
+			})
 			if proj.WorkspaceInitAllowLocalPaths != nil {
 				engine.SetWorkspaceInitAllowLocalPaths(*proj.WorkspaceInitAllowLocalPaths)
 			}
@@ -1039,6 +1061,7 @@ func main() {
 			slog.Error("bridge: failed to create server - token is required (or set insecure=true for local dev)")
 			os.Exit(1)
 		}
+		bridgeSrv.SetTokenStreamReplyPrefixes(config.EffectiveBridgeTokenStreamPrefixes(cfg))
 		for i, e := range engines {
 			bp := bridgeSrv.NewPlatform(cfg.Projects[i].Name)
 			bridgeSrv.RegisterEngine(cfg.Projects[i].Name, e, bp)
