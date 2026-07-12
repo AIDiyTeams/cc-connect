@@ -404,6 +404,27 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.Unlock()
 	workDir = resolveSessionWorkDir(workDir, sessionWorkspaceBase, envValue(extraEnv, "CC_SESSION_KEY"))
 
+	// Per-user codex_home: when no explicit codex_home is configured and the
+	// resolved workDir is an absolute path, derive CODEX_HOME from workDir so
+	// Codex's memory_root ({codex_home}/memories) aligns with the facts dir
+	// written by factsDirFor ({workDir}/.codex/memories/extensions/...). In
+	// multi-workspace mode the engine sets workDir to {base_dir}/user-{id} via
+	// WorkDirSwitcher, so each user gets an isolated CODEX_HOME (state DB, auth,
+	// sessions, memories) and Phase 2 consolidation sees the tomako extension.
+	// Single-workspace deployments that leave work_dir as "." keep ~/.codex.
+	if codexHome == "" && filepath.IsAbs(workDir) {
+		codexHome = filepath.Join(workDir, ".codex")
+	}
+	// Inherit global config.toml + auth.json into per-user codex_home so the
+	// host's provider/cc-switch configuration is available without re-declaring
+	// providers in every cc-connect project. ensureCodexProviderConfig below
+	// can still upsert per-session overrides on top of the inherited baseline.
+	if codexHome != "" {
+		if err := ensureCodexHomeInheritedConfig(codexHome); err != nil {
+			slog.Warn("codex: failed to inherit global config into per-user codex_home", "codex_home", codexHome, "error", err)
+		}
+	}
+
 	if provName != "" {
 		if err := ensureCodexProviderConfig(codexHome, provName, baseURL, provWireAPI, provHeaders); err != nil {
 			slog.Warn("codex: failed to write provider config", "provider", provName, "error", err)
