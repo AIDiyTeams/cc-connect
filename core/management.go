@@ -1139,14 +1139,60 @@ func (m *ManagementServer) handleProjectSend(w http.ResponseWriter, r *http.Requ
 }
 
 func (m *ManagementServer) handleProjectMemory(w http.ResponseWriter, r *http.Request, e *Engine, rest string) {
-	if rest != "facts" {
+	parts := strings.SplitN(strings.Trim(rest, "/"), "/", 2)
+	if parts[0] != "facts" {
 		mgmtError(w, http.StatusNotFound, "not found")
 		return
 	}
-	if r.Method != http.MethodPost {
-		mgmtError(w, http.StatusMethodNotAllowed, "POST only")
+	factName := ""
+	if len(parts) > 1 {
+		factName = strings.TrimSpace(parts[1])
+	}
+
+	if factName == "" {
+		switch r.Method {
+		case http.MethodGet:
+			m.handleProjectMemoryList(w, r, e)
+		case http.MethodPost:
+			m.handleProjectMemoryWrite(w, r, e)
+		default:
+			mgmtError(w, http.StatusMethodNotAllowed, "GET or POST only")
+		}
 		return
 	}
+
+	switch r.Method {
+	case http.MethodGet:
+		m.handleProjectMemoryGet(w, r, e, factName)
+	case http.MethodPut:
+		m.handleProjectMemoryUpdate(w, r, e, factName)
+	case http.MethodDelete:
+		m.handleProjectMemoryDelete(w, r, e, factName)
+	default:
+		mgmtError(w, http.StatusMethodNotAllowed, "GET, PUT, or DELETE only")
+	}
+}
+
+func (m *ManagementServer) resolveMemoryManager(e *Engine) (AgentMemoryManager, bool) {
+	manager, ok := e.agent.(AgentMemoryManager)
+	return manager, ok
+}
+
+func (m *ManagementServer) resolveMemorySessionWorkDir(w http.ResponseWriter, e *Engine, sessionKey string) (string, bool) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		mgmtError(w, http.StatusBadRequest, "session_key is required")
+		return "", false
+	}
+	workDir, err := e.ResolveMemoryWorkDir(sessionKey)
+	if err != nil {
+		mgmtError(w, http.StatusBadRequest, err.Error())
+		return "", false
+	}
+	return workDir, true
+}
+
+func (m *ManagementServer) handleProjectMemoryWrite(w http.ResponseWriter, r *http.Request, e *Engine) {
 	writer, ok := e.agent.(AgentMemoryWriter)
 	if !ok {
 		mgmtError(w, http.StatusNotImplemented, "agent does not support memory fact writing")
@@ -1157,19 +1203,12 @@ func (m *ManagementServer) handleProjectMemory(w http.ResponseWriter, r *http.Re
 		mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	if strings.TrimSpace(req.SessionKey) == "" {
-		mgmtError(w, http.StatusBadRequest, "session_key is required")
+	workDir, ok := m.resolveMemorySessionWorkDir(w, e, req.SessionKey)
+	if !ok {
 		return
 	}
 	if len(req.Facts) == 0 {
 		mgmtError(w, http.StatusBadRequest, "facts are required")
-		return
-	}
-	// Align fact writes with the same per-user workspace used by interactive
-	// sessions (multi-workspace: {base_dir}/user-{userId}).
-	workDir, err := e.ResolveMemoryWorkDir(req.SessionKey)
-	if err != nil {
-		mgmtError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if workDir != "" {
@@ -1181,6 +1220,131 @@ func (m *ManagementServer) handleProjectMemory(w http.ResponseWriter, r *http.Re
 		return
 	}
 	mgmtJSON(w, http.StatusOK, result)
+}
+
+func (m *ManagementServer) handleProjectMemoryList(w http.ResponseWriter, r *http.Request, e *Engine) {
+	manager, ok := m.resolveMemoryManager(e)
+	if !ok {
+		mgmtError(w, http.StatusNotImplemented, "agent does not support memory fact management")
+		return
+	}
+	sessionKey := r.URL.Query().Get("session_key")
+	workDir, ok := m.resolveMemorySessionWorkDir(w, e, sessionKey)
+	if !ok {
+		return
+	}
+	result, err := manager.ListMemoryFacts(r.Context(), AgentMemoryListRequest{
+		SessionKey: sessionKey,
+		WorkDir:    workDir,
+	})
+	if err != nil {
+		mgmtError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	mgmtJSON(w, http.StatusOK, result)
+}
+
+func (m *ManagementServer) handleProjectMemoryGet(w http.ResponseWriter, r *http.Request, e *Engine, name string) {
+	manager, ok := m.resolveMemoryManager(e)
+	if !ok {
+		mgmtError(w, http.StatusNotImplemented, "agent does not support memory fact management")
+		return
+	}
+	sessionKey := r.URL.Query().Get("session_key")
+	workDir, ok := m.resolveMemorySessionWorkDir(w, e, sessionKey)
+	if !ok {
+		return
+	}
+	result, err := manager.GetMemoryFact(r.Context(), AgentMemoryGetRequest{
+		SessionKey: sessionKey,
+		WorkDir:    workDir,
+		Name:       name,
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "invalid fact file name") {
+			status = http.StatusNotFound
+		}
+		mgmtError(w, status, err.Error())
+		return
+	}
+	mgmtJSON(w, http.StatusOK, result)
+}
+
+func (m *ManagementServer) handleProjectMemoryUpdate(w http.ResponseWriter, r *http.Request, e *Engine, name string) {
+	manager, ok := m.resolveMemoryManager(e)
+	if !ok {
+		mgmtError(w, http.StatusNotImplemented, "agent does not support memory fact management")
+		return
+	}
+	var body struct {
+		SessionKey string `json:"session_key"`
+		Content    string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	workDir, ok := m.resolveMemorySessionWorkDir(w, e, body.SessionKey)
+	if !ok {
+		return
+	}
+	if body.Content == "" {
+		mgmtError(w, http.StatusBadRequest, "content is required")
+		return
+	}
+	result, err := manager.UpdateMemoryFact(r.Context(), AgentMemoryUpdateRequest{
+		SessionKey: body.SessionKey,
+		WorkDir:    workDir,
+		Name:       name,
+		Content:    body.Content,
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "invalid fact file name") {
+			status = http.StatusNotFound
+		}
+		mgmtError(w, status, err.Error())
+		return
+	}
+	mgmtJSON(w, http.StatusOK, result)
+}
+
+func (m *ManagementServer) handleProjectMemoryDelete(w http.ResponseWriter, r *http.Request, e *Engine, name string) {
+	manager, ok := m.resolveMemoryManager(e)
+	if !ok {
+		mgmtError(w, http.StatusNotImplemented, "agent does not support memory fact management")
+		return
+	}
+	sessionKey := r.URL.Query().Get("session_key")
+	if sessionKey == "" {
+		var body struct {
+			SessionKey string `json:"session_key"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		sessionKey = body.SessionKey
+	}
+	workDir, ok := m.resolveMemorySessionWorkDir(w, e, sessionKey)
+	if !ok {
+		return
+	}
+	if err := manager.DeleteMemoryFact(r.Context(), AgentMemoryDeleteRequest{
+		SessionKey: sessionKey,
+		WorkDir:    workDir,
+		Name:       name,
+	}); err != nil {
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "invalid fact file name") {
+			status = http.StatusNotFound
+		}
+		mgmtError(w, status, err.Error())
+		return
+	}
+	mgmtJSON(w, http.StatusOK, map[string]any{
+		"deleted":     true,
+		"name":        name,
+		"session_key": sessionKey,
+	})
 }
 
 // ── Provider endpoints ────────────────────────────────────────

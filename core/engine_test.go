@@ -3233,13 +3233,14 @@ func TestHandleMessage_MultiWorkspacePreservesCCSessionKey(t *testing.T) {
 	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
 	e.SetMultiWorkspace(baseDir, bindingPath)
 
-	wsDir := filepath.Join(baseDir, "ws1")
+	// Per-user workspaces use {user_dir_prefix}{UserID} (default user-{id}).
+	wsDir := filepath.Join(baseDir, "user-U1")
 	if err := os.MkdirAll(wsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	normalizedWsDir := normalizeWorkspacePath(wsDir)
-	channelID := "C123"
-	e.workspaceBindings.Bind("project:test", channelID, "chan", normalizedWsDir)
+	channelID := "user-U1"
+	e.workspaceBindings.Bind("project:test", "discord:C123:U1", channelID, normalizedWsDir)
 
 	wsAgent := &sessionEnvRecordingAgent{session: newResultAgentSession("ok")}
 	ws := e.workspacePool.GetOrCreate(normalizedWsDir)
@@ -3247,7 +3248,7 @@ func TestHandleMessage_MultiWorkspacePreservesCCSessionKey(t *testing.T) {
 	ws.sessions = NewSessionManager("")
 
 	msg := &Message{
-		SessionKey: "discord:" + channelID + ":U1",
+		SessionKey: "discord:C123:U1",
 		Platform:   "discord",
 		UserID:     "U1",
 		UserName:   "user",

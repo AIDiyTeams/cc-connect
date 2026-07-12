@@ -77,3 +77,118 @@ func TestWriteMemoryFactsWritesTomakoExtensionFile(t *testing.T) {
 		t.Fatalf("instructions.md not written: %v", err)
 	}
 }
+
+func TestWriteMemoryFactsCustomExtension(t *testing.T) {
+	base := t.TempDir()
+	userDir := filepath.Join(base, "operator-7")
+	a := &Agent{
+		workDir:            "/fallback",
+		memoryExtension:    "factory-sched",
+		memoryFactTitle:    "Factory Fact",
+		memoryInstructions: "# Factory Schedule Facts\n",
+	}
+	result, err := a.WriteMemoryFacts(context.Background(), core.AgentMemoryWriteRequest{
+		SessionKey:   "bridge:mes:7",
+		WorkDir:      userDir,
+		SourceTaskID: "job-1",
+		Title:        "line_status",
+		Facts: []core.AgentMemoryFact{
+			{Type: "line", Value: "A1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("WriteMemoryFacts() error = %v", err)
+	}
+	wantPrefix := filepath.Join(userDir, ".codex", "memories", "extensions", "factory-sched", "facts")
+	if !strings.HasPrefix(result.File, wantPrefix+string(os.PathSeparator)) {
+		t.Fatalf("fact file = %q, want prefix %q", result.File, wantPrefix)
+	}
+	body, err := os.ReadFile(filepath.Join(userDir, ".codex", "memories", "extensions", "factory-sched", "instructions.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "Factory Schedule Facts") {
+		t.Fatalf("instructions = %q", body)
+	}
+}
+
+func TestMemoryFactCRUD(t *testing.T) {
+	userDir := t.TempDir()
+	a := &Agent{workDir: "/fallback"}
+	sessionKey := "java-backend:cibos:99"
+
+	written, err := a.WriteMemoryFacts(context.Background(), core.AgentMemoryWriteRequest{
+		SessionKey:   sessionKey,
+		WorkDir:      userDir,
+		SourceTaskID: "llm-1",
+		Title:        "brand",
+		Facts:        []core.AgentMemoryFact{{Type: "brand_name", Value: "Tomako"}},
+	})
+	if err != nil {
+		t.Fatalf("WriteMemoryFacts() error = %v", err)
+	}
+	if written.Name == "" {
+		t.Fatal("WriteMemoryFacts() name is empty")
+	}
+
+	listed, err := a.ListMemoryFacts(context.Background(), core.AgentMemoryListRequest{
+		SessionKey: sessionKey,
+		WorkDir:    userDir,
+	})
+	if err != nil {
+		t.Fatalf("ListMemoryFacts() error = %v", err)
+	}
+	if len(listed.Facts) != 1 || listed.Facts[0].Name != written.Name {
+		t.Fatalf("ListMemoryFacts() = %+v, want [%s]", listed.Facts, written.Name)
+	}
+
+	got, err := a.GetMemoryFact(context.Background(), core.AgentMemoryGetRequest{
+		SessionKey: sessionKey,
+		WorkDir:    userDir,
+		Name:       written.Name,
+	})
+	if err != nil {
+		t.Fatalf("GetMemoryFact() error = %v", err)
+	}
+	if !strings.Contains(got.Content, "brand_name: Tomako") {
+		t.Fatalf("GetMemoryFact() content = %q", got.Content)
+	}
+
+	updated, err := a.UpdateMemoryFact(context.Background(), core.AgentMemoryUpdateRequest{
+		SessionKey: sessionKey,
+		WorkDir:    userDir,
+		Name:       written.Name,
+		Content:    "# Edited\n\n- brand_name: Foldos\n",
+	})
+	if err != nil {
+		t.Fatalf("UpdateMemoryFact() error = %v", err)
+	}
+	if !strings.Contains(updated.Content, "brand_name: Foldos") {
+		t.Fatalf("UpdateMemoryFact() content = %q", updated.Content)
+	}
+
+	if err := a.DeleteMemoryFact(context.Background(), core.AgentMemoryDeleteRequest{
+		SessionKey: sessionKey,
+		WorkDir:    userDir,
+		Name:       written.Name,
+	}); err != nil {
+		t.Fatalf("DeleteMemoryFact() error = %v", err)
+	}
+	if _, err := a.GetMemoryFact(context.Background(), core.AgentMemoryGetRequest{
+		SessionKey: sessionKey,
+		WorkDir:    userDir,
+		Name:       written.Name,
+	}); err == nil {
+		t.Fatal("GetMemoryFact() after delete should fail")
+	}
+}
+
+func TestSafeFactPathRejectsTraversal(t *testing.T) {
+	factsDir := t.TempDir()
+	if _, err := safeFactPath(factsDir, "../escape.md"); err == nil {
+		t.Fatal("expected traversal rejection")
+	}
+	if _, err := safeFactPath(factsDir, "ok.md"); err != nil {
+		t.Fatalf("safeFactPath(ok.md) error = %v", err)
+	}
+}

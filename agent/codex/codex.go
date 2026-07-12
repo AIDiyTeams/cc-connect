@@ -41,6 +41,9 @@ type Agent struct {
 	cliBin               string   // CLI binary name, default "codex"
 	cliExtraArgs         []string // extra args parsed from cli_path after the binary
 	sessionWorkspaceBase string
+	memoryExtension      string // Codex memories extension name; default "tomako"
+	memoryFactTitle      string // default title for written fact files
+	memoryInstructions   string // optional instructions.md body; empty → minimal generic text
 	providers            []core.ProviderConfig
 	activeIdx            int      // -1 = no provider set
 	configEnv            []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
@@ -60,6 +63,9 @@ func New(opts map[string]any) (core.Agent, error) {
 	appServerURL, _ := opts["app_server_url"].(string)
 	codexHome, _ := opts["codex_home"].(string)
 	sessionWorkspaceBase, _ := opts["session_workspace_base"].(string)
+	memoryExtension, _ := opts["memory_extension"].(string)
+	memoryFactTitle, _ := opts["memory_fact_title"].(string)
+	memoryInstructions, _ := opts["memory_instructions"].(string)
 	mode = normalizeMode(mode)
 	backend = normalizeBackend(backend)
 	appServerURL = normalizeAppServerURL(appServerURL)
@@ -112,6 +118,9 @@ func New(opts map[string]any) (core.Agent, error) {
 		cliBin:               cliBin,
 		cliExtraArgs:         cliExtraArgs,
 		sessionWorkspaceBase: strings.TrimSpace(sessionWorkspaceBase),
+		memoryExtension:      strings.TrimSpace(memoryExtension),
+		memoryFactTitle:      strings.TrimSpace(memoryFactTitle),
+		memoryInstructions:   memoryInstructions,
 		configEnv:            configEnv,
 		activeIdx:            -1,
 	}, nil
@@ -395,6 +404,27 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.Unlock()
 	workDir = resolveSessionWorkDir(workDir, sessionWorkspaceBase, envValue(extraEnv, "CC_SESSION_KEY"))
 
+	// Per-user codex_home: when no explicit codex_home is configured and the
+	// resolved workDir is an absolute path, derive CODEX_HOME from workDir so
+	// Codex's memory_root ({codex_home}/memories) aligns with the facts dir
+	// written by factsDirFor ({workDir}/.codex/memories/extensions/...). In
+	// multi-workspace mode the engine sets workDir to {base_dir}/user-{id} via
+	// WorkDirSwitcher, so each user gets an isolated CODEX_HOME (state DB, auth,
+	// sessions, memories) and Phase 2 consolidation sees the tomako extension.
+	// Single-workspace deployments that leave work_dir as "." keep ~/.codex.
+	if codexHome == "" && filepath.IsAbs(workDir) {
+		codexHome = filepath.Join(workDir, ".codex")
+	}
+	// Inherit global config.toml + auth.json into per-user codex_home so the
+	// host's provider/cc-switch configuration is available without re-declaring
+	// providers in every cc-connect project. ensureCodexProviderConfig below
+	// can still upsert per-session overrides on top of the inherited baseline.
+	if codexHome != "" {
+		if err := ensureCodexHomeInheritedConfig(codexHome); err != nil {
+			slog.Warn("codex: failed to inherit global config into per-user codex_home", "codex_home", codexHome, "error", err)
+		}
+	}
+
 	if provName != "" {
 		if err := ensureCodexProviderConfig(codexHome, provName, baseURL, provWireAPI, provHeaders); err != nil {
 			slog.Warn("codex: failed to write provider config", "provider", provName, "error", err)
@@ -487,6 +517,15 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.sessionWorkspaceBase != "" {
 		opts["session_workspace_base"] = a.sessionWorkspaceBase
+	}
+	if a.memoryExtension != "" {
+		opts["memory_extension"] = a.memoryExtension
+	}
+	if a.memoryFactTitle != "" {
+		opts["memory_fact_title"] = a.memoryFactTitle
+	}
+	if a.memoryInstructions != "" {
+		opts["memory_instructions"] = a.memoryInstructions
 	}
 	return opts
 }
