@@ -632,6 +632,10 @@ func (e *Engine) ResolveMemoryWorkDir(sessionKey string) (string, error) {
 			if err := e.initUserWorkspace(workspace); err != nil {
 				return "", fmt.Errorf("init memory workspace: %w", err)
 			}
+			// Re-normalize after create: EvalSymlinks only resolves once the
+			// leaf exists (macOS /var → /private/var), so first and later
+			// calls would otherwise return different path strings.
+			workspace = normalizeWorkspacePath(workspace)
 			slog.Info("user workspace initialized for memory write", "workspace", workspace)
 		} else if err != nil {
 			return "", fmt.Errorf("stat memory workspace: %w", err)

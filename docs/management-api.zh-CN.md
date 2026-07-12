@@ -638,6 +638,138 @@ GET /api/v1/status?token=mgmt-secret
 
 ---
 
+### 5.3.1 用户记忆 Facts（Codex extension）
+
+按 `session_key` 路由到对应用户 workspace（multi-workspace 下为 `{base_dir}/user-{userId}`），读写 Codex 记忆扩展目录：
+
+`.codex/memories/extensions/{extension}/facts/*.md`（默认 extension=`tomako`）。
+
+所有接口均需 `session_key`（格式：`platform:scope:userId`），用最后一段 `userId` 定位用户目录。Agent 需实现 `AgentMemoryManager`（Codex 已实现）。
+
+#### GET /api/v1/projects/{name}/memory/facts
+
+列举指定用户的 fact markdown 文件。
+
+**查询参数：**
+
+| 参数          | 类型   | 必填 | 说明                                      |
+|---------------|--------|------|-------------------------------------------|
+| `session_key` | string | 是   | 路由键，例如 `java-backend:cibos:42`      |
+
+**响应：**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "session_key": "java-backend:cibos:42",
+    "work_dir": "/workspaces/user-42",
+    "facts_dir": "/workspaces/user-42/.codex/memories/extensions/tomako/facts",
+    "facts": [
+      {
+        "name": "2026-07-12T01-02-03-brand-llm-1.md",
+        "size": 256,
+        "mod_time": "2026-07-12T01:02:03Z"
+      }
+    ]
+  }
+}
+```
+
+#### GET /api/v1/projects/{name}/memory/facts/{filename}
+
+读取单个 fact 文件全文（可编辑的 markdown）。
+
+**查询参数：** `session_key`（必填）
+
+**响应：**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "name": "2026-07-12T01-02-03-brand-llm-1.md",
+    "content": "# brand\n\n- brand_name: Tomako\n",
+    "size": 42,
+    "mod_time": "2026-07-12T01:02:03Z",
+    "path": "/workspaces/user-42/.codex/memories/extensions/tomako/facts/2026-07-12T01-02-03-brand-llm-1.md"
+  }
+}
+```
+
+#### POST /api/v1/projects/{name}/memory/facts
+
+写入新的 fact 文件（结构化条目渲染为 markdown）。
+
+**请求体：**
+
+```json
+{
+  "session_key": "java-backend:cibos:42",
+  "source_task_id": "llm-1",
+  "title": "brand",
+  "facts": [
+    {"type": "brand_name", "value": "Tomako"}
+  ]
+}
+```
+
+| 字段              | 类型     | 必填 | 说明                         |
+|-------------------|----------|------|------------------------------|
+| `session_key`     | string   | 是   | 用户路由键                   |
+| `source_task_id`  | string   | 否   | 来源任务 ID，写入文件名      |
+| `title`           | string   | 否   | 事实标题，写入文件名与正文   |
+| `facts`           | object[] | 是   | `{type,value}` 结构化条目    |
+
+**响应：**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "file": "/workspaces/user-42/.codex/memories/extensions/tomako/facts/2026-07-12T01-02-03-brand-llm-1.md",
+    "name": "2026-07-12T01-02-03-brand-llm-1.md"
+  }
+}
+```
+
+#### PUT /api/v1/projects/{name}/memory/facts/{filename}
+
+整文件替换 fact markdown 内容（用于 Memory 页直接编辑）。
+
+**请求体：**
+
+```json
+{
+  "session_key": "java-backend:cibos:42",
+  "content": "# brand\n\n- brand_name: Foldos\n"
+}
+```
+
+| 字段          | 类型   | 必填 | 说明                |
+|---------------|--------|------|---------------------|
+| `session_key` | string | 是   | 用户路由键          |
+| `content`     | string | 是   | 完整 markdown 正文  |
+
+#### DELETE /api/v1/projects/{name}/memory/facts/{filename}
+
+删除指定 fact 文件。`session_key` 可通过查询参数或 JSON body 传递。
+
+**响应：**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "deleted": true,
+    "name": "2026-07-12T01-02-03-brand-llm-1.md",
+    "session_key": "java-backend:cibos:42"
+  }
+}
+```
+
+---
+
 ### 5.4 提供商
 
 提供商是 API 后端（如 Anthropic、OpenAI、自定义端点），为项目的 Agent 提供 AI 模型。

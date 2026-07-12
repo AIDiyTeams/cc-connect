@@ -666,6 +666,138 @@ Sends a message to a session. The message is delivered to the agent as if the us
 
 ---
 
+### 5.3.1 User Memory Facts (Codex extension)
+
+Routes by `session_key` to the matching user workspace (`{base_dir}/user-{userId}` in multi-workspace mode) and reads/writes Codex memory extension files under:
+
+`.codex/memories/extensions/{extension}/facts/*.md` (default extension=`tomako`).
+
+Every endpoint requires `session_key` (`platform:scope:userId`); the last segment selects the user directory. The agent must implement `AgentMemoryManager` (Codex does).
+
+#### GET /api/v1/projects/{name}/memory/facts
+
+Lists fact markdown files for one user.
+
+**Query params:**
+
+| Field         | Type   | Required | Description                                 |
+|---------------|--------|----------|---------------------------------------------|
+| `session_key` | string | yes      | Routing key, e.g. `java-backend:cibos:42`   |
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "session_key": "java-backend:cibos:42",
+    "work_dir": "/workspaces/user-42",
+    "facts_dir": "/workspaces/user-42/.codex/memories/extensions/tomako/facts",
+    "facts": [
+      {
+        "name": "2026-07-12T01-02-03-brand-llm-1.md",
+        "size": 256,
+        "mod_time": "2026-07-12T01:02:03Z"
+      }
+    ]
+  }
+}
+```
+
+#### GET /api/v1/projects/{name}/memory/facts/{filename}
+
+Reads one fact file's full markdown body.
+
+**Query params:** `session_key` (required)
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "name": "2026-07-12T01-02-03-brand-llm-1.md",
+    "content": "# brand\n\n- brand_name: Tomako\n",
+    "size": 42,
+    "mod_time": "2026-07-12T01:02:03Z",
+    "path": "/workspaces/user-42/.codex/memories/extensions/tomako/facts/2026-07-12T01-02-03-brand-llm-1.md"
+  }
+}
+```
+
+#### POST /api/v1/projects/{name}/memory/facts
+
+Creates a new fact markdown file from structured entries.
+
+**Request body:**
+
+```json
+{
+  "session_key": "java-backend:cibos:42",
+  "source_task_id": "llm-1",
+  "title": "brand",
+  "facts": [
+    {"type": "brand_name", "value": "Tomako"}
+  ]
+}
+```
+
+| Field            | Type     | Required | Description                          |
+|------------------|----------|----------|--------------------------------------|
+| `session_key`    | string   | yes      | User routing key                     |
+| `source_task_id` | string   | no       | Source task id (used in filename)    |
+| `title`          | string   | no       | Fact title (filename + body heading) |
+| `facts`          | object[] | yes      | `{type,value}` structured entries    |
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "file": "/workspaces/user-42/.codex/memories/extensions/tomako/facts/2026-07-12T01-02-03-brand-llm-1.md",
+    "name": "2026-07-12T01-02-03-brand-llm-1.md"
+  }
+}
+```
+
+#### PUT /api/v1/projects/{name}/memory/facts/{filename}
+
+Replaces the full markdown body of one fact file (for Memory page editing).
+
+**Request body:**
+
+```json
+{
+  "session_key": "java-backend:cibos:42",
+  "content": "# brand\n\n- brand_name: Foldos\n"
+}
+```
+
+| Field         | Type   | Required | Description                 |
+|---------------|--------|----------|-----------------------------|
+| `session_key` | string | yes      | User routing key            |
+| `content`     | string | yes      | Full markdown body          |
+
+#### DELETE /api/v1/projects/{name}/memory/facts/{filename}
+
+Deletes one fact file. Pass `session_key` via query string or JSON body.
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "deleted": true,
+    "name": "2026-07-12T01-02-03-brand-llm-1.md",
+    "session_key": "java-backend:cibos:42"
+  }
+}
+```
+
+---
+
 ### 5.4 Providers
 
 Providers are API backends (e.g. Anthropic, OpenAI, custom endpoints) that supply the AI model for a project's agent.

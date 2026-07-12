@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,44 +13,172 @@ import (
 )
 
 func (a *Agent) WriteMemoryFacts(_ context.Context, req core.AgentMemoryWriteRequest) (*core.AgentMemoryWriteResult, error) {
+	factsDir, err := a.resolveFactsDir(req.WorkDir, req.SessionKey)
+	if err != nil {
+		return nil, err
+	}
 	a.mu.RLock()
-	globalWorkDir := a.workDir
-	sessionWorkspaceBase := a.sessionWorkspaceBase
 	extension := a.memoryExtension
 	factTitle := a.memoryFactTitle
 	instructions := a.memoryInstructions
 	a.mu.RUnlock()
 
-	// Prefer engine-resolved WorkDir (multi-workspace: {base_dir}/user-{id}).
-	// Fall back to session_workspace_base + session_key only for single-workspace
-	// deployments that opt into that mapping.
-	workDir := strings.TrimSpace(req.WorkDir)
-	if workDir == "" {
-		workDir = resolveSessionWorkDir(globalWorkDir, sessionWorkspaceBase, req.SessionKey)
-	}
-	if strings.TrimSpace(workDir) == "" {
-		return nil, fmt.Errorf("codex memory: work_dir is empty")
-	}
-
 	extension = firstNonBlank(extension, "tomako")
-	extDir := filepath.Join(workDir, ".codex", "memories", "extensions", extension)
-	factsDir := filepath.Join(extDir, "facts")
-	if err := os.MkdirAll(factsDir, 0o755); err != nil {
-		return nil, fmt.Errorf("codex memory: create facts dir: %w", err)
-	}
+	extDir := filepath.Dir(factsDir)
 	if err := ensureMemoryInstructions(extDir, instructions, extension); err != nil {
 		return nil, err
 	}
 
 	fileName := memoryFactFileName(req.Title, req.SourceTaskID)
-	target := filepath.Join(factsDir, fileName)
-	if !strings.HasPrefix(filepath.Clean(target), filepath.Clean(factsDir)+string(os.PathSeparator)) {
-		return nil, fmt.Errorf("codex memory: resolved fact file escaped facts dir")
+	target, err := safeFactPath(factsDir, fileName)
+	if err != nil {
+		return nil, err
 	}
 	if err := writeFileAtomic(target, []byte(renderMemoryFacts(req, factTitle)), 0o644); err != nil {
 		return nil, fmt.Errorf("codex memory: write fact file: %w", err)
 	}
-	return &core.AgentMemoryWriteResult{File: target}, nil
+	return &core.AgentMemoryWriteResult{File: target, Name: fileName}, nil
+}
+
+func (a *Agent) ListMemoryFacts(_ context.Context, req core.AgentMemoryListRequest) (*core.AgentMemoryListResult, error) {
+	workDir, err := a.resolveWorkDir(req.WorkDir, req.SessionKey)
+	if err != nil {
+		return nil, err
+	}
+	factsDir, err := a.factsDirFor(workDir)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(factsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &core.AgentMemoryListResult{
+				SessionKey: req.SessionKey,
+				WorkDir:    workDir,
+				FactsDir:   factsDir,
+				Facts:      []core.AgentMemoryFactMeta{},
+			}, nil
+		}
+		return nil, fmt.Errorf("codex memory: list facts: %w", err)
+	}
+
+	facts := make([]core.AgentMemoryFactMeta, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !isFactFileName(name) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		facts = append(facts, core.AgentMemoryFactMeta{
+			Name:    name,
+			Size:    info.Size(),
+			ModTime: info.ModTime().UTC().Format(time.RFC3339),
+		})
+	}
+	sort.Slice(facts, func(i, j int) bool {
+		return facts[i].Name > facts[j].Name
+	})
+	return &core.AgentMemoryListResult{
+		SessionKey: req.SessionKey,
+		WorkDir:    workDir,
+		FactsDir:   factsDir,
+		Facts:      facts,
+	}, nil
+}
+
+func (a *Agent) GetMemoryFact(_ context.Context, req core.AgentMemoryGetRequest) (*core.AgentMemoryFactFile, error) {
+	factsDir, err := a.resolveFactsDir(req.WorkDir, req.SessionKey)
+	if err != nil {
+		return nil, err
+	}
+	target, err := safeFactPath(factsDir, req.Name)
+	if err != nil {
+		return nil, err
+	}
+	return readFactFile(target, req.Name)
+}
+
+func (a *Agent) UpdateMemoryFact(_ context.Context, req core.AgentMemoryUpdateRequest) (*core.AgentMemoryFactFile, error) {
+	factsDir, err := a.resolveFactsDir(req.WorkDir, req.SessionKey)
+	if err != nil {
+		return nil, err
+	}
+	target, err := safeFactPath(factsDir, req.Name)
+	if err != nil {
+		return nil, err
+	}
+	// Upsert: Memory UI may create user-notes.md on first save.
+	content := req.Content
+	if !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	if err := writeFileAtomic(target, []byte(content), 0o644); err != nil {
+		return nil, fmt.Errorf("codex memory: update fact file: %w", err)
+	}
+	return readFactFile(target, req.Name)
+}
+
+func (a *Agent) DeleteMemoryFact(_ context.Context, req core.AgentMemoryDeleteRequest) error {
+	factsDir, err := a.resolveFactsDir(req.WorkDir, req.SessionKey)
+	if err != nil {
+		return err
+	}
+	target, err := safeFactPath(factsDir, req.Name)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(target); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("codex memory: fact not found: %s", req.Name)
+		}
+		return fmt.Errorf("codex memory: delete fact: %w", err)
+	}
+	return nil
+}
+
+func (a *Agent) resolveFactsDir(workDir, sessionKey string) (string, error) {
+	resolved, err := a.resolveWorkDir(workDir, sessionKey)
+	if err != nil {
+		return "", err
+	}
+	return a.factsDirFor(resolved)
+}
+
+func (a *Agent) resolveWorkDir(workDir, sessionKey string) (string, error) {
+	a.mu.RLock()
+	globalWorkDir := a.workDir
+	sessionWorkspaceBase := a.sessionWorkspaceBase
+	a.mu.RUnlock()
+
+	// Prefer engine-resolved WorkDir (multi-workspace: {base_dir}/user-{id}).
+	// Fall back to session_workspace_base + session_key only for single-workspace
+	// deployments that opt into that mapping.
+	resolved := strings.TrimSpace(workDir)
+	if resolved == "" {
+		resolved = resolveSessionWorkDir(globalWorkDir, sessionWorkspaceBase, sessionKey)
+	}
+	if strings.TrimSpace(resolved) == "" {
+		return "", fmt.Errorf("codex memory: work_dir is empty")
+	}
+	return resolved, nil
+}
+
+func (a *Agent) factsDirFor(workDir string) (string, error) {
+	a.mu.RLock()
+	extension := a.memoryExtension
+	a.mu.RUnlock()
+	extension = firstNonBlank(extension, "tomako")
+	factsDir := filepath.Join(workDir, ".codex", "memories", "extensions", extension, "facts")
+	if err := os.MkdirAll(factsDir, 0o755); err != nil {
+		return "", fmt.Errorf("codex memory: create facts dir: %w", err)
+	}
+	return factsDir, nil
 }
 
 func resolveSessionWorkDir(defaultWorkDir, sessionWorkspaceBase, sessionKey string) string {
@@ -155,6 +284,52 @@ func renderMemoryFacts(req core.AgentMemoryWriteRequest, defaultTitle string) st
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+func isFactFileName(name string) bool {
+	if name == "" || name != filepath.Base(name) {
+		return false
+	}
+	if strings.Contains(name, "..") {
+		return false
+	}
+	return strings.HasSuffix(strings.ToLower(name), ".md")
+}
+
+func safeFactPath(factsDir, name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if !isFactFileName(name) {
+		return "", fmt.Errorf("codex memory: invalid fact file name %q", name)
+	}
+	target := filepath.Join(factsDir, name)
+	cleanFacts := filepath.Clean(factsDir)
+	cleanTarget := filepath.Clean(target)
+	prefix := cleanFacts + string(os.PathSeparator)
+	if cleanTarget != cleanFacts && !strings.HasPrefix(cleanTarget, prefix) {
+		return "", fmt.Errorf("codex memory: resolved fact file escaped facts dir")
+	}
+	return cleanTarget, nil
+}
+
+func readFactFile(path, name string) (*core.AgentMemoryFactFile, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("codex memory: fact not found: %s", name)
+		}
+		return nil, fmt.Errorf("codex memory: stat fact: %w", err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("codex memory: read fact: %w", err)
+	}
+	return &core.AgentMemoryFactFile{
+		Name:    name,
+		Content: string(body),
+		Size:    info.Size(),
+		ModTime: info.ModTime().UTC().Format(time.RFC3339),
+		Path:    path,
+	}, nil
 }
 
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
