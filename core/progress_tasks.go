@@ -104,7 +104,10 @@ func (t *progressTaskTracker) Observe(item ProgressCardEntry) []ProgressTask {
 		t.lastToolKind = kind
 	}
 	if kind != "" {
-		t.activate(kind)
+		// Thinking text is useful for advancing an existing plan, but it is too
+		// free-form to invent a new user-facing stage. New stages require an
+		// observed tool action.
+		t.activate(kind, item.Kind == ProgressEntryToolUse)
 	}
 	if item.Kind == ProgressEntryError {
 		for i := range t.tasks {
@@ -138,7 +141,7 @@ func (t *progressTaskTracker) Finalize(state ProgressCardState) []ProgressTask {
 	return t.Tasks()
 }
 
-func (t *progressTaskTracker) activate(kind progressTaskKind) {
+func (t *progressTaskTracker) activate(kind progressTaskKind, allowAdd bool) {
 	if kind == "" {
 		return
 	}
@@ -150,6 +153,9 @@ func (t *progressTaskTracker) activate(kind progressTaskKind) {
 		}
 	}
 	if target >= 0 && (t.tasks[target].Status == ProgressTaskCompleted || t.tasks[target].Status == ProgressTaskFailed) {
+		return
+	}
+	if target < 0 && !allowAdd {
 		return
 	}
 	for i := range t.tasks {
@@ -219,6 +225,11 @@ func buildProgressTaskProfile(request string) progressTaskProfile {
 		"推文", "帖子", "社媒", "微博", "公众号", "linkedin", "twitter", "tweet", "reddit", "social post")
 	profile.visuals = containsAny(q,
 		"图片", "配图", "封面", "海报", "视觉", "插图", "图像", "image", "visual", "cover", "poster", "banner", "thumbnail")
+	if containsAny(q,
+		"不需要生成图片", "不需要图片", "不要生成图片", "不生成图片", "无需图片", "不用图片",
+		"no image", "without image", "do not generate image", "don't generate image") {
+		profile.visuals = false
+	}
 	profile.content = containsAny(q,
 		"文章", "文案", "配文", "标题", "正文", "标签", "脚本", "推文", "帖子", "article", "copy", "caption", "headline", "content", "script", "post")
 	profile.research = containsAny(q,
@@ -383,7 +394,9 @@ func classifyProgressTaskEvent(item ProgressCardEntry) progressTaskKind {
 	if containsAny(q, "compose", "draft", "write the", "headline", "caption", "article", "hashtags", "正文", "标题", "标签", "文案", "文章", "撰写") {
 		return progressTaskContent
 	}
-	if containsAny(q, "apply_patch", "edit", "implement", "build", "compile", "code", "npm", "pnpm", "mvn", "开发", "实现", "修复", "代码") {
+	if containsAny(q,
+		"apply_patch", "write file", "edit file", "implement code", "go build", "npm run build", "pnpm build", "mvn package", "compile",
+		"写入文件", "修改文件", "开发", "实现", "修复", "代码") {
 		return progressTaskBuild
 	}
 	if containsAny(q, "analyze", "diagnose", "audit", "compare", "evaluate", "分析", "诊断", "审计", "比较", "评估") {

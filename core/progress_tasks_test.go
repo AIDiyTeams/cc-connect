@@ -97,3 +97,24 @@ func TestBuildAndParseProgressCardPayloadV3(t *testing.T) {
 		t.Fatalf("task title = %q", parsed.Tasks[0].Title)
 	}
 }
+
+func TestProgressTaskTrackerRespectsNegativeImageIntent(t *testing.T) {
+	tracker := newProgressTaskTracker("分析 Tomako 当前品牌信息并给出 3 条具体改进建议，不需要生成图片", LangChinese)
+	for _, task := range tracker.Tasks() {
+		if task.ID == string(progressTaskVisuals) || task.ID == string(progressTaskBuild) {
+			t.Fatalf("negative image/analysis request produced unrelated task: %#v", tracker.Tasks())
+		}
+	}
+
+	// Free-form thinking can advance a planned stage but cannot invent a new
+	// one merely because it mentions implementation or images.
+	tasks := tracker.Observe(ProgressCardEntry{
+		Kind: ProgressEntryThinking,
+		Text: "No images are needed; I will implement the recommendations in the answer",
+	})
+	for _, task := range tasks {
+		if task.ID == string(progressTaskVisuals) || task.ID == string(progressTaskBuild) {
+			t.Fatalf("thinking invented unrelated task: %#v", tasks)
+		}
+	}
+}
