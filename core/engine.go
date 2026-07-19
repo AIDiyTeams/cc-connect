@@ -3582,7 +3582,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		sendDone <- state.agentSession.Send(promptContent, msg.Images, msg.Files)
 	}()
 
-	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
+	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx, msg.Content)
 	if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
@@ -4385,7 +4385,11 @@ var agentErrorHandlers = []agentErrorHandler{
 	{"Session not found", MsgSessionNotFound},
 }
 
-func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
+func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any, userRequests ...string) {
+	userRequest := ""
+	if len(userRequests) > 0 {
+		userRequest = userRequests[0]
+	}
 	if msgID != "" {
 		state.mu.Lock()
 		state.currentMessageID = msgID
@@ -4452,7 +4456,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 	}
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
-	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
+	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer, userRequest)
 	state.mu.Unlock()
 
 	// Send instant confirmation reply if enabled and no streaming card is active.
@@ -5582,7 +5586,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
-				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
+				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer, queued.content)
 
 				// Reset streaming card state for the next turn
 				streamCard = nil
@@ -5876,7 +5880,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		}
 
 		slog.Info("processing queued message", "session", sessionKey)
-		e.processInteractiveEvents(state, session, sessions, sessionKey, queued.messageID, time.Now(), stopTyping, sendDone, queued.replyCtx)
+		e.processInteractiveEvents(state, session, sessions, sessionKey, queued.messageID, time.Now(), stopTyping, sendDone, queued.replyCtx, queued.content)
 	}
 }
 

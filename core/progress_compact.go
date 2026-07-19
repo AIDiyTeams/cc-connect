@@ -60,6 +60,7 @@ type ProgressCardPayload struct {
 	Agent     string              `json:"agent,omitempty"`
 	Lang      string              `json:"lang,omitempty"`
 	State     ProgressCardState   `json:"state,omitempty"`
+	Tasks     []ProgressTask      `json:"tasks,omitempty"`   // v3 user-facing high-level stages
 	Entries   []string            `json:"entries,omitempty"` // legacy fallback
 	Items     []ProgressCardEntry `json:"items,omitempty"`   // ordered typed events
 	Truncated bool                `json:"truncated"`
@@ -131,6 +132,30 @@ func BuildProgressCardPayloadV2(items []ProgressCardEntry, truncated bool, agent
 	return ProgressCardPayloadPrefix + string(b)
 }
 
+// BuildProgressCardPayloadV3 encodes only user-facing task stages. Raw
+// thinking, commands, tool inputs, and tool results are intentionally absent.
+func BuildProgressCardPayloadV3(tasks []ProgressTask, agent string, lang Language, state ProgressCardState) string {
+	cleaned := cleanProgressTasks(tasks)
+	if len(cleaned) == 0 {
+		return ""
+	}
+	if state == "" {
+		state = ProgressCardStateRunning
+	}
+	payload := ProgressCardPayload{
+		Version: 3,
+		Agent:   strings.TrimSpace(agent),
+		Lang:    string(lang),
+		State:   state,
+		Tasks:   cleaned,
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return ProgressCardPayloadPrefix + string(b)
+}
+
 // ParseProgressCardPayload decodes a structured progress payload.
 func ParseProgressCardPayload(content string) (*ProgressCardPayload, bool) {
 	if !strings.HasPrefix(content, ProgressCardPayloadPrefix) {
@@ -161,6 +186,7 @@ func ParseProgressCardPayload(content string) (*ProgressCardPayload, bool) {
 		}
 		items = append(items, item)
 	}
+	tasks := cleanProgressTasks(payload.Tasks)
 	if len(items) == 0 && len(legacy) > 0 {
 		for _, entry := range legacy {
 			items = append(items, ProgressCardEntry{
@@ -169,7 +195,7 @@ func ParseProgressCardPayload(content string) (*ProgressCardPayload, bool) {
 			})
 		}
 	}
-	if len(items) == 0 && len(legacy) == 0 {
+	if len(items) == 0 && len(legacy) == 0 && len(tasks) == 0 {
 		return nil, false
 	}
 	if payload.State == "" {
@@ -177,6 +203,7 @@ func ParseProgressCardPayload(content string) (*ProgressCardPayload, bool) {
 	}
 	payload.Items = items
 	payload.Entries = legacy
+	payload.Tasks = tasks
 	if len(payload.Entries) == 0 && len(payload.Items) > 0 {
 		payload.Entries = make([]string, 0, len(payload.Items))
 		for _, item := range payload.Items {
@@ -184,6 +211,30 @@ func ParseProgressCardPayload(content string) (*ProgressCardPayload, bool) {
 		}
 	}
 	return &payload, true
+}
+
+func cleanProgressTasks(tasks []ProgressTask) []ProgressTask {
+	cleaned := make([]ProgressTask, 0, len(tasks))
+	seen := make(map[string]bool, len(tasks))
+	for _, task := range tasks {
+		id := strings.TrimSpace(task.ID)
+		title := strings.Join(strings.Fields(strings.TrimSpace(task.Title)), " ")
+		if id == "" || title == "" || seen[id] {
+			continue
+		}
+		status := task.Status
+		switch status {
+		case ProgressTaskPending, ProgressTaskInProgress, ProgressTaskCompleted, ProgressTaskFailed:
+		default:
+			status = ProgressTaskPending
+		}
+		cleaned = append(cleaned, ProgressTask{ID: id, Title: title, Status: status})
+		seen[id] = true
+		if len(cleaned) == 5 {
+			break
+		}
+	}
+	return cleaned
 }
 
 func inferLegacyEntryKind(entry string) ProgressCardEntryKind {
@@ -218,15 +269,16 @@ type compactProgressWriter struct {
 	style      string
 	usePayload bool
 
-	content    string
-	entries    []string
-	items      []ProgressCardEntry
-	state      ProgressCardState
-	agentName  string
-	lang       Language
-	truncated  bool
-	lastSent   string
-	maxEntries int
+	content     string
+	entries     []string
+	items       []ProgressCardEntry
+	taskTracker *progressTaskTracker
+	state       ProgressCardState
+	agentName   string
+	lang        Language
+	truncated   bool
+	lastSent    string
+	maxEntries  int
 
 	// Throttle message edits to avoid platform rate limits (e.g. Discord ~5 edits/5s).
 	minUpdateInterval time.Duration
@@ -292,7 +344,11 @@ func SuppressStandaloneToolResultEvent(p Platform) bool {
 	return progressStyleForPlatform(p) == progressStyleLegacy
 }
 
-func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, agentName string, lang Language, transform func(string) string) *compactProgressWriter {
+func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, agentName string, lang Language, transform func(string) string, userRequests ...string) *compactProgressWriter {
+	userRequest := ""
+	if len(userRequests) > 0 {
+		userRequest = userRequests[0]
+	}
 	w := &compactProgressWriter{
 		ctx:        ctx,
 		platform:   p,
@@ -324,6 +380,7 @@ func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, age
 	if w.style == progressStyleCard {
 		if progressCardPayloadForTarget(p, replyCtx) {
 			w.usePayload = true
+			w.taskTracker = newProgressTaskTracker(userRequest, lang)
 		}
 	}
 	slog.Debug("progress writer enabled", "platform", p.Name(), "style", w.style, "use_payload", w.usePayload)
@@ -410,28 +467,29 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 
 	switch w.style {
 	case progressStyleCard:
-		w.items = append(w.items, item)
-		w.entries = append(w.entries, fallback)
-		truncated := false
-		if w.maxEntries > 0 && len(w.items) > w.maxEntries {
-			w.items = w.items[len(w.items)-w.maxEntries:]
-			if len(w.entries) > w.maxEntries {
-				w.entries = w.entries[len(w.entries)-w.maxEntries:]
-			}
-			truncated = true
-		} else if w.maxEntries > 0 && len(w.entries) > w.maxEntries {
-			w.entries = w.entries[len(w.entries)-w.maxEntries:]
-			truncated = true
-		}
-		w.truncated = truncated
 		if w.usePayload {
-			w.content = BuildProgressCardPayloadV2(w.items, w.truncated, w.agentName, w.lang, w.state)
+			tasks := w.taskTracker.Observe(item)
+			w.content = BuildProgressCardPayloadV3(tasks, w.agentName, w.lang, w.state)
 			if w.content == "" {
-				slog.Warn("progress writer: failed to build structured payload", "platform", w.platform.Name())
+				slog.Warn("progress writer: failed to build structured task payload", "platform", w.platform.Name())
 				w.failed = true
 				return false
 			}
 		} else {
+			w.items = append(w.items, item)
+			w.entries = append(w.entries, fallback)
+			truncated := false
+			if w.maxEntries > 0 && len(w.items) > w.maxEntries {
+				w.items = w.items[len(w.items)-w.maxEntries:]
+				if len(w.entries) > w.maxEntries {
+					w.entries = w.entries[len(w.entries)-w.maxEntries:]
+				}
+				truncated = true
+			} else if w.maxEntries > 0 && len(w.entries) > w.maxEntries {
+				w.entries = w.entries[len(w.entries)-w.maxEntries:]
+				truncated = true
+			}
+			w.truncated = truncated
 			w.content = renderCardProgressMarkdownFallback(w.entries, truncated)
 			w.content = trimCompactProgressText(w.content, compactProgressMaxChars)
 		}
@@ -507,7 +565,8 @@ func (w *compactProgressWriter) Finalize(state ProgressCardState) bool {
 		return true
 	}
 	w.state = state
-	w.content = BuildProgressCardPayloadV2(w.items, w.truncated, w.agentName, w.lang, w.state)
+	tasks := w.taskTracker.Finalize(state)
+	w.content = BuildProgressCardPayloadV3(tasks, w.agentName, w.lang, w.state)
 	if w.content == "" || w.content == w.lastSent {
 		return w.content != ""
 	}

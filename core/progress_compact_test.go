@@ -191,7 +191,7 @@ func TestParseProgressCardPayloadRejectsInvalid(t *testing.T) {
 	}
 }
 
-func TestCompactProgressWriter_AppliesTransformToCardPayloadEntries(t *testing.T) {
+func TestCompactProgressWriter_DoesNotExposeRawThinkingOrPaths(t *testing.T) {
 	p := &stubCompactProgressPlatform{
 		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
 		style:              "card",
@@ -216,11 +216,11 @@ func TestCompactProgressWriter_AppliesTransformToCardPayloadEntries(t *testing.T
 	if !ok {
 		t.Fatalf("ParseProgressCardPayload(%q) failed", starts[0])
 	}
-	if len(payload.Items) != 1 {
-		t.Fatalf("payload items = %d, want 1", len(payload.Items))
+	if payload.Version != 3 || len(payload.Tasks) == 0 {
+		t.Fatalf("payload = %#v, want v3 task plan", payload)
 	}
-	if got := payload.Items[0].Text; got != "Inspect 📄 `src/app.ts:42`" {
-		t.Fatalf("payload item text = %q, want transformed text", got)
+	if len(payload.Items) != 0 || strings.Contains(starts[0], "/root/code") || strings.Contains(starts[0], "Inspect") {
+		t.Fatalf("payload exposed raw thinking/path: %q", starts[0])
 	}
 }
 
@@ -242,22 +242,23 @@ func TestCompactProgressWriter_ThrottlesRapidUpdates(t *testing.T) {
 		},
 		throttle: 50 * time.Millisecond,
 	}
-	w := newCompactProgressWriter(context.Background(), p, "ctx", "cc", LangEnglish, nil)
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "cc", LangEnglish, nil,
+		"Research sources, create images, and write a social post")
 
-	w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryThinking, Text: "step 1"}, "step 1")
+	w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryThinking, Text: "Review the request"}, "step 1")
 	if len(p.getPreviewStarts()) != 1 {
 		t.Fatal("first update should create the preview message")
 	}
 
-	w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "pwd"}, "pwd")
-	w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolResult, Tool: "Bash", Text: "ok"}, "ok")
+	w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "WebSearch", Text: "search sources"}, "search")
+	w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolResult, Tool: "WebSearch", Text: "raw search output"}, "output")
 	editsBeforeThrottle := len(p.getPreviewEdits())
 	if editsBeforeThrottle > 0 {
 		t.Fatalf("rapid updates within throttle window should be skipped, got %d edits", editsBeforeThrottle)
 	}
 
 	time.Sleep(60 * time.Millisecond)
-	w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryThinking, Text: "step 4"}, "step 4")
+	w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "call /api/image/generate"}, "image")
 	editsAfterWait := len(p.getPreviewEdits())
 	if editsAfterWait != 1 {
 		t.Fatalf("update after throttle interval should go through, got %d edits", editsAfterWait)
@@ -276,12 +277,17 @@ func TestCompactProgressWriter_ThrottlesRapidUpdates(t *testing.T) {
 	if payload.State != ProgressCardStateCompleted {
 		t.Fatalf("state = %q, want completed", payload.State)
 	}
-	if len(payload.Items) != 4 {
-		t.Fatalf("items = %d, want 4 (all buffered items)", len(payload.Items))
+	if len(payload.Tasks) < 3 || len(payload.Items) != 0 {
+		t.Fatalf("payload = %#v, want completed high-level tasks only", payload)
+	}
+	for _, task := range payload.Tasks {
+		if task.Status != ProgressTaskCompleted {
+			t.Fatalf("final task = %#v, want completed", task)
+		}
 	}
 }
 
-func TestCompactProgressWriter_DoesNotTransformToolResults(t *testing.T) {
+func TestCompactProgressWriter_DoesNotExposeToolResults(t *testing.T) {
 	p := &stubCompactProgressPlatform{
 		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
 		style:              "card",
@@ -307,7 +313,10 @@ func TestCompactProgressWriter_DoesNotTransformToolResults(t *testing.T) {
 	if !ok {
 		t.Fatalf("ParseProgressCardPayload(%q) failed", starts[0])
 	}
-	if got := payload.Items[0].Text; got != raw {
-		t.Fatalf("tool result text = %q, want raw %q", got, raw)
+	if len(payload.Items) != 0 || strings.Contains(starts[0], raw) {
+		t.Fatalf("tool result leaked into payload: %q", starts[0])
+	}
+	if len(payload.Tasks) == 0 {
+		t.Fatalf("payload tasks = %#v, want safe task plan", payload.Tasks)
 	}
 }
