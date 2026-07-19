@@ -112,9 +112,14 @@ func TestProgressTaskTrackerRespectsNegativeImageIntent(t *testing.T) {
 		Kind: ProgressEntryThinking,
 		Text: "No images are needed; I will implement the recommendations in the answer",
 	})
+	tasks = tracker.Observe(ProgressCardEntry{
+		Kind: ProgressEntryToolUse,
+		Tool: "Bash",
+		Text: "call /api/image/generate",
+	})
 	for _, task := range tasks {
 		if task.ID == string(progressTaskVisuals) || task.ID == string(progressTaskBuild) {
-			t.Fatalf("thinking invented unrelated task: %#v", tasks)
+			t.Fatalf("agent event invented unrelated task: %#v", tasks)
 		}
 	}
 }

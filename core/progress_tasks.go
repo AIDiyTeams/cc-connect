@@ -39,6 +39,7 @@ type progressTaskProfile struct {
 	social        bool
 	xiaohongshu   bool
 	visuals       bool
+	forbidVisuals bool
 	content       bool
 	research      bool
 	analysis      bool
@@ -145,6 +146,12 @@ func (t *progressTaskTracker) activate(kind progressTaskKind, allowAdd bool) {
 	if kind == "" {
 		return
 	}
+	// Explicit negative requirements are hard constraints. A downstream tool
+	// event may mention or even invoke image work, but that must not rewrite the
+	// user-facing plan into work the user specifically excluded.
+	if kind == progressTaskVisuals && t.profile.forbidVisuals {
+		return
+	}
 	target := -1
 	for i := range t.tasks {
 		if t.kinds[t.tasks[i].ID] == kind {
@@ -225,9 +232,10 @@ func buildProgressTaskProfile(request string) progressTaskProfile {
 		"推文", "帖子", "社媒", "微博", "公众号", "linkedin", "twitter", "tweet", "reddit", "social post")
 	profile.visuals = containsAny(q,
 		"图片", "配图", "封面", "海报", "视觉", "插图", "图像", "image", "visual", "cover", "poster", "banner", "thumbnail")
-	if containsAny(q,
+	profile.forbidVisuals = containsAny(q,
 		"不需要生成图片", "不需要图片", "不要生成图片", "不生成图片", "无需图片", "不用图片",
-		"no image", "without image", "do not generate image", "don't generate image") {
+		"no image", "without image", "do not generate image", "don't generate image")
+	if profile.forbidVisuals {
 		profile.visuals = false
 	}
 	profile.content = containsAny(q,
