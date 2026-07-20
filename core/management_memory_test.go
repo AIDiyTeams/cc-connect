@@ -173,7 +173,7 @@ func TestResolveMemoryWorkDir_MultiWorkspace(t *testing.T) {
 		t.Fatalf("ResolveMemoryWorkDir() error = %v", err)
 	}
 	want := filepath.Join(base, "user-42")
-	if got != want {
+	if !samePath(t, got, want) {
 		t.Fatalf("ResolveMemoryWorkDir() = %q, want %q", got, want)
 	}
 }
@@ -223,7 +223,7 @@ func TestMgmt_ProjectMemoryFactsListGetUpdateDelete(t *testing.T) {
 		t.Fatalf("list status = %d", listResp.StatusCode)
 	}
 	listData := decodeMgmtData(t, listResp)
-	if agent.listed.WorkDir != wantDir {
+	if !samePath(t, agent.listed.WorkDir, wantDir) {
 		t.Fatalf("list WorkDir = %q, want %q", agent.listed.WorkDir, wantDir)
 	}
 	if listData["session_key"] != sessionKey {
@@ -244,7 +244,7 @@ func TestMgmt_ProjectMemoryFactsListGetUpdateDelete(t *testing.T) {
 		t.Fatalf("get status = %d", getResp.StatusCode)
 	}
 	_ = decodeMgmtData(t, getResp)
-	if agent.got.Name != "brand.md" || agent.got.WorkDir != wantDir {
+	if agent.got.Name != "brand.md" || !samePath(t, agent.got.WorkDir, wantDir) {
 		t.Fatalf("get req = %+v", agent.got)
 	}
 
@@ -263,7 +263,7 @@ func TestMgmt_ProjectMemoryFactsListGetUpdateDelete(t *testing.T) {
 		t.Fatalf("put status = %d", putResp.StatusCode)
 	}
 	_ = decodeMgmtData(t, putResp)
-	if agent.updated.Name != "brand.md" || agent.updated.WorkDir != wantDir || !strings.Contains(agent.updated.Content, "Edited") {
+	if agent.updated.Name != "brand.md" || !samePath(t, agent.updated.WorkDir, wantDir) || !strings.Contains(agent.updated.Content, "Edited") {
 		t.Fatalf("update req = %+v", agent.updated)
 	}
 
@@ -284,7 +284,7 @@ func TestMgmt_ProjectMemoryFactsListGetUpdateDelete(t *testing.T) {
 	if delData["deleted"] != true || delData["name"] != "brand.md" {
 		t.Fatalf("delete data = %#v", delData)
 	}
-	if agent.deleted.Name != "brand.md" || agent.deleted.WorkDir != wantDir {
+	if agent.deleted.Name != "brand.md" || !samePath(t, agent.deleted.WorkDir, wantDir) {
 		t.Fatalf("delete req = %+v", agent.deleted)
 	}
 }

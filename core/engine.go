@@ -615,39 +615,69 @@ func (e *Engine) SetWorkspaceShare(opts WorkspaceShareOptions) {
 // ResolveMemoryWorkDir returns the Codex cwd that memory fact writes must use
 // for the given bridge session_key.
 //
-// In multi-workspace mode this matches interactive routing:
-// {base_dir}/user-{userId} (userId from session_key's last segment).
+// In multi-workspace mode this matches interactive routing. Brand-scoped
+// sessions use {base_dir}/tenant-{tenantId}/brand-{brandId}; legacy sessions
+// without a brand/project segment retain {base_dir}/user-{userId}.
 // The directory is created via initUserWorkspace when missing so fact writes
 // land in the same tree the next Codex session will read.
 //
 // Outside multi-workspace mode it falls back to the project agent's work_dir.
 func (e *Engine) ResolveMemoryWorkDir(sessionKey string) (string, error) {
 	if e.multiWorkspace && strings.TrimSpace(e.baseDir) != "" {
+		if workspace, ok := e.brandWorkspacePath(sessionKey); ok {
+			return e.ensureResolvedWorkspace(workspace, "brand workspace initialized for memory write")
+		}
 		userID := sanitizeUserWorkspaceID(extractUserID(sessionKey))
 		if userID == "" || userID == "unknown" {
 			return "", fmt.Errorf("session_key %q has no usable user id for per-user workspace", sessionKey)
 		}
 		workspace := normalizeWorkspacePath(filepath.Join(e.baseDir, e.userWorkspaceDirName(userID)))
-		if _, err := os.Stat(workspace); os.IsNotExist(err) {
-			if err := e.initUserWorkspace(workspace); err != nil {
-				return "", fmt.Errorf("init memory workspace: %w", err)
-			}
-			// Re-normalize after create: EvalSymlinks only resolves once the
-			// leaf exists (macOS /var → /private/var), so first and later
-			// calls would otherwise return different path strings.
-			workspace = normalizeWorkspacePath(workspace)
-			slog.Info("user workspace initialized for memory write", "workspace", workspace)
-		} else if err != nil {
-			return "", fmt.Errorf("stat memory workspace: %w", err)
-		} else {
-			e.refreshWorkspaceShareLinks(workspace)
-		}
-		return workspace, nil
+		return e.ensureResolvedWorkspace(workspace, "user workspace initialized for memory write")
 	}
 	if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
 		return strings.TrimSpace(wd.GetWorkDir()), nil
 	}
 	return "", nil
+}
+
+func (e *Engine) ensureResolvedWorkspace(workspace, initLogMessage string) (string, error) {
+	if _, err := os.Stat(workspace); os.IsNotExist(err) {
+		if err := e.initUserWorkspace(workspace); err != nil {
+			return "", fmt.Errorf("init memory workspace: %w", err)
+		}
+		// EvalSymlinks only resolves once the leaf exists, so normalize again
+		// after the first create to keep routing keys stable.
+		workspace = normalizeWorkspacePath(workspace)
+		slog.Info(initLogMessage, "workspace", workspace)
+	} else if err != nil {
+		return "", fmt.Errorf("stat memory workspace: %w", err)
+	} else {
+		e.refreshWorkspaceShareLinks(workspace)
+	}
+	return workspace, nil
+}
+
+// brandWorkspacePath resolves the stable business context encoded by Java
+// bridge session keys. `project` remains accepted while the API naming moves
+// to Brand; both map to the same brand directory contract.
+func (e *Engine) brandWorkspacePath(sessionKey string) (string, bool) {
+	parts := strings.Split(strings.TrimSpace(sessionKey), ":")
+	if len(parts) < 4 {
+		return "", false
+	}
+	tenantID := sanitizeUserWorkspaceID(parts[1])
+	for i := 2; i+1 < len(parts); i++ {
+		if parts[i] != "brand" && parts[i] != "project" {
+			continue
+		}
+		brandID := sanitizeUserWorkspaceID(parts[i+1])
+		if tenantID == "unknown" || brandID == "unknown" {
+			return "", false
+		}
+		return normalizeWorkspacePath(filepath.Join(
+			e.baseDir, "tenant-"+tenantID, "brand-"+brandID)), true
+	}
+	return "", false
 }
 
 // sanitizeUserWorkspaceID keeps the same character set as Codex session-key
@@ -2672,22 +2702,30 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	var wsSessions *SessionManager
 	var resolvedWorkspace string
 	if e.multiWorkspace {
-		// Per-user workspace: use "{prefix}{UserID}" as the workspace identifier
-		// instead of channel-based binding, so each user gets an isolated directory.
+		// Java/Bridge business sessions share one workspace per Brand. Legacy
+		// sessions without a brand/project scope retain per-user routing.
+		workspace, brandScoped := e.brandWorkspacePath(msg.SessionKey)
+		channelName := ""
+		var err error
 		prefix := e.userDirPrefix()
-		channelID := prefix + msg.UserID
-		if channelID == prefix {
-			channelID = effectiveChannelID(msg) // fallback for missing UserID
-		}
+		channelID := ""
 		channelKey := effectiveWorkspaceChannelKey(msg)
-		workspace, channelName, err := e.resolveWorkspace(p, channelID)
+		if brandScoped {
+			channelName = filepath.Base(workspace)
+		} else {
+			channelID = prefix + msg.UserID
+			if channelID == prefix {
+				channelID = effectiveChannelID(msg) // fallback for missing UserID
+			}
+			workspace, channelName, err = e.resolveWorkspace(p, channelID)
+		}
 		if err != nil {
 			slog.Error("workspace resolution failed", "err", err)
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 			return
 		}
 		// Auto-create workspace for per-user bindings (bridge has no ChannelNameResolver)
-		if workspace == "" && strings.HasPrefix(channelID, prefix) {
+		if !brandScoped && workspace == "" && strings.HasPrefix(channelID, prefix) {
 			candidate := filepath.Join(e.baseDir, channelID)
 			normalized := normalizeWorkspacePath(candidate)
 			projectKey := "project:" + e.name
@@ -3607,7 +3645,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}
 }
 
-// getOrCreateWorkspaceAgent returns (or creates) a per-workspace agent and session manager.
+// getOrCreateWorkspaceAgent returns (or creates) a scoped agent and session manager.
 // workspace must be a normalized path (from resolveWorkspace or normalizeWorkspacePath).
 func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionManager, error) {
 	if e.workspacePool == nil {
@@ -3621,7 +3659,7 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 		return ws.agent, ws.sessions, nil
 	}
 
-	// Initialize user workspace if it doesn't exist (symlinks to shared skill library)
+	// Initialize the resolved workspace if it doesn't exist.
 	if _, err := os.Stat(workspace); os.IsNotExist(err) {
 		if err := e.initUserWorkspace(workspace); err != nil {
 			return nil, nil, fmt.Errorf("workspace init failed: %w", err)
@@ -15809,8 +15847,8 @@ func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string,
 	return "", channelName, nil
 }
 
-// initUserWorkspace creates a per-user workspace with symlinks to a shared skill library.
-// User-private directories are created as real directories; shared items are symlinked so a
+// initUserWorkspace creates a resolved workspace with symlinks to a shared skill library.
+// Private directories are created as real directories; shared items are symlinked so a
 // single library update reaches all users. Layout is driven by WorkspaceShareOptions.
 func (e *Engine) initUserWorkspace(workspace string) error {
 	share := e.workspaceShare.Normalize()

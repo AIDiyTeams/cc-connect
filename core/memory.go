@@ -13,7 +13,8 @@ type AgentMemoryFact struct {
 //
 // WorkDir, when set by the engine/management layer, is the authoritative
 // Codex cwd for this write. In multi-workspace deployments this is
-// typically {base_dir}/{user_dir_prefix}{userId} (default user-{id}).
+// typically {base_dir}/tenant-{tenantId}/brand-{brandId}. Legacy sessions
+// without a brand scope retain {base_dir}/{user_dir_prefix}{userId}.
 // Agents must prefer WorkDir over deriving a path from SessionKey alone.
 type AgentMemoryWriteRequest struct {
 	SessionKey   string            `json:"session_key"`
@@ -29,7 +30,7 @@ type AgentMemoryWriteResult struct {
 	Name string `json:"name,omitempty"`
 }
 
-// AgentMemoryListRequest lists fact markdown files for a user workspace.
+// AgentMemoryListRequest lists fact markdown files for the resolved workspace.
 type AgentMemoryListRequest struct {
 	SessionKey string `json:"session_key"`
 	WorkDir    string `json:"work_dir,omitempty"`
@@ -44,9 +45,9 @@ type AgentMemoryFactMeta struct {
 
 // AgentMemoryListResult is the list of fact files under a user workspace.
 type AgentMemoryListResult struct {
-	SessionKey string               `json:"session_key"`
-	WorkDir    string               `json:"work_dir,omitempty"`
-	FactsDir   string               `json:"facts_dir,omitempty"`
+	SessionKey string                `json:"session_key"`
+	WorkDir    string                `json:"work_dir,omitempty"`
+	FactsDir   string                `json:"facts_dir,omitempty"`
 	Facts      []AgentMemoryFactMeta `json:"facts"`
 }
 
@@ -88,8 +89,8 @@ type AgentMemoryWriter interface {
 }
 
 // AgentMemoryManager extends AgentMemoryWriter with list / get / update /
-// delete of per-user fact markdown files. Management API routes by
-// session_key → user workspace before calling these methods.
+// delete of scoped fact markdown files. Management API routes by session_key
+// to the Brand workspace when present, then falls back to the legacy user scope.
 type AgentMemoryManager interface {
 	AgentMemoryWriter
 	ListMemoryFacts(ctx context.Context, req AgentMemoryListRequest) (*AgentMemoryListResult, error)

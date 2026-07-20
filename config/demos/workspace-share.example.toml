@@ -73,10 +73,10 @@ model = "deepseek-v4-flash"
 # shared_skills_dir = "/home/ubuntu/Skills-OL"   # absolute path; wins over env/name lookup
 # shared_skills_env = "SKILLS_OL_DIR"            # env override name
 # shared_skills_name = "Skills-OL"               # ~/Skills-OL and sibling-of-base_dir lookup
-# private_dirs = ["outputs", ".codex"]           # real dirs per user workspace
+# private_dirs = ["outputs", ".codex"]           # real dirs per resolved workspace
 # symlink_items = ["skills", "node_modules", "package.json"]
 # symlink_globs = ["*.mjs"]                      # extra root files to symlink; [] disables
-# user_dir_prefix = "user-"                      # → base_dir/user-{id}
+# user_dir_prefix = "user-"                      # legacy no-Brand fallback → base_dir/user-{id}
 #
 # [projects.workspace_share.platform_docs]
 # enabled = true
