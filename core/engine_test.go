@@ -1772,12 +1772,13 @@ func TestProcessInteractiveEvents_CardProgressUsesStructuredPayloadWhenSupported
 	}
 	e.interactiveStates[sessionKey] = state
 
-	agentSession.events <- Event{Type: EventThinking, Content: "Plan first"}
-	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
+	agentSession.events <- Event{Type: EventThinking, Content: "Plan the post structure first"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "curl https://tomako.ai/api/image/generate"}
 	agentSession.events <- Event{Type: EventText, Content: "done"}
 	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
 
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m3", time.Now(), nil, nil, state.replyCtx)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m3", time.Now(), nil, nil, state.replyCtx,
+		"生成一篇包含封面、配图、正文和标签的小红书文章")
 
 	starts := p.getPreviewStarts()
 	if len(starts) != 1 {
@@ -1790,11 +1791,11 @@ func TestProcessInteractiveEvents_CardProgressUsesStructuredPayloadWhenSupported
 	if !ok {
 		t.Fatalf("start preview should parse as structured payload, got %q", starts[0])
 	}
-	if len(startPayload.Items) != 1 {
-		t.Fatalf("start payload items = %d, want 1", len(startPayload.Items))
+	if startPayload.Version != 3 || len(startPayload.Tasks) != 5 {
+		t.Fatalf("start payload = %#v, want v3 high-level tasks", startPayload)
 	}
-	if startPayload.Items[0].Kind != ProgressEntryThinking {
-		t.Fatalf("start payload kind = %q, want %q", startPayload.Items[0].Kind, ProgressEntryThinking)
+	if len(startPayload.Items) != 0 || strings.Contains(starts[0], "Plan the post structure") {
+		t.Fatalf("start payload must not expose raw thinking: %q", starts[0])
 	}
 	if startPayload.State != ProgressCardStateRunning {
 		t.Fatalf("start payload state = %q, want %q", startPayload.State, ProgressCardStateRunning)
@@ -1808,11 +1809,20 @@ func TestProcessInteractiveEvents_CardProgressUsesStructuredPayloadWhenSupported
 	if !ok {
 		t.Fatalf("update preview should parse as structured payload, got %q", edits[0])
 	}
-	if len(updatePayload.Items) != 2 {
-		t.Fatalf("update payload items = %d, want 2", len(updatePayload.Items))
+	if len(updatePayload.Tasks) != 5 {
+		t.Fatalf("update payload tasks = %d, want 5", len(updatePayload.Tasks))
 	}
-	if !strings.Contains(updatePayload.Items[1].Text, "echo hi") {
-		t.Fatalf("second payload item should contain tool command, got %q", updatePayload.Items[1].Text)
+	if strings.Contains(edits[0], "curl") || strings.Contains(edits[0], "/api/image/generate") {
+		t.Fatalf("update payload exposed tool command: %q", edits[0])
+	}
+	activeVisual := false
+	for _, task := range updatePayload.Tasks {
+		if task.ID == string(progressTaskVisuals) && task.Status == ProgressTaskInProgress {
+			activeVisual = true
+		}
+	}
+	if !activeVisual {
+		t.Fatalf("visual stage should be active: %#v", updatePayload.Tasks)
 	}
 
 	finalPayload, ok := ParseProgressCardPayload(edits[1])
