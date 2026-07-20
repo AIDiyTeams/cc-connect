@@ -640,11 +640,15 @@ GET /api/v1/status?token=mgmt-secret
 
 ### 5.3.1 用户记忆 Facts（Codex extension）
 
-按 `session_key` 路由到对应用户 workspace（multi-workspace 下为 `{base_dir}/user-{userId}`），读写 Codex 记忆扩展目录：
+按 `session_key` 路由到对应 workspace。带 Brand 作用域时使用
+`{base_dir}/tenant-{tenantId}/brand-{brandId}`；没有 Brand 的兼容请求仍使用
+`{base_dir}/user-{userId}`。接口在解析后的目录中读写 Codex 记忆扩展：
 
 `.codex/memories/extensions/{extension}/facts/*.md`（默认 extension=`tomako`）。
 
-所有接口均需 `session_key`（格式：`platform:scope:userId`），用最后一段 `userId` 定位用户目录。Agent 需实现 `AgentMemoryManager`（Codex 已实现）。
+所有接口均需 `session_key`。Brand 请求使用
+`platform:tenantId:userId:brand:brandId:...`；兼容请求仍可使用
+`platform:scope:userId`。Agent 需实现 `AgentMemoryManager`（Codex 已实现）。
 
 #### GET /api/v1/projects/{name}/memory/facts
 

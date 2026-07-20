@@ -640,6 +640,18 @@ Examples:
 
 The adapter is responsible for constructing consistent session keys.
 
+Business adapters may append a stable Brand scope:
+
+```
+{platform}:{tenant_id}:{user_id}:brand:{brand_id}:{session_type}:{session_id}
+```
+
+In multi-workspace mode, `:brand:` sessions resolve to
+`{base_dir}/tenant-{tenant_id}/brand-{brand_id}`. The legacy `:project:` marker
+is treated as a Brand marker during the Project-to-Brand naming migration.
+Different users in the same Tenant and Brand therefore share the working
+directory while retaining separate conversation session keys.
+
 ---
 
 ## Session Management REST API

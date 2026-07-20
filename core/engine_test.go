@@ -1100,10 +1100,10 @@ func TestProcessInteractiveEvents_NonTerminalResultContinuesTurn(t *testing.T) {
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	agentSession := newControllableSession("s1")
 	state := &interactiveState{
-		agentSession:                  agentSession,
-		platform:                      p,
-		replyCtx:                      "ctx-1",
-		currentTurnUserMessageTimeMs:  100,
+		agentSession:                   agentSession,
+		platform:                       p,
+		replyCtx:                       "ctx-1",
+		currentTurnUserMessageTimeMs:   100,
 		lastCompletedUserMessageTimeMs: 0,
 	}
 	e.interactiveStates[sessionKey] = state
@@ -3274,6 +3274,47 @@ func TestHandleMessage_MultiWorkspacePreservesCCSessionKey(t *testing.T) {
 			t.Fatal("timed out waiting for CC_SESSION_KEY to be injected")
 		default:
 			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestHandleMessage_MultiWorkspaceRoutesBrandSessionToBrandDirectory(t *testing.T) {
+	p := &stubPlatformEngine{n: "java-backend"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	e.SetWorkspaceIdleTimeout(0)
+
+	sessionKey := "java-backend:tenant-a:20:brand:brand-42:task:llm-1"
+	wsDir := normalizeWorkspacePath(filepath.Join(baseDir, "tenant-tenant-a", "brand-brand-42"))
+	wsAgent := &sessionEnvRecordingAgent{session: newResultAgentSession("ok")}
+	ws := e.workspacePool.GetOrCreate(wsDir)
+	ws.agent = wsAgent
+	ws.sessions = NewSessionManager("")
+
+	msg := &Message{
+		SessionKey: sessionKey,
+		Platform:   "java-backend",
+		UserID:     "20",
+		UserName:   "member",
+		Content:    "hello",
+		ReplyCtx:   "llm-1",
+	}
+	e.handleMessage(p, msg)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if got := wsAgent.EnvValue("CC_SESSION_KEY"); got != "" {
+			if got != sessionKey {
+				t.Fatalf("CC_SESSION_KEY = %q, want %q", got, sessionKey)
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("brand workspace agent was not selected; expected workdir %q", wsDir)
+		case <-time.After(10 * time.Millisecond):
 		}
 	}
 }
@@ -14788,8 +14829,8 @@ func TestIsAllowResponse_WithMultipleMentions(t *testing.T) {
 func TestIsAllowResponse_NotInsideOtherWord(t *testing.T) {
 	cases := []string{
 		"禁止允许这种",
-		"不允许这样",   // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
-		"我不太允许这件事", // long sentence, no token equals "允许"
+		"不允许这样",                            // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
+		"我不太允许这件事",                         // long sentence, no token equals "允许"
 		"please don't allowall the things", // FieldsFunc keeps "allowall" intact, but it is the approveAll single-token form, not allow.
 		"hello world",
 		"",
@@ -14817,7 +14858,7 @@ func TestIsDenyResponse_WithMention(t *testing.T) {
 	}
 
 	negatives := []string{
-		"拒绝症患者",       // embedded — must not match
+		"拒绝症患者",        // embedded — must not match
 		"我们都不应该 hello", // unrelated
 	}
 	for _, s := range negatives {

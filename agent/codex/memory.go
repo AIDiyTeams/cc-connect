@@ -156,7 +156,7 @@ func (a *Agent) resolveWorkDir(workDir, sessionKey string) (string, error) {
 	sessionWorkspaceBase := a.sessionWorkspaceBase
 	a.mu.RUnlock()
 
-	// Prefer engine-resolved WorkDir (multi-workspace: {base_dir}/user-{id}).
+	// Prefer engine-resolved WorkDir (multi-workspace: Brand scope when present).
 	// Fall back to session_workspace_base + session_key only for single-workspace
 	// deployments that opt into that mapping.
 	resolved := strings.TrimSpace(workDir)
