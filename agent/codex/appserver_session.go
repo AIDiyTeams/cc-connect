@@ -1118,6 +1118,40 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 			s.completeTurn()
 		}
 
+	case "turn/plan/updated":
+		var notif struct {
+			Plan []struct {
+				Step   string `json:"step"`
+				Status string `json:"status"`
+			} `json:"plan"`
+		}
+		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
+			tasks := make([]core.ProgressTask, 0, len(notif.Plan))
+			for index, item := range notif.Plan {
+				step := strings.Join(strings.Fields(strings.TrimSpace(item.Step)), " ")
+				if step == "" {
+					continue
+				}
+				status := core.ProgressTaskPending
+				switch strings.ToLower(strings.TrimSpace(item.Status)) {
+				case "inprogress", "in_progress":
+					status = core.ProgressTaskInProgress
+				case "completed":
+					status = core.ProgressTaskCompleted
+				case "failed":
+					status = core.ProgressTaskFailed
+				}
+				tasks = append(tasks, core.ProgressTask{
+					ID:     fmt.Sprintf("task-%d", index+1),
+					Title:  step,
+					Status: status,
+				})
+			}
+			if len(tasks) > 0 {
+				s.emit(core.Event{Type: core.EventPlanUpdate, ProgressTasks: tasks})
+			}
+		}
+
 	case "thread/status/changed":
 		var notif struct {
 			ThreadID string `json:"threadId"`

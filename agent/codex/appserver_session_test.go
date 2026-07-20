@@ -131,6 +131,37 @@ func TestAppServerSession_HandleThreadTokenUsageUpdatedCachesContextUsage(t *tes
 	}
 }
 
+func TestAppServerSession_HandleTurnPlanUpdatedEmitsAgentPlan(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 1)}
+	raw := json.RawMessage(`{
+		"turnId":"turn-1",
+		"plan":[
+			{"step":"明确 Reddit 帖子角度","status":"completed"},
+			{"step":"生成对应封面与配图","status":"inProgress"}
+		]
+	}`)
+
+	s.handleNotification("turn/plan/updated", raw)
+
+	select {
+	case event := <-s.events:
+		if event.Type != core.EventPlanUpdate {
+			t.Fatalf("event type = %q, want %q", event.Type, core.EventPlanUpdate)
+		}
+		if len(event.ProgressTasks) != 2 {
+			t.Fatalf("tasks = %#v, want 2", event.ProgressTasks)
+		}
+		if event.ProgressTasks[0].Title != "明确 Reddit 帖子角度" || event.ProgressTasks[0].Status != core.ProgressTaskCompleted {
+			t.Fatalf("first task = %#v", event.ProgressTasks[0])
+		}
+		if event.ProgressTasks[1].Title != "生成对应封面与配图" || event.ProgressTasks[1].Status != core.ProgressTaskInProgress {
+			t.Fatalf("second task = %#v", event.ProgressTasks[1])
+		}
+	default:
+		t.Fatal("turn/plan/updated did not emit an event")
+	}
+}
+
 func TestMapAppServerRateLimits_PrefersMultiBucketView(t *testing.T) {
 	report := mapAppServerRateLimits(appServerRateLimitsResponse{
 		RateLimits: appServerRateLimitSnapshot{

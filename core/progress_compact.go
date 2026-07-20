@@ -469,6 +469,11 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 	case progressStyleCard:
 		if w.usePayload {
 			tasks := w.taskTracker.Observe(item)
+			if len(tasks) == 0 {
+				// Wait for the Agent's first turn/plan/updated event. Showing a
+				// loader is more truthful than inventing a keyword-based plan.
+				return true
+			}
 			w.content = BuildProgressCardPayloadV3(tasks, w.agentName, w.lang, w.state)
 			if w.content == "" {
 				slog.Warn("progress writer: failed to build structured task payload", "platform", w.platform.Name())
@@ -502,6 +507,27 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 		w.content = trimCompactProgressText(w.content, compactProgressMaxChars)
 	}
 
+	return w.sendCurrentContent()
+}
+
+// ApplyPlan replaces inferred progress with the Agent-authored plan emitted by
+// turn/plan/updated. It is the only path that creates a semantic task list.
+func (w *compactProgressWriter) ApplyPlan(tasks []ProgressTask) bool {
+	if !w.enabled || w.failed || w.style != progressStyleCard || !w.usePayload || w.taskTracker == nil {
+		return false
+	}
+	cleaned := w.taskTracker.Replace(tasks)
+	if len(cleaned) == 0 {
+		return true
+	}
+	w.content = BuildProgressCardPayloadV3(cleaned, w.agentName, w.lang, w.state)
+	if w.content == "" {
+		return false
+	}
+	return w.sendCurrentContent()
+}
+
+func (w *compactProgressWriter) sendCurrentContent() bool {
 	if w.content == w.lastSent {
 		return true
 	}

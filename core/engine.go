@@ -270,8 +270,8 @@ type Engine struct {
 	filterExternalSessions bool
 
 	// Shell configuration for /shell, cron exec, hooks, webhook exec
-	shell       string // shell binary path (e.g. "sh", "/bin/zsh")
-	shellFlag   string // shell flag (e.g. "-c", "-Command", "/C")
+	shell        string // shell binary path (e.g. "sh", "/bin/zsh")
+	shellFlag    string // shell flag (e.g. "-c", "-Command", "/C")
 	shellProfile string // prepended to every command (e.g. "source ~/.zshrc;")
 
 	// Multi-workspace mode
@@ -4640,6 +4640,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 
 		switch event.Type {
+		case EventPlanUpdate:
+			// The plan comes from Codex update_plan/turn/plan/updated. It is
+			// already user-facing and must replace any runtime inference.
+			cp.ApplyPlan(event.ProgressTasks)
+
 		case EventThinking:
 			if isEllipsisOnly(event.Content) {
 				break
