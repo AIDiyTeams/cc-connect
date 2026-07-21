@@ -4676,6 +4676,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		buildResolvedRichCard := func(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string {
 			return richCardSupporter.BuildRichCard(status, title, steps, resolveRichCardMarkdown(markdown, !streaming), streaming, statusFooter)
 		}
+		if reporter, ok := p.(AgentTraceReporter); ok && (event.Type == EventToolUse || event.Type == EventToolResult) {
+			trace := AgentTraceEvent{TraceID: event.TraceID, Type: event.Type, ToolName: event.ToolName,
+				Input: event.ToolInput, Output: event.ToolResult, Status: event.ToolStatus,
+				ExitCode: event.ToolExitCode, Success: event.ToolSuccess}
+			if trace.Output == "" {
+				trace.Output = event.Content
+			}
+			if err := reporter.ReportAgentTrace(e.ctx, replyCtx, trace); err != nil {
+				slog.Debug("agent trace report failed", "platform", p.Name(), "error", err)
+			}
+		}
 
 		switch event.Type {
 		case EventPlanUpdate:

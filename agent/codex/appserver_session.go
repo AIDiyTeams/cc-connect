@@ -1206,6 +1206,7 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 
 func (s *appServerSession) handleItemStarted(item map[string]any) {
 	itemType, _ := item["type"].(string)
+	itemID, _ := item["id"].(string)
 	if itemType == "" {
 		return
 	}
@@ -1220,29 +1221,30 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 	switch itemType {
 	case "commandExecution":
 		command, _ := item["command"].(string)
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "Bash", ToolInput: command})
+		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "Bash", ToolInput: command})
 
 	case "mcpToolCall":
 		server, _ := item["server"].(string)
 		tool, _ := item["tool"].(string)
 		name := strings.Trim(strings.Join([]string{server, tool}, ":"), ":")
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "MCP", ToolInput: name + "\n" + appServerJSON(item["arguments"])})
+		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "MCP", ToolInput: name + "\n" + appServerJSON(item["arguments"])})
 
 	case "webSearch":
 		query, _ := item["query"].(string)
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "WebSearch", ToolInput: query})
+		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "WebSearch", ToolInput: query})
 
 	case "dynamicToolCall":
 		tool, _ := item["tool"].(string)
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: tool, ToolInput: appServerJSON(item["arguments"])})
+		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: tool, ToolInput: appServerJSON(item["arguments"])})
 
 	case "fileChange":
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "Patch", ToolInput: appServerJSON(item["changes"])})
+		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "Patch", ToolInput: appServerJSON(item["changes"])})
 	}
 }
 
 func (s *appServerSession) handleItemCompleted(item map[string]any) {
 	itemType, _ := item["type"].(string)
+	itemID, _ := item["id"].(string)
 	if itemType == "" {
 		return
 	}
@@ -1292,6 +1294,7 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		success := appServerToolSuccess(status, exitCodePtr)
 		s.emit(core.Event{
 			Type:         core.EventToolResult,
+			TraceID:      itemID,
 			ToolName:     "Bash",
 			ToolInput:    command,
 			ToolResult:   truncate(strings.TrimSpace(output), 500),
@@ -1310,6 +1313,7 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		success := appServerToolSuccess(status, nil)
 		s.emit(core.Event{
 			Type:        core.EventToolResult,
+			TraceID:     itemID,
 			ToolName:    tool,
 			ToolResult:  truncate(strings.TrimSpace(result), 500),
 			ToolStatus:  strings.TrimSpace(status),
@@ -1320,6 +1324,7 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		query, _ := item["query"].(string)
 		s.emit(core.Event{
 			Type:       core.EventToolResult,
+			TraceID:    itemID,
 			ToolName:   "WebSearch",
 			ToolResult: truncate(strings.TrimSpace(query), 500),
 		})
@@ -1331,6 +1336,7 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		success := appServerToolSuccess(status, nil)
 		s.emit(core.Event{
 			Type:        core.EventToolResult,
+			TraceID:     itemID,
 			ToolName:    tool,
 			ToolResult:  truncate(strings.TrimSpace(result), 500),
 			ToolStatus:  strings.TrimSpace(status),

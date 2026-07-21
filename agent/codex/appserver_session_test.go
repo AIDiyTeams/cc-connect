@@ -199,6 +199,20 @@ func TestAppServerSession_AgentMessageDeltaStreamsText(t *testing.T) {
 	}
 }
 
+func TestAppServerSession_ToolEventsKeepStableTraceID(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 4)}
+	s.handleItemStarted(map[string]any{"type": "webSearch", "id": "search-42", "query": "Tomako AI growth"})
+	started := <-s.events
+	if started.Type != core.EventToolUse || started.TraceID != "search-42" || started.ToolInput != "Tomako AI growth" {
+		t.Fatalf("started trace = %#v", started)
+	}
+	s.handleItemCompleted(map[string]any{"type": "webSearch", "id": "search-42", "query": "Tomako AI growth"})
+	completed := <-s.events
+	if completed.Type != core.EventToolResult || completed.TraceID != "search-42" {
+		t.Fatalf("completed trace = %#v", completed)
+	}
+}
+
 func TestAppServerSession_AgentMessageDeltaEmitsMissingTailOnCompletion(t *testing.T) {
 	s := &appServerSession{events: make(chan core.Event, 8)}
 
