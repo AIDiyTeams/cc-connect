@@ -15,6 +15,23 @@ type Platform interface {
 	Stop() error
 }
 
+// AgentTraceReporter is an optional internal audit channel for tool actions.
+// Engines report tool use/results only; model thinking is deliberately excluded.
+type AgentTraceReporter interface {
+	ReportAgentTrace(ctx context.Context, replyCtx any, event AgentTraceEvent) error
+}
+
+type AgentTraceEvent struct {
+	TraceID  string
+	Type     EventType
+	ToolName string
+	Input    string
+	Output   string
+	Status   string
+	ExitCode *int
+	Success  *bool
+}
+
 // ErrNotSupported indicates a platform doesn't support a particular operation.
 var ErrNotSupported = errors.New("operation not supported by this platform")
 
