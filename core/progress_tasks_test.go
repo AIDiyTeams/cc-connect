@@ -1,79 +1,44 @@
 package core
 
 import (
-	"strings"
 	"testing"
 )
 
-func TestProgressTaskTrackerBuildsXiaohongshuPlanFromRequest(t *testing.T) {
-	request := `You are Tomako Studio.
-
-User request:
-生成一篇小红书的热点文章，包含图片和配文、标题：封面、子页面配图、正文和标签都要完备
-
-When producing content: ready-to-use.`
-	tracker := newProgressTaskTracker(request, LangChinese)
-	tasks := tracker.Tasks()
-	want := []string{
-		"梳理小红书主题与品牌信息",
-		"规划内容结构与表达重点",
-		"生成并检查封面与配图",
-		"撰写标题、正文与标签",
-		"整理并核对完整发布内容",
-	}
-	if len(tasks) != len(want) {
-		t.Fatalf("tasks = %#v, want %d stages", tasks, len(want))
-	}
-	for i := range want {
-		if tasks[i].Title != want[i] {
-			t.Fatalf("tasks[%d].Title = %q, want %q", i, tasks[i].Title, want[i])
-		}
-		wantStatus := ProgressTaskPending
-		if i == 0 {
-			wantStatus = ProgressTaskInProgress
-		}
-		if tasks[i].Status != wantStatus {
-			t.Fatalf("tasks[%d].Status = %q, want %q", i, tasks[i].Status, wantStatus)
-		}
+func TestProgressTaskTrackerStartsEmptyInsteadOfInferringFromKeywords(t *testing.T) {
+	tracker := newProgressTaskTracker("写 Reddit 文章，同时生成小红书封面", LangChinese)
+	if len(tracker.Tasks()) != 0 {
+		t.Fatalf("keyword-inferred tasks must not be shown: %#v", tracker.Tasks())
 	}
 }
 
-func TestProgressTaskTrackerReordersWithoutLeakingRawEvents(t *testing.T) {
-	tracker := newProgressTaskTracker("生成一篇包含封面、配图、正文和标签的小红书文章", LangChinese)
-	raw := `curl -H "Authorization: Bearer secret-token" https://tomako.ai/api/image/generate`
-	tasks := tracker.Observe(ProgressCardEntry{
-		Kind: ProgressEntryToolUse,
-		Tool: "Bash",
-		Text: raw,
+func TestProgressTaskTrackerUsesAndUpdatesAgentPlan(t *testing.T) {
+	tracker := newProgressTaskTracker("ignored", LangChinese)
+	tasks := tracker.Replace([]ProgressTask{
+		{ID: "task-1", Title: "明确 Reddit 帖子角度", Status: ProgressTaskInProgress},
+		{ID: "task-2", Title: "生成对应视觉素材", Status: ProgressTaskPending},
 	})
-	if len(tasks) < 2 || tasks[0].Status != ProgressTaskCompleted || tasks[1].ID != string(progressTaskVisuals) || tasks[1].Status != ProgressTaskInProgress {
-		t.Fatalf("tasks after visual work = %#v", tasks)
+	if len(tasks) != 2 || tasks[0].Title != "明确 Reddit 帖子角度" {
+		t.Fatalf("agent plan was not preserved: %#v", tasks)
 	}
-	for _, task := range tasks {
-		if strings.Contains(task.Title, "curl") || strings.Contains(task.Title, "secret-token") || strings.Contains(task.Title, "Bash") {
-			t.Fatalf("raw system detail leaked into task title: %#v", task)
-		}
+
+	tasks = tracker.Replace([]ProgressTask{
+		{ID: "task-1", Title: "明确 Reddit 帖子角度", Status: ProgressTaskCompleted},
+		{ID: "task-2", Title: "生成对应视觉素材", Status: ProgressTaskInProgress},
+	})
+	if tasks[0].Status != ProgressTaskCompleted || tasks[1].Status != ProgressTaskInProgress {
+		t.Fatalf("agent statuses were not updated: %#v", tasks)
 	}
 }
 
-func TestProgressTaskTrackerCanAddHighValueStage(t *testing.T) {
+func TestProgressTaskTrackerDoesNotCreateTasksFromToolEvents(t *testing.T) {
 	tracker := newProgressTaskTracker("请回答这个产品问题", LangChinese)
 	tasks := tracker.Observe(ProgressCardEntry{
 		Kind: ProgressEntryToolUse,
 		Tool: "WebSearch",
 		Text: "search current product documentation",
 	})
-	found := false
-	for _, task := range tasks {
-		if task.ID == string(progressTaskResearch) {
-			found = true
-			if task.Status != ProgressTaskInProgress {
-				t.Fatalf("research status = %q, want in_progress", task.Status)
-			}
-		}
-	}
-	if !found {
-		t.Fatalf("dynamic research stage missing: %#v", tasks)
+	if len(tasks) != 0 {
+		t.Fatalf("tool event invented a task list: %#v", tasks)
 	}
 }
 
@@ -95,31 +60,5 @@ func TestBuildAndParseProgressCardPayloadV3(t *testing.T) {
 	}
 	if parsed.Tasks[0].Title != "Review brand context" {
 		t.Fatalf("task title = %q", parsed.Tasks[0].Title)
-	}
-}
-
-func TestProgressTaskTrackerRespectsNegativeImageIntent(t *testing.T) {
-	tracker := newProgressTaskTracker("分析 Tomako 当前品牌信息并给出 3 条具体改进建议，不需要生成图片", LangChinese)
-	for _, task := range tracker.Tasks() {
-		if task.ID == string(progressTaskVisuals) || task.ID == string(progressTaskBuild) {
-			t.Fatalf("negative image/analysis request produced unrelated task: %#v", tracker.Tasks())
-		}
-	}
-
-	// Free-form thinking can advance a planned stage but cannot invent a new
-	// one merely because it mentions implementation or images.
-	tasks := tracker.Observe(ProgressCardEntry{
-		Kind: ProgressEntryThinking,
-		Text: "No images are needed; I will implement the recommendations in the answer",
-	})
-	tasks = tracker.Observe(ProgressCardEntry{
-		Kind: ProgressEntryToolUse,
-		Tool: "Bash",
-		Text: "call /api/image/generate",
-	})
-	for _, task := range tasks {
-		if task.ID == string(progressTaskVisuals) || task.ID == string(progressTaskBuild) {
-			t.Fatalf("agent event invented unrelated task: %#v", tasks)
-		}
 	}
 }

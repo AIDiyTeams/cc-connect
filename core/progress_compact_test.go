@@ -120,6 +120,12 @@ func TestCompactProgressWriter_UsesReplyContextHints(t *testing.T) {
 		t.Fatalf("style = %q, want %q", got, progressStyleCard)
 	}
 
+	if !w.ApplyPlan([]ProgressTask{
+		{ID: "task-1", Title: "Plan the current request", Status: ProgressTaskInProgress},
+	}) {
+		t.Fatal("ApplyPlan() = false, want true")
+	}
+
 	if !w.AppendEvent(ProgressEntryThinking, "planning bridge progress", "", "planning bridge progress") {
 		t.Fatal("AppendEvent() = false, want true")
 	}
@@ -200,6 +206,12 @@ func TestCompactProgressWriter_DoesNotExposeRawThinkingOrPaths(t *testing.T) {
 	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, func(s string) string {
 		return strings.ReplaceAll(s, "/root/code/demo/src/app.ts:42", "📄 `src/app.ts:42`")
 	})
+	if ok := w.ApplyPlan([]ProgressTask{
+		{ID: "task-1", Title: "Understand the Reddit brief", Status: ProgressTaskInProgress},
+		{ID: "task-2", Title: "Prepare the requested assets", Status: ProgressTaskPending},
+	}); !ok {
+		t.Fatal("ApplyPlan() = false, want true")
+	}
 
 	if ok := w.AppendStructured(ProgressCardEntry{
 		Kind: ProgressEntryThinking,
@@ -216,7 +228,7 @@ func TestCompactProgressWriter_DoesNotExposeRawThinkingOrPaths(t *testing.T) {
 	if !ok {
 		t.Fatalf("ParseProgressCardPayload(%q) failed", starts[0])
 	}
-	if payload.Version != 3 || len(payload.Tasks) == 0 {
+	if payload.Version != 3 || len(payload.Tasks) != 2 {
 		t.Fatalf("payload = %#v, want v3 task plan", payload)
 	}
 	if len(payload.Items) != 0 || strings.Contains(starts[0], "/root/code") || strings.Contains(starts[0], "Inspect") {
@@ -245,7 +257,11 @@ func TestCompactProgressWriter_ThrottlesRapidUpdates(t *testing.T) {
 	w := newCompactProgressWriter(context.Background(), p, "ctx", "cc", LangEnglish, nil,
 		"Research sources, create images, and write a social post")
 
-	w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryThinking, Text: "Review the request"}, "step 1")
+	w.ApplyPlan([]ProgressTask{
+		{ID: "task-1", Title: "Research the relevant sources", Status: ProgressTaskInProgress},
+		{ID: "task-2", Title: "Create the requested visuals", Status: ProgressTaskPending},
+		{ID: "task-3", Title: "Write the social post", Status: ProgressTaskPending},
+	})
 	if len(p.getPreviewStarts()) != 1 {
 		t.Fatal("first update should create the preview message")
 	}
@@ -258,7 +274,11 @@ func TestCompactProgressWriter_ThrottlesRapidUpdates(t *testing.T) {
 	}
 
 	time.Sleep(60 * time.Millisecond)
-	w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "call /api/image/generate"}, "image")
+	w.ApplyPlan([]ProgressTask{
+		{ID: "task-1", Title: "Research the relevant sources", Status: ProgressTaskCompleted},
+		{ID: "task-2", Title: "Create the requested visuals", Status: ProgressTaskInProgress},
+		{ID: "task-3", Title: "Write the social post", Status: ProgressTaskPending},
+	})
 	editsAfterWait := len(p.getPreviewEdits())
 	if editsAfterWait != 1 {
 		t.Fatalf("update after throttle interval should go through, got %d edits", editsAfterWait)
@@ -295,6 +315,9 @@ func TestCompactProgressWriter_DoesNotExposeToolResults(t *testing.T) {
 	}
 	w := newCompactProgressWriter(context.Background(), p, "ctx", "codex", LangEnglish, func(s string) string {
 		return strings.ReplaceAll(s, "/root/code/demo/src/app.ts:42", "📄 `src/app.ts:42`")
+	})
+	w.ApplyPlan([]ProgressTask{
+		{ID: "task-1", Title: "Read the relevant project context", Status: ProgressTaskInProgress},
 	})
 
 	raw := "/root/code/demo/src/app.ts:42"

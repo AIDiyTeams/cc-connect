@@ -270,8 +270,8 @@ type Engine struct {
 	filterExternalSessions bool
 
 	// Shell configuration for /shell, cron exec, hooks, webhook exec
-	shell       string // shell binary path (e.g. "sh", "/bin/zsh")
-	shellFlag   string // shell flag (e.g. "-c", "-Command", "/C")
+	shell        string // shell binary path (e.g. "sh", "/bin/zsh")
+	shellFlag    string // shell flag (e.g. "-c", "-Command", "/C")
 	shellProfile string // prepended to every command (e.g. "source ~/.zshrc;")
 
 	// Multi-workspace mode
@@ -4678,6 +4678,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 
 		switch event.Type {
+		case EventPlanUpdate:
+			// The plan comes from Codex update_plan/turn/plan/updated. It is
+			// already user-facing and must replace any runtime inference.
+			cp.ApplyPlan(event.ProgressTasks)
+
 		case EventThinking:
 			if isEllipsisOnly(event.Content) {
 				break
@@ -4744,6 +4749,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
 					continue // skip original independent message sending
 				}
+				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
+				thinkingMsg := fmt.Sprintf(e.i18n.T(MsgThinking), preview)
+				// Structured progress-card path: thinking renders in its own
+				// card channel, so the text preview must keep streaming
+				// (freezing it here would stall Studio token streaming for
+				// the rest of the turn).
+				if cp.OwnsInterruptionDisplay() {
+					cp.AppendEvent(ProgressEntryThinking, preview, "", thinkingMsg)
+					continue
+				}
 				// --- Original path (fallback) ---
 				// Flush accumulated text segment before thinking display
 				previewActive := sp.canPreview()
@@ -4763,8 +4778,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if previewActive {
 					sp.detachPreview() // keep frozen preview visible as permanent message
 				}
-				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
-				thinkingMsg := fmt.Sprintf(e.i18n.T(MsgThinking), preview)
 				if !cp.AppendEvent(ProgressEntryThinking, preview, "", thinkingMsg) {
 					sendWorkspace(p, replyCtx, thinkingMsg)
 				}
@@ -4851,6 +4864,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					})
 					_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
 					continue // skip original independent message sending
+				}
+				// Structured progress-card path: tool activity renders in its
+				// own card channel; keep the text preview streaming instead of
+				// freezing it (Studio token streaming must survive tool calls).
+				if cp.OwnsInterruptionDisplay() {
+					cp.AppendEvent(ProgressEntryToolUse, event.ToolInput, event.ToolName, "")
+					continue
 				}
 				// --- Original path (fallback) ---
 				// Flush accumulated text segment before tool display
@@ -5086,23 +5106,28 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				continue
 			}
 
-			// Flush accumulated text segment before permission prompt
-			previewActive := sp.canPreview()
-			if len(textParts) > segmentStart {
-				if !previewActive {
-					segment := strings.Join(textParts[segmentStart:], "")
-					if segment != "" {
-						for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
-							sendWorkspace(p, replyCtx, chunk)
+			// Flush accumulated text segment before permission prompt.
+			// Structured progress-card targets (Studio bridge) keep the text
+			// preview alive: the prompt goes out on its own card/buttons
+			// channel and post-answer text must continue streaming.
+			if !cp.OwnsInterruptionDisplay() {
+				previewActive := sp.canPreview()
+				if len(textParts) > segmentStart {
+					if !previewActive {
+						segment := strings.Join(textParts[segmentStart:], "")
+						if segment != "" {
+							for _, chunk := range splitMessage(segment, maxPlatformMessageLen) {
+								sendWorkspace(p, replyCtx, chunk)
+							}
 						}
 					}
+					segmentStart = len(textParts)
+					silentHold = false
 				}
-				segmentStart = len(textParts)
-				silentHold = false
-			}
-			sp.freeze()
-			if previewActive {
-				sp.detachPreview() // keep frozen preview visible as permanent message
+				sp.freeze()
+				if previewActive {
+					sp.detachPreview() // keep frozen preview visible as permanent message
+				}
 			}
 
 			slog.Info("permission request",

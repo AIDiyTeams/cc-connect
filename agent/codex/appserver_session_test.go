@@ -131,6 +131,123 @@ func TestAppServerSession_HandleThreadTokenUsageUpdatedCachesContextUsage(t *tes
 	}
 }
 
+func TestAppServerSession_HandleTurnPlanUpdatedEmitsAgentPlan(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 1)}
+	raw := json.RawMessage(`{
+		"turnId":"turn-1",
+		"plan":[
+			{"step":"明确 Reddit 帖子角度","status":"completed"},
+			{"step":"生成对应封面与配图","status":"inProgress"}
+		]
+	}`)
+
+	s.handleNotification("turn/plan/updated", raw)
+
+	select {
+	case event := <-s.events:
+		if event.Type != core.EventPlanUpdate {
+			t.Fatalf("event type = %q, want %q", event.Type, core.EventPlanUpdate)
+		}
+		if len(event.ProgressTasks) != 2 {
+			t.Fatalf("tasks = %#v, want 2", event.ProgressTasks)
+		}
+		if event.ProgressTasks[0].Title != "明确 Reddit 帖子角度" || event.ProgressTasks[0].Status != core.ProgressTaskCompleted {
+			t.Fatalf("first task = %#v", event.ProgressTasks[0])
+		}
+		if event.ProgressTasks[1].Title != "生成对应封面与配图" || event.ProgressTasks[1].Status != core.ProgressTaskInProgress {
+			t.Fatalf("second task = %#v", event.ProgressTasks[1])
+		}
+	default:
+		t.Fatal("turn/plan/updated did not emit an event")
+	}
+}
+
+func TestAppServerSession_AgentMessageDeltaStreamsText(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 8)}
+
+	s.handleNotification("item/agentMessage/delta",
+		json.RawMessage(`{"threadId":"t1","turnId":"u1","itemId":"msg-1","delta":"你好，"}`))
+	s.handleNotification("item/agentMessage/delta",
+		json.RawMessage(`{"threadId":"t1","turnId":"u1","itemId":"msg-1","delta":"这是流式文字"}`))
+
+	first := <-s.events
+	if first.Type != core.EventText || first.Content != "你好，" {
+		t.Fatalf("first delta event = %#v", first)
+	}
+	second := <-s.events
+	if second.Type != core.EventText || second.Content != "这是流式文字" {
+		t.Fatalf("second delta event = %#v", second)
+	}
+
+	// item/completed for a streamed item must not re-buffer text into
+	// pendingMsgs (which would duplicate it or demote it to thinking).
+	s.handleItemCompleted(map[string]any{
+		"type": "agentMessage",
+		"id":   "msg-1",
+		"text": "你好，这是流式文字",
+	})
+	select {
+	case extra := <-s.events:
+		t.Fatalf("streamed item completion should not emit again, got %#v", extra)
+	default:
+	}
+	s.stateMu.Lock()
+	pending := len(s.pendingMsgs)
+	s.stateMu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pendingMsgs = %d, want 0 for streamed item", pending)
+	}
+}
+
+func TestAppServerSession_AgentMessageDeltaEmitsMissingTailOnCompletion(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 8)}
+
+	s.handleNotification("item/agentMessage/delta",
+		json.RawMessage(`{"itemId":"msg-1","delta":"部分"}`))
+	<-s.events
+
+	s.handleItemCompleted(map[string]any{
+		"type": "agentMessage",
+		"id":   "msg-1",
+		"text": "部分文字被跳过",
+	})
+	tail := <-s.events
+	if tail.Type != core.EventText || tail.Content != "文字被跳过" {
+		t.Fatalf("tail event = %#v", tail)
+	}
+}
+
+func TestAppServerSession_AgentMessageSeparatorBetweenStreamedItems(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 8)}
+
+	s.handleNotification("item/agentMessage/delta",
+		json.RawMessage(`{"itemId":"msg-1","delta":"第一段"}`))
+	<-s.events
+	s.handleNotification("item/agentMessage/delta",
+		json.RawMessage(`{"itemId":"msg-2","delta":"第二段"}`))
+
+	event := <-s.events
+	if event.Content != "\n\n第二段" {
+		t.Fatalf("second item first delta = %q, want paragraph separator prefix", event.Content)
+	}
+}
+
+func TestAppServerSession_UnstreamedAgentMessageStillBuffers(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 8)}
+
+	s.handleItemCompleted(map[string]any{
+		"type": "agentMessage",
+		"id":   "msg-9",
+		"text": "fallback message",
+	})
+	s.stateMu.Lock()
+	pending := len(s.pendingMsgs)
+	s.stateMu.Unlock()
+	if pending != 1 {
+		t.Fatalf("pendingMsgs = %d, want 1 for unstreamed item", pending)
+	}
+}
+
 func TestMapAppServerRateLimits_PrefersMultiBucketView(t *testing.T) {
 	report := mapAppServerRateLimits(appServerRateLimitsResponse{
 		RateLimits: appServerRateLimitSnapshot{
