@@ -162,6 +162,92 @@ func TestAppServerSession_HandleTurnPlanUpdatedEmitsAgentPlan(t *testing.T) {
 	}
 }
 
+func TestAppServerSession_AgentMessageDeltaStreamsText(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 8)}
+
+	s.handleNotification("item/agentMessage/delta",
+		json.RawMessage(`{"threadId":"t1","turnId":"u1","itemId":"msg-1","delta":"你好，"}`))
+	s.handleNotification("item/agentMessage/delta",
+		json.RawMessage(`{"threadId":"t1","turnId":"u1","itemId":"msg-1","delta":"这是流式文字"}`))
+
+	first := <-s.events
+	if first.Type != core.EventText || first.Content != "你好，" {
+		t.Fatalf("first delta event = %#v", first)
+	}
+	second := <-s.events
+	if second.Type != core.EventText || second.Content != "这是流式文字" {
+		t.Fatalf("second delta event = %#v", second)
+	}
+
+	// item/completed for a streamed item must not re-buffer text into
+	// pendingMsgs (which would duplicate it or demote it to thinking).
+	s.handleItemCompleted(map[string]any{
+		"type": "agentMessage",
+		"id":   "msg-1",
+		"text": "你好，这是流式文字",
+	})
+	select {
+	case extra := <-s.events:
+		t.Fatalf("streamed item completion should not emit again, got %#v", extra)
+	default:
+	}
+	s.stateMu.Lock()
+	pending := len(s.pendingMsgs)
+	s.stateMu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pendingMsgs = %d, want 0 for streamed item", pending)
+	}
+}
+
+func TestAppServerSession_AgentMessageDeltaEmitsMissingTailOnCompletion(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 8)}
+
+	s.handleNotification("item/agentMessage/delta",
+		json.RawMessage(`{"itemId":"msg-1","delta":"部分"}`))
+	<-s.events
+
+	s.handleItemCompleted(map[string]any{
+		"type": "agentMessage",
+		"id":   "msg-1",
+		"text": "部分文字被跳过",
+	})
+	tail := <-s.events
+	if tail.Type != core.EventText || tail.Content != "文字被跳过" {
+		t.Fatalf("tail event = %#v", tail)
+	}
+}
+
+func TestAppServerSession_AgentMessageSeparatorBetweenStreamedItems(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 8)}
+
+	s.handleNotification("item/agentMessage/delta",
+		json.RawMessage(`{"itemId":"msg-1","delta":"第一段"}`))
+	<-s.events
+	s.handleNotification("item/agentMessage/delta",
+		json.RawMessage(`{"itemId":"msg-2","delta":"第二段"}`))
+
+	event := <-s.events
+	if event.Content != "\n\n第二段" {
+		t.Fatalf("second item first delta = %q, want paragraph separator prefix", event.Content)
+	}
+}
+
+func TestAppServerSession_UnstreamedAgentMessageStillBuffers(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 8)}
+
+	s.handleItemCompleted(map[string]any{
+		"type": "agentMessage",
+		"id":   "msg-9",
+		"text": "fallback message",
+	})
+	s.stateMu.Lock()
+	pending := len(s.pendingMsgs)
+	s.stateMu.Unlock()
+	if pending != 1 {
+		t.Fatalf("pendingMsgs = %d, want 1 for unstreamed item", pending)
+	}
+}
+
 func TestMapAppServerRateLimits_PrefersMultiBucketView(t *testing.T) {
 	report := mapAppServerRateLimits(appServerRateLimitsResponse{
 		RateLimits: appServerRateLimitSnapshot{

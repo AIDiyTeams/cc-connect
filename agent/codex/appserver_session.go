@@ -178,6 +178,11 @@ type appServerSession struct {
 	stateMu     sync.Mutex
 	pendingMsgs []string
 	currentTurn string
+	// streamedItems tracks agentMessage items already delivered live via
+	// item/agentMessage/delta (itemID → accumulated streamed text), so
+	// item/completed does not re-emit or re-classify them as thinking.
+	streamedItems    map[string]string
+	lastStreamedItem string
 
 	runtimeMu sync.RWMutex
 	usage     *core.UsageReport
@@ -296,9 +301,11 @@ func (s *appServerSession) initialize() error {
 		},
 		"capabilities": map[string]any{
 			"experimentalApi": true,
+			// item/agentMessage/delta is deliberately NOT opted out: Studio
+			// streams assistant text token-by-token through EventText so the
+			// user sees prose forming live instead of one blob at turn end.
 			"optOutNotificationMethods": []string{
 				"command/exec/outputDelta",
-				"item/agentMessage/delta",
 				"item/plan/delta",
 				"item/fileChange/outputDelta",
 				"item/reasoning/summaryTextDelta",
@@ -495,6 +502,8 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	s.stateMu.Lock()
 	s.currentTurn = resp.Turn.ID
 	s.pendingMsgs = s.pendingMsgs[:0]
+	s.streamedItems = nil
+	s.lastStreamedItem = ""
 	s.stateMu.Unlock()
 
 	return nil
@@ -1096,6 +1105,8 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 			s.stateMu.Lock()
 			s.currentTurn = notif.Turn.ID
 			s.pendingMsgs = s.pendingMsgs[:0]
+			s.streamedItems = nil
+			s.lastStreamedItem = ""
 			s.stateMu.Unlock()
 			s.storeContextUsage(nil)
 		}
@@ -1104,6 +1115,15 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		var notif itemNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
 			s.handleItemStarted(notif.Item)
+		}
+
+	case "item/agentMessage/delta":
+		var notif struct {
+			ItemID string `json:"itemId"`
+			Delta  string `json:"delta"`
+		}
+		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
+			s.handleAgentMessageDelta(notif.ItemID, notif.Delta)
 		}
 
 	case "item/completed":
@@ -1236,10 +1256,28 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 
 	case "agentMessage":
 		text, _ := item["text"].(string)
-		if strings.TrimSpace(text) != "" {
-			s.stateMu.Lock()
+		if strings.TrimSpace(text) == "" {
+			return
+		}
+		itemID, _ := item["id"].(string)
+		s.stateMu.Lock()
+		streamed, wasStreamed := "", false
+		if itemID != "" && s.streamedItems != nil {
+			streamed, wasStreamed = s.streamedItems[itemID]
+			if wasStreamed {
+				delete(s.streamedItems, itemID)
+			}
+		}
+		if !wasStreamed {
 			s.pendingMsgs = append(s.pendingMsgs, text)
-			s.stateMu.Unlock()
+		}
+		s.stateMu.Unlock()
+		if wasStreamed {
+			// The live delta stream already delivered this message; emit only
+			// a missing tail (e.g. the final flush the server may skip).
+			if tail, ok := strings.CutPrefix(text, streamed); ok && tail != "" {
+				s.emit(core.Event{Type: core.EventText, Content: tail})
+			}
 		}
 
 	case "commandExecution":
@@ -1541,6 +1579,27 @@ func (s *appServerSession) completeTurn() {
 	s.stateMu.Unlock()
 	s.flushPendingAsText()
 	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+}
+
+// handleAgentMessageDelta relays live assistant prose to the user as it is
+// generated. Streamed items are tracked so item/completed neither duplicates
+// them nor demotes them to thinking when a tool call follows.
+func (s *appServerSession) handleAgentMessageDelta(itemID, delta string) {
+	if delta == "" {
+		return
+	}
+	prefix := ""
+	s.stateMu.Lock()
+	if s.streamedItems == nil {
+		s.streamedItems = make(map[string]string)
+	}
+	if _, seen := s.streamedItems[itemID]; !seen && s.lastStreamedItem != "" && s.lastStreamedItem != itemID {
+		prefix = "\n\n"
+	}
+	s.streamedItems[itemID] += delta
+	s.lastStreamedItem = itemID
+	s.stateMu.Unlock()
+	s.emit(core.Event{Type: core.EventText, Content: prefix + delta})
 }
 
 func (s *appServerSession) flushPendingAsThinking() {

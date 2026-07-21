@@ -510,6 +510,15 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 	return w.sendCurrentContent()
 }
 
+// OwnsInterruptionDisplay reports whether structured card progress fully owns
+// thinking/tool rendering in a separate channel (payload-based progress card).
+// When true, the engine must keep the text stream preview alive across these
+// events instead of freezing it, so Studio-style token streaming continues
+// while tools run.
+func (w *compactProgressWriter) OwnsInterruptionDisplay() bool {
+	return w != nil && w.enabled && !w.failed && w.style == progressStyleCard && w.usePayload
+}
+
 // ApplyPlan replaces inferred progress with the Agent-authored plan emitted by
 // turn/plan/updated. It is the only path that creates a semantic task list.
 func (w *compactProgressWriter) ApplyPlan(tasks []ProgressTask) bool {
