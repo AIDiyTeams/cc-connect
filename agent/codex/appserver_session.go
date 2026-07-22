@@ -178,6 +178,11 @@ type appServerSession struct {
 	stateMu     sync.Mutex
 	pendingMsgs []string
 	currentTurn string
+	// streamedItems tracks agentMessage items already delivered live via
+	// item/agentMessage/delta (itemID → accumulated streamed text), so
+	// item/completed does not re-emit or re-classify them as thinking.
+	streamedItems    map[string]string
+	lastStreamedItem string
 
 	runtimeMu sync.RWMutex
 	usage     *core.UsageReport
@@ -296,9 +301,11 @@ func (s *appServerSession) initialize() error {
 		},
 		"capabilities": map[string]any{
 			"experimentalApi": true,
+			// item/agentMessage/delta is deliberately NOT opted out: Studio
+			// streams assistant text token-by-token through EventText so the
+			// user sees prose forming live instead of one blob at turn end.
 			"optOutNotificationMethods": []string{
 				"command/exec/outputDelta",
-				"item/agentMessage/delta",
 				"item/plan/delta",
 				"item/fileChange/outputDelta",
 				"item/reasoning/summaryTextDelta",
@@ -495,6 +502,8 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	s.stateMu.Lock()
 	s.currentTurn = resp.Turn.ID
 	s.pendingMsgs = s.pendingMsgs[:0]
+	s.streamedItems = nil
+	s.lastStreamedItem = ""
 	s.stateMu.Unlock()
 
 	return nil
@@ -1096,6 +1105,8 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 			s.stateMu.Lock()
 			s.currentTurn = notif.Turn.ID
 			s.pendingMsgs = s.pendingMsgs[:0]
+			s.streamedItems = nil
+			s.lastStreamedItem = ""
 			s.stateMu.Unlock()
 			s.storeContextUsage(nil)
 		}
@@ -1104,6 +1115,15 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		var notif itemNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
 			s.handleItemStarted(notif.Item)
+		}
+
+	case "item/agentMessage/delta":
+		var notif struct {
+			ItemID string `json:"itemId"`
+			Delta  string `json:"delta"`
+		}
+		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
+			s.handleAgentMessageDelta(notif.ItemID, notif.Delta)
 		}
 
 	case "item/completed":
@@ -1116,6 +1136,40 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		var notif turnNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
 			s.completeTurn()
+		}
+
+	case "turn/plan/updated":
+		var notif struct {
+			Plan []struct {
+				Step   string `json:"step"`
+				Status string `json:"status"`
+			} `json:"plan"`
+		}
+		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
+			tasks := make([]core.ProgressTask, 0, len(notif.Plan))
+			for index, item := range notif.Plan {
+				step := strings.Join(strings.Fields(strings.TrimSpace(item.Step)), " ")
+				if step == "" {
+					continue
+				}
+				status := core.ProgressTaskPending
+				switch strings.ToLower(strings.TrimSpace(item.Status)) {
+				case "inprogress", "in_progress":
+					status = core.ProgressTaskInProgress
+				case "completed":
+					status = core.ProgressTaskCompleted
+				case "failed":
+					status = core.ProgressTaskFailed
+				}
+				tasks = append(tasks, core.ProgressTask{
+					ID:     fmt.Sprintf("task-%d", index+1),
+					Title:  step,
+					Status: status,
+				})
+			}
+			if len(tasks) > 0 {
+				s.emit(core.Event{Type: core.EventPlanUpdate, ProgressTasks: tasks})
+			}
 		}
 
 	case "thread/status/changed":
@@ -1152,6 +1206,7 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 
 func (s *appServerSession) handleItemStarted(item map[string]any) {
 	itemType, _ := item["type"].(string)
+	itemID, _ := item["id"].(string)
 	if itemType == "" {
 		return
 	}
@@ -1166,29 +1221,30 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 	switch itemType {
 	case "commandExecution":
 		command, _ := item["command"].(string)
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "Bash", ToolInput: command})
+		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "Bash", ToolInput: command})
 
 	case "mcpToolCall":
 		server, _ := item["server"].(string)
 		tool, _ := item["tool"].(string)
 		name := strings.Trim(strings.Join([]string{server, tool}, ":"), ":")
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "MCP", ToolInput: name + "\n" + appServerJSON(item["arguments"])})
+		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "MCP", ToolInput: name + "\n" + appServerJSON(item["arguments"])})
 
 	case "webSearch":
 		query, _ := item["query"].(string)
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "WebSearch", ToolInput: query})
+		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "WebSearch", ToolInput: query})
 
 	case "dynamicToolCall":
 		tool, _ := item["tool"].(string)
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: tool, ToolInput: appServerJSON(item["arguments"])})
+		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: tool, ToolInput: appServerJSON(item["arguments"])})
 
 	case "fileChange":
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "Patch", ToolInput: appServerJSON(item["changes"])})
+		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "Patch", ToolInput: appServerJSON(item["changes"])})
 	}
 }
 
 func (s *appServerSession) handleItemCompleted(item map[string]any) {
 	itemType, _ := item["type"].(string)
+	itemID, _ := item["id"].(string)
 	if itemType == "" {
 		return
 	}
@@ -1202,10 +1258,28 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 
 	case "agentMessage":
 		text, _ := item["text"].(string)
-		if strings.TrimSpace(text) != "" {
-			s.stateMu.Lock()
+		if strings.TrimSpace(text) == "" {
+			return
+		}
+		itemID, _ := item["id"].(string)
+		s.stateMu.Lock()
+		streamed, wasStreamed := "", false
+		if itemID != "" && s.streamedItems != nil {
+			streamed, wasStreamed = s.streamedItems[itemID]
+			if wasStreamed {
+				delete(s.streamedItems, itemID)
+			}
+		}
+		if !wasStreamed {
 			s.pendingMsgs = append(s.pendingMsgs, text)
-			s.stateMu.Unlock()
+		}
+		s.stateMu.Unlock()
+		if wasStreamed {
+			// The live delta stream already delivered this message; emit only
+			// a missing tail (e.g. the final flush the server may skip).
+			if tail, ok := strings.CutPrefix(text, streamed); ok && tail != "" {
+				s.emit(core.Event{Type: core.EventText, Content: tail})
+			}
 		}
 
 	case "commandExecution":
@@ -1220,6 +1294,7 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		success := appServerToolSuccess(status, exitCodePtr)
 		s.emit(core.Event{
 			Type:         core.EventToolResult,
+			TraceID:      itemID,
 			ToolName:     "Bash",
 			ToolInput:    command,
 			ToolResult:   truncate(strings.TrimSpace(output), 500),
@@ -1238,6 +1313,7 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		success := appServerToolSuccess(status, nil)
 		s.emit(core.Event{
 			Type:        core.EventToolResult,
+			TraceID:     itemID,
 			ToolName:    tool,
 			ToolResult:  truncate(strings.TrimSpace(result), 500),
 			ToolStatus:  strings.TrimSpace(status),
@@ -1248,6 +1324,7 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		query, _ := item["query"].(string)
 		s.emit(core.Event{
 			Type:       core.EventToolResult,
+			TraceID:    itemID,
 			ToolName:   "WebSearch",
 			ToolResult: truncate(strings.TrimSpace(query), 500),
 		})
@@ -1259,6 +1336,7 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		success := appServerToolSuccess(status, nil)
 		s.emit(core.Event{
 			Type:        core.EventToolResult,
+			TraceID:     itemID,
 			ToolName:    tool,
 			ToolResult:  truncate(strings.TrimSpace(result), 500),
 			ToolStatus:  strings.TrimSpace(status),
@@ -1507,6 +1585,27 @@ func (s *appServerSession) completeTurn() {
 	s.stateMu.Unlock()
 	s.flushPendingAsText()
 	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+}
+
+// handleAgentMessageDelta relays live assistant prose to the user as it is
+// generated. Streamed items are tracked so item/completed neither duplicates
+// them nor demotes them to thinking when a tool call follows.
+func (s *appServerSession) handleAgentMessageDelta(itemID, delta string) {
+	if delta == "" {
+		return
+	}
+	prefix := ""
+	s.stateMu.Lock()
+	if s.streamedItems == nil {
+		s.streamedItems = make(map[string]string)
+	}
+	if _, seen := s.streamedItems[itemID]; !seen && s.lastStreamedItem != "" && s.lastStreamedItem != itemID {
+		prefix = "\n\n"
+	}
+	s.streamedItems[itemID] += delta
+	s.lastStreamedItem = itemID
+	s.stateMu.Unlock()
+	s.emit(core.Event{Type: core.EventText, Content: prefix + delta})
 }
 
 func (s *appServerSession) flushPendingAsThinking() {

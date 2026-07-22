@@ -347,10 +347,11 @@ func (bs *BridgeServer) ConnectedAdapters() []string {
 // BridgePlatform implements core.Platform for a single project.
 // It is a lightweight handle; the actual WebSocket server lives in BridgeServer.
 type BridgePlatform struct {
-	server     *BridgeServer
-	project    string
-	handler    MessageHandler
-	navHandler CardNavigationHandler
+	server       *BridgeServer
+	project      string
+	handler      MessageHandler
+	navHandler   CardNavigationHandler
+	traceStarted sync.Map
 }
 
 // Compile-time interface checks.
@@ -372,6 +373,7 @@ var (
 	_ FileSender                = (*BridgePlatform)(nil)
 	_ CardNavigable             = (*BridgePlatform)(nil)
 	_ ReplyContextReconstructor = (*BridgePlatform)(nil)
+	_ AgentTraceReporter        = (*BridgePlatform)(nil)
 )
 
 func (bp *BridgePlatform) Name() string { return "bridge" }
@@ -382,6 +384,55 @@ func (bp *BridgePlatform) Start(handler MessageHandler) error {
 }
 
 func (bp *BridgePlatform) Stop() error { return nil }
+
+func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, event AgentTraceEvent) error {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok || !strings.HasPrefix(rc.ReplyCtx, "llm-") {
+		return nil
+	}
+	a := bp.server.getAdapter(rc.Platform)
+	if a == nil || !a.capabilities["agent_trace"] {
+		return nil
+	}
+	now := time.Now().UTC()
+	key := rc.ReplyCtx + ":" + event.TraceID
+	var durationMs int64
+	if event.Type == EventToolUse {
+		bp.traceStarted.Store(key, now)
+	} else if started, found := bp.traceStarted.LoadAndDelete(key); found {
+		durationMs = now.Sub(started.(time.Time)).Milliseconds()
+	}
+	payload := map[string]any{
+		"type":        "agent_trace",
+		"session_key": rc.SessionKey,
+		"reply_ctx":   rc.ReplyCtx,
+		"trace_id":    event.TraceID,
+		"event_type":  string(event.Type),
+		"tool_name":   event.ToolName,
+		"input":       truncateBridgeTrace(event.Input, 8000),
+		"output":      truncateBridgeTrace(event.Output, 2000),
+		"status":      event.Status,
+		"occurred_at": now.Format(time.RFC3339Nano),
+	}
+	if durationMs > 0 {
+		payload["duration_ms"] = durationMs
+	}
+	if event.ExitCode != nil {
+		payload["exit_code"] = *event.ExitCode
+	}
+	if event.Success != nil {
+		payload["success"] = *event.Success
+	}
+	return bp.server.sendToAdapter(rc.Platform, payload)
+}
+
+func truncateBridgeTrace(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= max {
+		return value
+	}
+	return value[:max]
+}
 
 func (bp *BridgePlatform) Reply(ctx context.Context, replyCtx any, content string) error {
 	rc, ok := replyCtx.(*bridgeReplyCtx)

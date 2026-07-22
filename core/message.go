@@ -213,6 +213,7 @@ const (
 	EventError             EventType = "error"              // error occurred
 	EventPermissionRequest EventType = "permission_request" // agent requests permission via stdio protocol
 	EventThinking          EventType = "thinking"           // thinking/processing status
+	EventPlanUpdate        EventType = "plan_update"        // agent-authored task plan/status update
 )
 
 // UserQuestion represents a structured question from AskUserQuestion.
@@ -231,20 +232,22 @@ type UserQuestionOption struct {
 
 // Event represents a single piece of agent output streamed back to the engine.
 type Event struct {
-	Type         EventType
-	Content      string
-	ToolName     string         // populated for EventToolUse, EventPermissionRequest
-	ToolInput    string         // human-readable summary of tool input
-	ToolInputRaw map[string]any // raw tool input (for EventPermissionRequest, used in allow response)
-	ToolResult   string         // populated for EventToolResult
-	ToolStatus   string         // optional status for EventToolResult (e.g. completed/failed)
-	ToolExitCode *int           // optional exit code for EventToolResult
-	ToolSuccess  *bool          // optional success flag for EventToolResult
-	SessionID    string         // agent-managed session ID for conversation continuity
-	RequestID    string         // unique request ID for EventPermissionRequest
-	Questions    []UserQuestion // populated when ToolName == "AskUserQuestion"
-	Done         bool
-	Error        error
+	Type                     EventType
+	TraceID                  string // stable tool/item id used to pair use and result audit events
+	Content                  string
+	ToolName                 string         // populated for EventToolUse, EventPermissionRequest
+	ToolInput                string         // human-readable summary of tool input
+	ToolInputRaw             map[string]any // raw tool input (for EventPermissionRequest, used in allow response)
+	ToolResult               string         // populated for EventToolResult
+	ToolStatus               string         // optional status for EventToolResult (e.g. completed/failed)
+	ToolExitCode             *int           // optional exit code for EventToolResult
+	ToolSuccess              *bool          // optional success flag for EventToolResult
+	SessionID                string         // agent-managed session ID for conversation continuity
+	RequestID                string         // unique request ID for EventPermissionRequest
+	Questions                []UserQuestion // populated when ToolName == "AskUserQuestion"
+	ProgressTasks            []ProgressTask // populated for EventPlanUpdate; safe user-facing steps only
+	Done                     bool
+	Error                    error
 	InputTokens              int // token usage from agent result events
 	OutputTokens             int
 	CacheCreationInputTokens int            // cache-write tokens (new content written to cache)
