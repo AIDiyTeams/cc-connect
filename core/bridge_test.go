@@ -1019,6 +1019,10 @@ func TestBridge_LlmTaskKeepsCoarseUpdateMessage(t *testing.T) {
 	if h.ReplyCtx != "llm-task-1" {
 		t.Fatalf("ReplyCtx overwritten: %q", h.ReplyCtx)
 	}
+	// The engine learns token usage only when the terminal agent event arrives,
+	// after the preview handle has already been cloned. The done frame must see
+	// that late usage update through the shared reply context state.
+	rc.SetUsage(120, 30)
 
 	if err := bp.UpdateMessage(context.Background(), handle, "Hi there"); err != nil {
 		t.Fatalf("UpdateMessage: %v", err)
@@ -1040,6 +1044,14 @@ func TestBridge_LlmTaskKeepsCoarseUpdateMessage(t *testing.T) {
 	msg = readMsg(t, conn)
 	if msg["type"] != "reply_stream" || msg["done"] != true {
 		t.Fatalf("done frame=%v", msg)
+	}
+	usage, ok := msg["usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("done frame missing usage: %v", msg)
+	}
+	if usage["input_tokens"] != float64(120) || usage["output_tokens"] != float64(30) ||
+		usage["total_tokens"] != float64(150) {
+		t.Fatalf("done frame usage=%v", usage)
 	}
 }
 

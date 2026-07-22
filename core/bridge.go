@@ -79,17 +79,37 @@ type bridgeReplyCtx struct {
 	progressStyle               string `json:"-"`
 	supportsProgressCardPayload bool   `json:"-"`
 
-	// Token usage from the agent turn (set by engine before reply is sent)
-	usageInputTokens  int  `json:"-"`
-	usageOutputTokens int  `json:"-"`
-	usageSet          bool `json:"-"`
+	// Token usage from the agent turn (set by engine before reply is sent).
+	// Preview handles are shallow copies of this context; keep the usage state
+	// shared so completion frames emitted through a preview handle carry the
+	// same usage captured on the original reply context.
+	usage *bridgeTokenUsage `json:"-"`
+}
+
+type bridgeTokenUsage struct {
+	inputTokens  int
+	outputTokens int
+	set          bool
 }
 
 // SetUsage is called by the engine to attach token usage before sending the reply.
 func (rc *bridgeReplyCtx) SetUsage(inputTokens, outputTokens int) {
-	rc.usageInputTokens = inputTokens
-	rc.usageOutputTokens = outputTokens
-	rc.usageSet = true
+	if rc == nil {
+		return
+	}
+	if rc.usage == nil {
+		rc.usage = &bridgeTokenUsage{}
+	}
+	rc.usage.inputTokens = inputTokens
+	rc.usage.outputTokens = outputTokens
+	rc.usage.set = true
+}
+
+func (rc *bridgeReplyCtx) tokenUsage() (inputTokens, outputTokens int, set bool) {
+	if rc == nil || rc.usage == nil {
+		return 0, 0, false
+	}
+	return rc.usage.inputTokens, rc.usage.outputTokens, rc.usage.set
 }
 
 // SetSessionName attaches the human-readable session title (Codex summary / custom name).
@@ -447,11 +467,12 @@ func (bp *BridgePlatform) Reply(ctx context.Context, replyCtx any, content strin
 		"format":      "text",
 	}
 	// Include token usage if set by engine
-	if rc.usageSet && (rc.usageInputTokens > 0 || rc.usageOutputTokens > 0) {
+	inputTokens, outputTokens, usageSet := rc.tokenUsage()
+	if usageSet && (inputTokens > 0 || outputTokens > 0) {
 		payload["usage"] = map[string]any{
-			"input_tokens":  rc.usageInputTokens,
-			"output_tokens": rc.usageOutputTokens,
-			"total_tokens":  rc.usageInputTokens + rc.usageOutputTokens,
+			"input_tokens":  inputTokens,
+			"output_tokens": outputTokens,
+			"total_tokens":  inputTokens + outputTokens,
 		}
 	}
 	attachBridgeStatus(payload, rc)
@@ -660,6 +681,9 @@ func bridgeMetadataStringList(metadata map[string]any, key string) []string {
 func cloneBridgeReplyCtx(rc *bridgeReplyCtx) *bridgeReplyCtx {
 	if rc == nil {
 		return nil
+	}
+	if rc.usage == nil {
+		rc.usage = &bridgeTokenUsage{}
 	}
 	out := *rc
 	return &out
@@ -873,11 +897,12 @@ func (bp *BridgePlatform) sendReplyStream(rc *bridgeReplyCtx, content string, do
 	if previewHandle != "" {
 		payload["preview_handle"] = previewHandle
 	}
-	if done && rc.usageSet && (rc.usageInputTokens > 0 || rc.usageOutputTokens > 0) {
+	inputTokens, outputTokens, usageSet := rc.tokenUsage()
+	if done && usageSet && (inputTokens > 0 || outputTokens > 0) {
 		payload["usage"] = map[string]any{
-			"input_tokens":  rc.usageInputTokens,
-			"output_tokens": rc.usageOutputTokens,
-			"total_tokens":  rc.usageInputTokens + rc.usageOutputTokens,
+			"input_tokens":  inputTokens,
+			"output_tokens": outputTokens,
+			"total_tokens":  inputTokens + outputTokens,
 		}
 	}
 	if done {
