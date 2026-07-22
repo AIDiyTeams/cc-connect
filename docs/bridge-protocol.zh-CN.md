@@ -643,12 +643,11 @@ Session key 遵循以下格式：
 业务适配器可以追加稳定的 Brand 作用域：
 
 ```
-{platform}:{tenant_id}:{user_id}:brand:{brand_id}:{session_type}:{session_id}
+{platform}:{workspace_id}:{user_id}:brand:{brand_id}:{session_type}:{session_id}
 ```
 
 在 multi-workspace 模式下，带 `:brand:` 的会话解析到
-`{base_dir}/tenant-{tenant_id}/brand-{brand_id}`。Project 向 Brand 命名迁移期间，
-旧的 `:project:` 标记按 Brand 标记兼容处理。同一 Tenant、同一 Brand 下的不同用户
+`{base_dir}/workspace-{workspace_id}/brand-{brand_id}`。同一 Workspace、同一 Brand 下的不同用户
 共享工作目录，但仍使用各自独立的对话 session key。
 
 ---

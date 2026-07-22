@@ -55,33 +55,31 @@ func TestBrandWorkspacePathSharesByBrandAcrossUsers(t *testing.T) {
 	baseDir := t.TempDir()
 	e := newTestEngineWithMultiWorkspace(t, baseDir)
 
-	first, ok := e.brandWorkspacePath("java-backend:tenant-a:10:brand:brand-42:task:llm-1")
+	first, ok := e.brandWorkspacePath("java-backend:workspace-a:10:brand:brand-42:task:llm-1")
 	if !ok {
 		t.Fatal("expected brand-scoped session key to resolve")
 	}
-	second, ok := e.brandWorkspacePath("java-backend:tenant-a:20:brand:brand-42:chat:chat-2")
+	second, ok := e.brandWorkspacePath("java-backend:workspace-a:20:brand:brand-42:chat:chat-2")
 	if !ok {
 		t.Fatal("expected second brand-scoped session key to resolve")
 	}
-	want := normalizeWorkspacePath(filepath.Join(baseDir, "tenant-tenant-a", "brand-brand-42"))
+	want := normalizeWorkspacePath(filepath.Join(baseDir, "workspace-workspace-a", "brand-brand-42"))
 	if first != want || second != want {
 		t.Fatalf("brand workspace mismatch: first=%q second=%q want=%q", first, second, want)
 	}
 
-	other, ok := e.brandWorkspacePath("java-backend:tenant-a:20:brand:brand-99:task:llm-3")
+	other, ok := e.brandWorkspacePath("java-backend:workspace-a:20:brand:brand-99:task:llm-3")
 	if !ok || other == want {
 		t.Fatalf("different brand must resolve to a different workspace: %q", other)
 	}
 }
 
-func TestBrandWorkspacePathAcceptsLegacyProjectSegment(t *testing.T) {
+func TestBrandWorkspacePathRejectsNonBrandSegment(t *testing.T) {
 	baseDir := t.TempDir()
 	e := newTestEngineWithMultiWorkspace(t, baseDir)
 
-	got, ok := e.brandWorkspacePath("java-backend:tenant-a:10:project:project-7:chat:chat-1")
-	want := normalizeWorkspacePath(filepath.Join(baseDir, "tenant-tenant-a", "brand-project-7"))
-	if !ok || got != want {
-		t.Fatalf("project compatibility workspace = %q, ok=%v, want=%q", got, ok, want)
+	if got, ok := e.brandWorkspacePath("java-backend:workspace-a:10:scope:scope-7:chat:chat-1"); ok || got != "" {
+		t.Fatalf("non-brand segment must not resolve a brand workspace: %q", got)
 	}
 }
 
@@ -89,11 +87,11 @@ func TestResolveMemoryWorkDirUsesBrandScope(t *testing.T) {
 	baseDir := t.TempDir()
 	e := newTestEngineWithMultiWorkspace(t, baseDir)
 
-	got, err := e.ResolveMemoryWorkDir("java-backend:tenant-a:10:brand:brand-42:task:llm-1")
+	got, err := e.ResolveMemoryWorkDir("java-backend:workspace-a:10:brand:brand-42:task:llm-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := normalizeWorkspacePath(filepath.Join(baseDir, "tenant-tenant-a", "brand-brand-42"))
+	want := normalizeWorkspacePath(filepath.Join(baseDir, "workspace-workspace-a", "brand-brand-42"))
 	if got != want {
 		t.Fatalf("ResolveMemoryWorkDir() = %q, want %q", got, want)
 	}

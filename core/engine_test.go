@@ -3296,8 +3296,8 @@ func TestHandleMessage_MultiWorkspaceRoutesBrandSessionToBrandDirectory(t *testi
 	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
 	e.SetWorkspaceIdleTimeout(0)
 
-	sessionKey := "java-backend:tenant-a:20:brand:brand-42:task:llm-1"
-	wsDir := normalizeWorkspacePath(filepath.Join(baseDir, "tenant-tenant-a", "brand-brand-42"))
+	sessionKey := "java-backend:workspace-a:20:brand:brand-42:task:llm-1"
+	wsDir := normalizeWorkspacePath(filepath.Join(baseDir, "workspace-workspace-a", "brand-brand-42"))
 	wsAgent := &sessionEnvRecordingAgent{session: newResultAgentSession("ok")}
 	ws := e.workspacePool.GetOrCreate(wsDir)
 	ws.agent = wsAgent

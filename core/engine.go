@@ -270,8 +270,8 @@ type Engine struct {
 	filterExternalSessions bool
 
 	// Shell configuration for /shell, cron exec, hooks, webhook exec
-	shell       string // shell binary path (e.g. "sh", "/bin/zsh")
-	shellFlag   string // shell flag (e.g. "-c", "-Command", "/C")
+	shell        string // shell binary path (e.g. "sh", "/bin/zsh")
+	shellFlag    string // shell flag (e.g. "-c", "-Command", "/C")
 	shellProfile string // prepended to every command (e.g. "source ~/.zshrc;")
 
 	// Multi-workspace mode
@@ -616,7 +616,7 @@ func (e *Engine) SetWorkspaceShare(opts WorkspaceShareOptions) {
 // for the given bridge session_key.
 //
 // In multi-workspace mode this matches interactive routing. Brand-scoped
-// sessions use {base_dir}/tenant-{tenantId}/brand-{brandId}; legacy sessions
+// sessions use {base_dir}/workspace-{workspaceId}/brand-{brandId}; legacy sessions
 // without a brand/project segment retain {base_dir}/user-{userId}.
 // The directory is created via initUserWorkspace when missing so fact writes
 // land in the same tree the next Codex session will read.
@@ -665,17 +665,17 @@ func (e *Engine) brandWorkspacePath(sessionKey string) (string, bool) {
 	if len(parts) < 4 {
 		return "", false
 	}
-	tenantID := sanitizeUserWorkspaceID(parts[1])
+	workspaceID := sanitizeUserWorkspaceID(parts[1])
 	for i := 2; i+1 < len(parts); i++ {
-		if parts[i] != "brand" && parts[i] != "project" {
+		if parts[i] != "brand" {
 			continue
 		}
 		brandID := sanitizeUserWorkspaceID(parts[i+1])
-		if tenantID == "unknown" || brandID == "unknown" {
+		if workspaceID == "unknown" || brandID == "unknown" {
 			return "", false
 		}
 		return normalizeWorkspacePath(filepath.Join(
-			e.baseDir, "tenant-"+tenantID, "brand-"+brandID)), true
+			e.baseDir, "workspace-"+workspaceID, "brand-"+brandID)), true
 	}
 	return "", false
 }

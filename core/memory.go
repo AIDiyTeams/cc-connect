@@ -13,7 +13,7 @@ type AgentMemoryFact struct {
 //
 // WorkDir, when set by the engine/management layer, is the authoritative
 // Codex cwd for this write. In multi-workspace deployments this is
-// typically {base_dir}/tenant-{tenantId}/brand-{brandId}. Legacy sessions
+// typically {base_dir}/workspace-{workspaceId}/brand-{brandId}. Legacy sessions
 // without a brand scope retain {base_dir}/{user_dir_prefix}{userId}.
 // Agents must prefer WorkDir over deriving a path from SessionKey alone.
 type AgentMemoryWriteRequest struct {

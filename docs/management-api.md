@@ -669,13 +669,13 @@ Sends a message to a session. The message is delivered to the agent as if the us
 ### 5.3.1 User Memory Facts (Codex extension)
 
 Routes by `session_key` to the matching workspace. Brand-scoped sessions use
-`{base_dir}/tenant-{tenantId}/brand-{brandId}`; compatibility requests without
+`{base_dir}/workspace-{workspaceId}/brand-{brandId}`; compatibility requests without
 a Brand retain `{base_dir}/user-{userId}`. Codex memory extension files live under:
 
 `.codex/memories/extensions/{extension}/facts/*.md` (default extension=`tomako`).
 
 Every endpoint requires `session_key`. Brand requests use
-`platform:tenantId:userId:brand:brandId:...`; compatibility requests may retain
+`platform:workspaceId:userId:brand:brandId:...`; compatibility requests may retain
 `platform:scope:userId`. The agent must implement `AgentMemoryManager` (Codex does).
 
 #### GET /api/v1/projects/{name}/memory/facts
