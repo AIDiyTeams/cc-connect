@@ -658,7 +658,7 @@ GET /api/v1/status?token=mgmt-secret
 
 | 参数          | 类型   | 必填 | 说明                                      |
 |---------------|--------|------|-------------------------------------------|
-| `session_key` | string | 是   | 路由键，例如 `java-backend:cibos:42`      |
+| `session_key` | string | 是   | 路由键，例如 `java-backend:tomako:42`      |
 
 **响应：**
 
@@ -666,7 +666,7 @@ GET /api/v1/status?token=mgmt-secret
 {
   "ok": true,
   "data": {
-    "session_key": "java-backend:cibos:42",
+    "session_key": "java-backend:tomako:42",
     "work_dir": "/workspaces/user-42",
     "facts_dir": "/workspaces/user-42/.codex/memories/extensions/tomako/facts",
     "facts": [
@@ -709,7 +709,7 @@ GET /api/v1/status?token=mgmt-secret
 
 ```json
 {
-  "session_key": "java-backend:cibos:42",
+  "session_key": "java-backend:tomako:42",
   "source_task_id": "llm-1",
   "title": "brand",
   "facts": [
@@ -745,7 +745,7 @@ GET /api/v1/status?token=mgmt-secret
 
 ```json
 {
-  "session_key": "java-backend:cibos:42",
+  "session_key": "java-backend:tomako:42",
   "content": "# brand\n\n- brand_name: Foldos\n"
 }
 ```
@@ -767,7 +767,7 @@ GET /api/v1/status?token=mgmt-secret
   "data": {
     "deleted": true,
     "name": "2026-07-12T01-02-03-brand-llm-1.md",
-    "session_key": "java-backend:cibos:42"
+    "session_key": "java-backend:tomako:42"
   }
 }
 ```

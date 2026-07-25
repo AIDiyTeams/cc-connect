@@ -11,8 +11,8 @@ import (
 )
 
 func TestResolveSessionWorkDirUsesSessionWorkspaceBase(t *testing.T) {
-	got := resolveSessionWorkDir("/fallback", "/tmp/user-workspaces", "java-backend:cibos:42")
-	want := filepath.Join("/tmp/user-workspaces", "java-backend_cibos_42")
+	got := resolveSessionWorkDir("/fallback", "/tmp/user-workspaces", "java-backend:tomako:42")
+	want := filepath.Join("/tmp/user-workspaces", "java-backend_tomako_42")
 	if got != want {
 		t.Fatalf("resolveSessionWorkDir() = %q, want %q", got, want)
 	}
@@ -24,7 +24,7 @@ func TestWriteMemoryFactsPrefersEngineWorkDir(t *testing.T) {
 	a := &Agent{workDir: "/fallback", sessionWorkspaceBase: filepath.Join(base, "wrong-base")}
 
 	result, err := a.WriteMemoryFacts(context.Background(), core.AgentMemoryWriteRequest{
-		SessionKey:   "java-backend:cibos:407382056",
+		SessionKey:   "java-backend:tomako:407382056",
 		WorkDir:      userDir,
 		SourceTaskID: "llm-abc",
 		Title:        "brand_analysis",
@@ -46,7 +46,7 @@ func TestWriteMemoryFactsWritesTomakoExtensionFile(t *testing.T) {
 	a := &Agent{workDir: "/fallback", sessionWorkspaceBase: base}
 
 	result, err := a.WriteMemoryFacts(context.Background(), core.AgentMemoryWriteRequest{
-		SessionKey:   "java-backend:cibos:42",
+		SessionKey:   "java-backend:tomako:42",
 		SourceTaskID: "llm-abc",
 		Title:        "brand_analysis",
 		Facts: []core.AgentMemoryFact{
@@ -61,7 +61,7 @@ func TestWriteMemoryFactsWritesTomakoExtensionFile(t *testing.T) {
 		t.Fatalf("WriteMemoryFacts() result file is empty")
 	}
 
-	wantPrefix := filepath.Join(base, "java-backend_cibos_42", ".codex", "memories", "extensions", "tomako", "facts")
+	wantPrefix := filepath.Join(base, "java-backend_tomako_42", ".codex", "memories", "extensions", "tomako", "facts")
 	if !strings.HasPrefix(result.File, wantPrefix+string(os.PathSeparator)) {
 		t.Fatalf("fact file = %q, want prefix %q", result.File, wantPrefix)
 	}
@@ -73,7 +73,7 @@ func TestWriteMemoryFactsWritesTomakoExtensionFile(t *testing.T) {
 	if !strings.Contains(text, "- brand_name: Tomako") || !strings.Contains(text, "- target_audience: builders") {
 		t.Fatalf("fact file content missing facts:\n%s", text)
 	}
-	if _, err := os.Stat(filepath.Join(base, "java-backend_cibos_42", ".codex", "memories", "extensions", "tomako", "instructions.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(base, "java-backend_tomako_42", ".codex", "memories", "extensions", "tomako", "instructions.md")); err != nil {
 		t.Fatalf("instructions.md not written: %v", err)
 	}
 }
@@ -115,7 +115,7 @@ func TestWriteMemoryFactsCustomExtension(t *testing.T) {
 func TestMemoryFactCRUD(t *testing.T) {
 	userDir := t.TempDir()
 	a := &Agent{workDir: "/fallback"}
-	sessionKey := "java-backend:cibos:99"
+	sessionKey := "java-backend:tomako:99"
 
 	written, err := a.WriteMemoryFacts(context.Background(), core.AgentMemoryWriteRequest{
 		SessionKey:   sessionKey,

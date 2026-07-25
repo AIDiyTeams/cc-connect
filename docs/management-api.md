@@ -686,7 +686,7 @@ Lists fact markdown files for one user.
 
 | Field         | Type   | Required | Description                                 |
 |---------------|--------|----------|---------------------------------------------|
-| `session_key` | string | yes      | Routing key, e.g. `java-backend:cibos:42`   |
+| `session_key` | string | yes      | Routing key, e.g. `java-backend:tomako:42`   |
 
 **Response:**
 
@@ -694,7 +694,7 @@ Lists fact markdown files for one user.
 {
   "ok": true,
   "data": {
-    "session_key": "java-backend:cibos:42",
+    "session_key": "java-backend:tomako:42",
     "work_dir": "/workspaces/user-42",
     "facts_dir": "/workspaces/user-42/.codex/memories/extensions/tomako/facts",
     "facts": [
@@ -737,7 +737,7 @@ Creates a new fact markdown file from structured entries.
 
 ```json
 {
-  "session_key": "java-backend:cibos:42",
+  "session_key": "java-backend:tomako:42",
   "source_task_id": "llm-1",
   "title": "brand",
   "facts": [
@@ -773,7 +773,7 @@ Replaces the full markdown body of one fact file (for Memory page editing).
 
 ```json
 {
-  "session_key": "java-backend:cibos:42",
+  "session_key": "java-backend:tomako:42",
   "content": "# brand\n\n- brand_name: Foldos\n"
 }
 ```
@@ -795,7 +795,7 @@ Deletes one fact file. Pass `session_key` via query string or JSON body.
   "data": {
     "deleted": true,
     "name": "2026-07-12T01-02-03-brand-llm-1.md",
-    "session_key": "java-backend:cibos:42"
+    "session_key": "java-backend:tomako:42"
   }
 }
 ```

@@ -101,7 +101,7 @@ func TestMgmt_ProjectMemoryFactsWritesThroughAgent(t *testing.T) {
 	ts := httptest.NewServer(mgmt.buildHandler(http.NewServeMux()))
 	defer ts.Close()
 
-	body := `{"session_key":"java-backend:cibos:42","source_task_id":"llm-1","title":"brand","facts":[{"type":"brand_name","value":"Tomako"}]}`
+	body := `{"session_key":"java-backend:tomako:42","source_task_id":"llm-1","title":"brand","facts":[{"type":"brand_name","value":"Tomako"}]}`
 	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/projects/proj/memory/facts", strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -116,7 +116,7 @@ func TestMgmt_ProjectMemoryFactsWritesThroughAgent(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	if agent.last.SessionKey != "java-backend:cibos:42" || len(agent.last.Facts) != 1 || agent.last.Facts[0].Value != "Tomako" {
+	if agent.last.SessionKey != "java-backend:tomako:42" || len(agent.last.Facts) != 1 || agent.last.Facts[0].Value != "Tomako" {
 		t.Fatalf("agent request = %+v", agent.last)
 	}
 	if agent.last.WorkDir != "/project/work" {
@@ -136,7 +136,7 @@ func TestMgmt_ProjectMemoryFactsUsesMultiWorkspaceUserDir(t *testing.T) {
 	ts := httptest.NewServer(mgmt.buildHandler(http.NewServeMux()))
 	defer ts.Close()
 
-	body := `{"session_key":"java-backend:cibos:407382056","source_task_id":"llm-1","title":"brand","facts":[{"type":"brand_name","value":"Tomako"}]}`
+	body := `{"session_key":"java-backend:tomako:407382056","source_task_id":"llm-1","title":"brand","facts":[{"type":"brand_name","value":"Tomako"}]}`
 	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/projects/proj/memory/facts", strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -168,7 +168,7 @@ func TestResolveMemoryWorkDir_MultiWorkspace(t *testing.T) {
 	e.SetMultiWorkspace(base, filepath.Join(t.TempDir(), "bindings.json"))
 	e.SetWorkspaceIdleTimeout(0)
 
-	got, err := e.ResolveMemoryWorkDir("java-backend:cibos:42")
+	got, err := e.ResolveMemoryWorkDir("java-backend:tomako:42")
 	if err != nil {
 		t.Fatalf("ResolveMemoryWorkDir() error = %v", err)
 	}
@@ -202,7 +202,7 @@ func TestMgmt_ProjectMemoryFactsListGetUpdateDelete(t *testing.T) {
 	ts := httptest.NewServer(mgmt.buildHandler(http.NewServeMux()))
 	defer ts.Close()
 
-	sessionKey := "java-backend:cibos:88"
+	sessionKey := "java-backend:tomako:88"
 	wantDir := filepath.Join(base, "user-88")
 	auth := func(req *http.Request) {
 		req.Header.Set("Authorization", "Bearer tok")
@@ -248,7 +248,7 @@ func TestMgmt_ProjectMemoryFactsListGetUpdateDelete(t *testing.T) {
 		t.Fatalf("get req = %+v", agent.got)
 	}
 
-	updateBody := `{"session_key":"java-backend:cibos:88","content":"# Edited\n"}`
+	updateBody := `{"session_key":"java-backend:tomako:88","content":"# Edited\n"}`
 	putReq, err := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/projects/proj/memory/facts/brand.md", strings.NewReader(updateBody))
 	if err != nil {
 		t.Fatal(err)
