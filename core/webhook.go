@@ -26,14 +26,14 @@ type WebhookServer struct {
 
 // WebhookRequest is the JSON body for POST /hook.
 type WebhookRequest struct {
-	Event      string `json:"event,omitempty"`       // event name for logging (e.g. "git:commit")
-	Project    string `json:"project,omitempty"`      // target project; optional if single project
-	SessionKey string `json:"session_key"`            // target session key (required)
-	Prompt     string `json:"prompt,omitempty"`       // agent prompt (mutually exclusive with exec)
-	Exec       string `json:"exec,omitempty"`         // shell command (mutually exclusive with prompt)
-	WorkDir    string `json:"work_dir,omitempty"`     // working dir for exec
-	Silent     bool   `json:"silent,omitempty"`       // suppress notification
-	Payload    any    `json:"payload,omitempty"`      // arbitrary extra data; appended to prompt context
+	Event      string `json:"event,omitempty"`    // event name for logging (e.g. "git:commit")
+	Project    string `json:"project,omitempty"`  // target project; optional if single project
+	SessionKey string `json:"session_key"`        // target session key (required)
+	Prompt     string `json:"prompt,omitempty"`   // agent prompt (mutually exclusive with exec)
+	Exec       string `json:"exec,omitempty"`     // shell command (mutually exclusive with prompt)
+	WorkDir    string `json:"work_dir,omitempty"` // working dir for exec
+	Silent     bool   `json:"silent,omitempty"`   // suppress notification
+	Payload    any    `json:"payload,omitempty"`  // arbitrary extra data; appended to prompt context
 }
 
 func NewWebhookServer(port int, token, path string) *WebhookServer {
@@ -203,26 +203,7 @@ func (ws *WebhookServer) executePrompt(engine *Engine, sessionKey, prompt string
 	if idx := strings.Index(sessionKey, ":"); idx > 0 {
 		platformName = sessionKey[:idx]
 	}
-
-	var targetPlatform Platform
-	for _, p := range engine.platforms {
-		if p.Name() == platformName {
-			targetPlatform = p
-			break
-		}
-	}
-	if targetPlatform == nil {
-		slog.Error("webhook: platform not found", "event", event, "platform", platformName)
-		return
-	}
-
-	rc, ok := targetPlatform.(ReplyContextReconstructor)
-	if !ok {
-		slog.Error("webhook: platform does not support proactive messaging", "event", event, "platform", platformName)
-		return
-	}
-
-	replyCtx, err := rc.ReconstructReplyCtx(sessionKey)
+	targetPlatform, replyCtx, err := resolveWebhookReplyTarget(engine.platforms, sessionKey)
 	if err != nil {
 		slog.Error("webhook: reconstruct reply context failed", "event", event, "error", err)
 		return
@@ -258,30 +239,7 @@ const webhookShellTimeout = 5 * time.Minute
 
 func (ws *WebhookServer) executeShell(engine *Engine, req WebhookRequest, event string) {
 	sessionKey := req.SessionKey
-	platformName := ""
-	if idx := strings.Index(sessionKey, ":"); idx > 0 {
-		platformName = sessionKey[:idx]
-	}
-
-	var targetPlatform Platform
-	for _, p := range engine.platforms {
-		if p.Name() == platformName {
-			targetPlatform = p
-			break
-		}
-	}
-	if targetPlatform == nil {
-		slog.Error("webhook: platform not found for shell exec", "event", event, "platform", platformName)
-		return
-	}
-
-	rc, ok := targetPlatform.(ReplyContextReconstructor)
-	if !ok {
-		slog.Error("webhook: platform does not support proactive messaging", "event", event, "platform", platformName)
-		return
-	}
-
-	replyCtx, err := rc.ReconstructReplyCtx(sessionKey)
+	targetPlatform, replyCtx, err := resolveWebhookReplyTarget(engine.platforms, sessionKey)
 	if err != nil {
 		slog.Error("webhook: reconstruct reply context failed", "event", event, "error", err)
 		return
@@ -330,4 +288,58 @@ func (ws *WebhookServer) executeShell(engine *Engine, req WebhookRequest, event 
 	}
 
 	slog.Info("webhook: shell executed", "event", event, "session_key", sessionKey, "success", execErr == nil)
+}
+
+// resolveWebhookReplyTarget maps both static platform session keys and dynamic
+// Bridge adapter session keys to the platform that can reconstruct their reply
+// context. Dynamic adapter names (for example "java-backend") intentionally do
+// not appear in engine.platforms; the Bridge platform owns those adapters.
+func resolveWebhookReplyTarget(platforms []Platform, sessionKey string) (Platform, any, error) {
+	platformName := ""
+	if idx := strings.Index(sessionKey, ":"); idx > 0 {
+		platformName = sessionKey[:idx]
+	}
+
+	tryReconstruct := func(platform Platform) (any, error) {
+		reconstructor, ok := platform.(ReplyContextReconstructor)
+		if !ok {
+			return nil, fmt.Errorf(
+				"platform %q does not support proactive messaging",
+				platform.Name(),
+			)
+		}
+		return reconstructor.ReconstructReplyCtx(sessionKey)
+	}
+
+	for _, platform := range platforms {
+		if platform.Name() != platformName {
+			continue
+		}
+		replyCtx, err := tryReconstruct(platform)
+		if err != nil {
+			return nil, nil, err
+		}
+		return platform, replyCtx, nil
+	}
+
+	var lastErr error
+	for _, platform := range platforms {
+		if _, ok := platform.(ReplyContextReconstructor); !ok {
+			continue
+		}
+		replyCtx, err := tryReconstruct(platform)
+		if err == nil {
+			return platform, replyCtx, nil
+		}
+		lastErr = err
+	}
+
+	if lastErr != nil {
+		return nil, nil, lastErr
+	}
+	return nil, nil, fmt.Errorf(
+		"platform %q not found for session key %q",
+		platformName,
+		sessionKey,
+	)
 }
