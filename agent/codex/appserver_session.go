@@ -141,15 +141,16 @@ type appServerRequestUserInputAnswer struct {
 }
 
 type appServerSession struct {
-	url           string
-	workDir       string
-	model         string
-	effort        string
-	mode          string
-	baseURL       string
-	modelProvider string
-	extraEnv      []string
-	codexHome     string
+	url                string
+	workDir            string
+	model              string
+	effort             string
+	mode               string
+	permissionsProfile string
+	baseURL            string
+	modelProvider      string
+	extraEnv           []string
+	codexHome          string
 
 	events chan core.Event
 
@@ -194,23 +195,24 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, permissionsProfile, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
-		url:              url,
-		workDir:          workDir,
-		model:            model,
-		effort:           effort,
-		mode:             mode,
-		baseURL:          baseURL,
-		modelProvider:    modelProvider,
-		extraEnv:         append([]string(nil), extraEnv...),
-		codexHome:        strings.TrimSpace(codexHome),
-		events:           make(chan core.Event, 128),
-		ctx:              sessionCtx,
-		cancel:           cancel,
-		pending:          make(map[int64]chan rpcResponseEnvelope),
-		pendingApprovals: make(map[string]chan core.PermissionResult),
+		url:                url,
+		workDir:            workDir,
+		model:              model,
+		effort:             effort,
+		mode:               mode,
+		permissionsProfile: strings.TrimSpace(permissionsProfile),
+		baseURL:            baseURL,
+		modelProvider:      modelProvider,
+		extraEnv:           append([]string(nil), extraEnv...),
+		codexHome:          strings.TrimSpace(codexHome),
+		events:             make(chan core.Event, 128),
+		ctx:                sessionCtx,
+		cancel:             cancel,
+		pending:            make(map[int64]chan rpcResponseEnvelope),
+		pendingApprovals:   make(map[string]chan core.PermissionResult),
 	}
 	s.alive.Store(true)
 
@@ -360,11 +362,15 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	params := map[string]any{
 		"experimentalRawEvents":  false,
 		"persistExtendedHistory": false,
+		"cwd":                    s.workDir,
 	}
 	if model := s.GetModel(); model != "" {
 		params["model"] = model
 	}
-	if approval, sandbox := appServerModeSettings(s.mode); approval != "" {
+	if profile := strings.TrimSpace(s.permissionsProfile); profile != "" {
+		params["permissions"] = profile
+		params["approvalPolicy"] = "never"
+	} else if approval, sandbox := appServerModeSettings(s.mode); approval != "" {
 		params["approvalPolicy"] = approval
 		if sandbox != "" {
 			params["sandbox"] = sandbox
@@ -480,6 +486,7 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	params := map[string]any{
 		"threadId": threadID,
 		"input":    input,
+		"cwd":      s.workDir,
 	}
 	if model := s.GetModel(); model != "" {
 		params["model"] = model
@@ -487,7 +494,10 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	if effort := s.GetReasoningEffort(); effort != "" {
 		params["effort"] = effort
 	}
-	if approval, _ := appServerModeSettings(s.mode); approval != "" {
+	if profile := strings.TrimSpace(s.permissionsProfile); profile != "" {
+		params["permissions"] = profile
+		params["approvalPolicy"] = "never"
+	} else if approval, _ := appServerModeSettings(s.mode); approval != "" {
 		params["approvalPolicy"] = approval
 	}
 

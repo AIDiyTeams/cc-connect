@@ -56,9 +56,14 @@ skip_git = true
 type = "codex"
 
 [projects.agent.options]
-mode = "bypassPermissions"
+backend = "app_server"
+app_server_url = "stdio"
+permissions_profile = "tomako-brand-fence"
 cli_path = "/usr/local/bin/codex"
 model = "deepseek-v4-flash"
+# Define the named profile in the host Codex config.toml. See
+# docs/workspace-fence.md. Do not use bypassPermissions/yolo in a
+# multi-customer deployment.
 # Codex memory extension under .codex/memories/extensions/<name>/facts
 # Codex 记忆扩展目录名（默认 tomako，可改为业务名）
 # memory_extension = "tomako"
@@ -115,7 +120,9 @@ type = "feishu"
 # type = "codex"
 #
 # [projects.agent.options]
-# mode = "bypassPermissions"
+# backend = "app_server"
+# app_server_url = "stdio"
+# permissions_profile = "factory-workspace-fence"
 # model = "deepseek-v4-flash"
 # memory_extension = "factory-sched"             # → .../extensions/factory-sched/facts
 # memory_fact_title = "Factory Schedule Fact"

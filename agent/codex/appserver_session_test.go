@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +28,83 @@ func TestAppServerSession_ApplyThreadRuntimeState(t *testing.T) {
 	}
 	if got := s.GetReasoningEffort(); got != "xhigh" {
 		t.Fatalf("GetReasoningEffort() = %q, want xhigh", got)
+	}
+}
+
+func TestAppServerSession_FencedThreadParamsOverrideUnsafeGlobalMode(t *testing.T) {
+	s := &appServerSession{
+		workDir:            "/srv/tomako/workspaces/brand-42",
+		mode:               "yolo",
+		permissionsProfile: "tomako-brand-fence",
+	}
+
+	params := s.threadRequestParams()
+	want := map[string]any{
+		"experimentalRawEvents":  false,
+		"persistExtendedHistory": false,
+		"cwd":                    "/srv/tomako/workspaces/brand-42",
+		"permissions":            "tomako-brand-fence",
+		"approvalPolicy":         "never",
+	}
+	if !reflect.DeepEqual(params, want) {
+		t.Fatalf("thread params = %#v, want %#v", params, want)
+	}
+	if _, ok := params["sandbox"]; ok {
+		t.Fatalf("fenced thread must select permissions profile instead of legacy sandbox: %#v", params)
+	}
+}
+
+func TestAppServerSession_FencedTurnKeepsPermissionsProfile(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stdin := &lockedWriteCloser{}
+	s := &appServerSession{
+		workDir:            "/srv/tomako/workspaces/brand-42",
+		mode:               "yolo",
+		permissionsProfile: "tomako-brand-fence",
+		stdin:              stdin,
+		ctx:                ctx,
+		pending:            make(map[int64]chan rpcResponseEnvelope),
+	}
+	s.alive.Store(true)
+	s.threadID.Store("thread-42")
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.Send("update my files", nil, nil)
+	}()
+
+	line := waitForWrittenJSONLine(t, stdin)
+	var request struct {
+		ID     int64          `json:"id"`
+		Method string         `json:"method"`
+		Params map[string]any `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(line), &request); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	if request.Method != "turn/start" {
+		t.Fatalf("method = %q, want turn/start", request.Method)
+	}
+	if request.Params["permissions"] != "tomako-brand-fence" || request.Params["approvalPolicy"] != "never" {
+		t.Fatalf("turn permissions = %#v", request.Params)
+	}
+	if request.Params["cwd"] != "/srv/tomako/workspaces/brand-42" {
+		t.Fatalf("turn cwd = %#v", request.Params["cwd"])
+	}
+
+	s.handleResponse(rpcResponseEnvelope{
+		ID:     request.ID,
+		Result: json.RawMessage(`{"turn":{"id":"turn-42"}}`),
+	})
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Send() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Send() did not complete")
 	}
 }
 

@@ -91,8 +91,9 @@ func resolveCodexHomeForConfig(explicit string) (string, error) {
 //     symlink is safe and rotated keys propagate to all per-user workspaces.
 //   - config.toml CANNOT be symlinked: Codex writes per-user [projects.*] trust
 //     entries into it on startup, which would funnel every user's trust into the
-//     shared global file. Instead, the provider routing config (model_provider,
-//     model, [model_providers.*], etc.) is synced from global on every
+//     shared global file. Instead, provider routing and fixed permission profiles
+//     (model_provider, model, [model_providers.*], [permissions.*], etc.) are
+//     synced from global on every
 //     StartSession — per-user trust entries are preserved. Editing the global
 //     config.toml's provider section thus takes effect for every user on its next
 //     session, giving a single source of truth equivalent to a symlink.
@@ -167,31 +168,31 @@ func ensureCodexHomeInheritedConfig(codexHome string) error {
 }
 
 // extractTrustOnly returns the per-user-specific parts of a codex config.toml
-// ([projects.*] trust sections and any non-provider top-level keys), stripping
-// provider routing config that is re-synced from the global config on every
-// StartSession. This keeps per-user trust entries intact while letting the
-// provider section be overwritten with the latest global values.
+// ([projects.*] trust sections and any non-shared top-level keys), stripping
+// provider routing and permissions config that is re-synced from the global
+// config on every StartSession. This keeps per-user trust entries intact while
+// preventing stale permission profiles from surviving a security update.
 func extractTrustOnly(config string) string {
 	var b strings.Builder
 	lines := strings.Split(config, "\n")
-	inModelProviders := false
+	inSharedSection := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "[model_providers.") {
-			inModelProviders = true
-			continue
-		}
-		if inModelProviders {
-			if strings.HasPrefix(trimmed, "[") {
-				inModelProviders = false
-			} else {
+		if strings.HasPrefix(trimmed, "[") {
+			inSharedSection = strings.HasPrefix(trimmed, "[model_providers.") ||
+				strings.HasPrefix(trimmed, "[permissions.")
+			if inSharedSection {
 				continue
 			}
+		}
+		if inSharedSection {
+			continue
 		}
 		if !strings.HasPrefix(trimmed, "[") && trimmed != "" {
 			if strings.HasPrefix(trimmed, "model_provider") ||
 				strings.HasPrefix(trimmed, "model =") ||
 				strings.HasPrefix(trimmed, "model_reasoning_effort") ||
+				strings.HasPrefix(trimmed, "default_permissions") ||
 				strings.HasPrefix(trimmed, "approval_policy") ||
 				strings.HasPrefix(trimmed, "sandbox_mode") ||
 				strings.HasPrefix(trimmed, "disable_response_storage") {
@@ -203,28 +204,29 @@ func extractTrustOnly(config string) string {
 	return strings.TrimSpace(b.String())
 }
 
-// extractProviderConfig extracts top-level provider keys and [model_providers.*]
-// sections from a codex config.toml, omitting [projects.*] trust entries that are
-// per-workspace specific. Used to merge the host's cc-switch provider routing
-// into a per-user config.toml without duplicating workspace trust sections.
+// extractProviderConfig extracts the host-managed runtime config: provider keys,
+// fixed permission selection, [model_providers.*], and [permissions.*]. Project
+// trust entries remain private to each workspace.
 func extractProviderConfig(config string) string {
 	var b strings.Builder
 	lines := strings.Split(config, "\n")
-	inModelProviders := false
+	inSharedSection := false
+	seenSection := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") {
+			seenSection = true
+			inSharedSection = strings.HasPrefix(trimmed, "[model_providers.") ||
+				strings.HasPrefix(trimmed, "[permissions.")
+		}
 		switch {
-		case strings.HasPrefix(trimmed, "[model_providers."):
-			inModelProviders = true
+		case inSharedSection:
 			b.WriteString(line + "\n")
-		case inModelProviders && strings.HasPrefix(trimmed, "["):
-			inModelProviders = false
-		case inModelProviders:
-			b.WriteString(line + "\n")
-		case !strings.HasPrefix(trimmed, "[") && trimmed != "":
+		case !seenSection && trimmed != "":
 			if strings.HasPrefix(trimmed, "model_provider") ||
 				strings.HasPrefix(trimmed, "model =") ||
 				strings.HasPrefix(trimmed, "model_reasoning_effort") ||
+				strings.HasPrefix(trimmed, "default_permissions") ||
 				strings.HasPrefix(trimmed, "approval_policy") ||
 				strings.HasPrefix(trimmed, "sandbox_mode") ||
 				strings.HasPrefix(trimmed, "disable_response_storage") {

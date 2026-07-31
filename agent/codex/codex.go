@@ -31,13 +31,14 @@ func init() {
 //   - "full-auto": --sandbox workspace-write + approval_policy=never
 //   - "yolo":      --dangerously-bypass-approvals-and-sandbox
 type Agent struct {
-	workDir         string
-	model           string
-	reasoningEffort string
-	mode            string // "suggest" | "auto-edit" | "full-auto" | "yolo"
-	backend         string // "exec" | "app_server"
-	appServerURL    string
-	codexHome       string
+	workDir              string
+	model                string
+	reasoningEffort      string
+	mode                 string // "suggest" | "auto-edit" | "full-auto" | "yolo"
+	backend              string // "exec" | "app_server"
+	appServerURL         string
+	codexHome            string
+	permissionsProfile   string   // fixed app-server permissions profile; non-empty enables the workspace fence
 	cliBin               string   // CLI binary name, default "codex"
 	cliExtraArgs         []string // extra args parsed from cli_path after the binary
 	sessionWorkspaceBase string
@@ -62,6 +63,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	backend, _ := opts["backend"].(string)
 	appServerURL, _ := opts["app_server_url"].(string)
 	codexHome, _ := opts["codex_home"].(string)
+	permissionsProfile, _ := opts["permissions_profile"].(string)
 	sessionWorkspaceBase, _ := opts["session_workspace_base"].(string)
 	memoryExtension, _ := opts["memory_extension"].(string)
 	memoryFactTitle, _ := opts["memory_fact_title"].(string)
@@ -69,6 +71,13 @@ func New(opts map[string]any) (core.Agent, error) {
 	mode = normalizeMode(mode)
 	backend = normalizeBackend(backend)
 	appServerURL = normalizeAppServerURL(appServerURL)
+	permissionsProfile = strings.TrimSpace(permissionsProfile)
+	if permissionsProfile != "" && backend != "app_server" {
+		return nil, fmt.Errorf("codex: permissions_profile requires backend=app_server")
+	}
+	if permissionsProfile != "" {
+		mode = "fenced"
+	}
 
 	// cli_path allows overriding the binary, e.g. "omx" or "omx --flag val".
 	// binary_path is accepted as an alias (Tomako production config uses it).
@@ -115,6 +124,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		backend:              backend,
 		appServerURL:         appServerURL,
 		codexHome:            strings.TrimSpace(codexHome),
+		permissionsProfile:   permissionsProfile,
 		cliBin:               cliBin,
 		cliExtraArgs:         cliExtraArgs,
 		sessionWorkspaceBase: strings.TrimSpace(sessionWorkspaceBase),
@@ -382,6 +392,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	backend := a.backend
 	appServerURL := a.appServerURL
 	codexHome := a.codexHome
+	permissionsProfile := a.permissionsProfile
 	cliBin := a.cliBin
 	cliExtraArgs := a.cliExtraArgs
 	workDir := a.workDir
@@ -403,6 +414,13 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	provName, provAPIKey, provWireAPI, provHeaders := a.activeProviderCodexConfig()
 	a.mu.Unlock()
 	workDir = resolveSessionWorkDir(workDir, sessionWorkspaceBase, envValue(extraEnv, "CC_SESSION_KEY"))
+	if permissionsProfile != "" {
+		var err error
+		extraEnv, err = prepareFencedEnvironment(workDir, extraEnv)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// Per-user codex_home: when no explicit codex_home is configured and the
 	// resolved workDir is an absolute path, derive CODEX_HOME from workDir so
@@ -435,13 +453,45 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome)
+		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, permissionsProfile, sessionID, baseURL, provName, extraEnv, codexHome)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
 	}
 
 	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName)
+}
+
+func prepareFencedEnvironment(workDir string, env []string) ([]string, error) {
+	if err := ensureFencedPrivateDir(filepath.Join(workDir, ".codex"), 0o700); err != nil {
+		return nil, err
+	}
+	if err := ensureFencedPrivateDir(filepath.Join(workDir, ".codex", "memories"), 0o700); err != nil {
+		return nil, err
+	}
+	tmpDir := filepath.Join(workDir, ".tmp")
+	if err := ensureFencedPrivateDir(tmpDir, 0o700); err != nil {
+		return nil, err
+	}
+	return append(env, "TMPDIR="+tmpDir), nil
+}
+
+func ensureFencedPrivateDir(path string, mode os.FileMode) error {
+	info, err := os.Lstat(path)
+	switch {
+	case os.IsNotExist(err):
+		if err := os.Mkdir(path, mode); err != nil {
+			return fmt.Errorf("codex: create fenced private dir %q: %w", path, err)
+		}
+	case err != nil:
+		return fmt.Errorf("codex: inspect fenced private dir %q: %w", path, err)
+	case info.Mode()&os.ModeSymlink != 0 || !info.IsDir():
+		return fmt.Errorf("codex: fenced private path must be a real directory: %q", path)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		return fmt.Errorf("codex: secure fenced private dir %q: %w", path, err)
+	}
+	return nil
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -476,6 +526,10 @@ func (a *Agent) Stop() error { return nil }
 func (a *Agent) SetMode(mode string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.permissionsProfile != "" {
+		slog.Warn("codex: approval mode change ignored while workspace fence is active", "permissions_profile", a.permissionsProfile)
+		return
+	}
 	a.mode = normalizeMode(mode)
 	slog.Info("codex: approval mode changed", "mode", a.mode)
 }
@@ -505,6 +559,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.codexHome != "" {
 		opts["codex_home"] = a.codexHome
+	}
+	if a.permissionsProfile != "" {
+		opts["permissions_profile"] = a.permissionsProfile
 	}
 	if a.cliBin != "" && a.cliBin != "codex" {
 		cliPath := a.cliBin
@@ -752,6 +809,18 @@ func (a *Agent) activeProviderCodexConfig() (name string, apiKey string, wireAPI
 // (codex CLI has no separate "ask for shell only" mode); auto-edit is kept as
 // an alias for backward compatibility with existing user configs.
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {
+	a.mu.RLock()
+	permissionsProfile := a.permissionsProfile
+	a.mu.RUnlock()
+	if permissionsProfile != "" {
+		return []core.PermissionModeInfo{{
+			Key:    "fenced",
+			Name:   "Workspace Fence",
+			NameZh: "工作区围栏",
+			Desc:   "Fixed permissions profile; runtime mode changes cannot widen filesystem access",
+			DescZh: "固定权限配置；运行时切换模式不能扩大文件系统权限",
+		}}
+	}
 	return []core.PermissionModeInfo{
 		{Key: "suggest", Name: "Suggest", NameZh: "建议",
 			Desc:   "Read-only sandbox; on exec backend no prompts, on app_server backend asks for every tool call",
