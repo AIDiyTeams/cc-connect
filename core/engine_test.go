@@ -6617,6 +6617,43 @@ func TestProcessInteractiveEvents_AskUserQuestionFromAgent_RendersLegacyPrompt(t
 	}
 }
 
+func TestRespondInteractionUsesStableQuestionAndOptionIDs(t *testing.T) {
+	e := newTestEngine()
+	rec := &recordingAgentSession{}
+	questions := []UserQuestion{{
+		ID:       "database",
+		Question: "Which database?",
+		Options:  []UserQuestionOption{{ID: "postgres", Label: "PostgreSQL"}},
+	}}
+	state := &interactiveState{
+		agentSession: rec,
+		pending: &pendingPermission{
+			RequestID:     "native-request",
+			InteractionID: "interaction-1",
+			ToolName:      "AskUserQuestion",
+			ToolInput:     map[string]any{"questions": []any{}},
+			Questions:     questions,
+			Resolved:      make(chan struct{}),
+		},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates["test:chat:user1"] = state
+	e.interactiveMu.Unlock()
+
+	if err := e.RespondInteraction("test:chat:user1", "interaction-1", "", map[string][]string{
+		"database": {"postgres"},
+	}); err != nil {
+		t.Fatalf("RespondInteraction() error = %v", err)
+	}
+	if rec.lastID != "native-request" {
+		t.Fatalf("native request id = %q, want native-request", rec.lastID)
+	}
+	answers, ok := rec.lastResult.UpdatedInput["answers"].(map[string]any)
+	if !ok || answers["database"] != "PostgreSQL" {
+		t.Fatalf("answers = %#v, want database=PostgreSQL", rec.lastResult.UpdatedInput["answers"])
+	}
+}
+
 func TestHandlePendingPermission_AskUserQuestion_SingleQuestion(t *testing.T) {
 	e := newTestEngine()
 	p := &stubPlatformEngine{n: "test"}
