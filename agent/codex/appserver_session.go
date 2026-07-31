@@ -771,11 +771,16 @@ func appServerRequestUserInputQuestions(input []appServerRequestUserInputQuestio
 			continue
 		}
 		q := core.UserQuestion{
+			ID:       strings.TrimSpace(in.ID),
 			Question: questionText,
 			Header:   strings.TrimSpace(in.Header),
 		}
+		if q.ID == "" {
+			q.ID = fmt.Sprintf("question-%d", len(questions)+1)
+		}
 		for _, opt := range in.Options {
 			q.Options = append(q.Options, core.UserQuestionOption{
+				ID:          fmt.Sprintf("%s-option-%d", q.ID, len(q.Options)+1),
 				Label:       strings.TrimSpace(opt.Label),
 				Description: strings.TrimSpace(opt.Description),
 			})

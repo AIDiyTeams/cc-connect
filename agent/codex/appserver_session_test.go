@@ -348,11 +348,17 @@ func TestAppServerSession_HandleRequestUserInputEmitsAskQuestion(t *testing.T) {
 		t.Fatalf("questions = %d, want 1", len(event.Questions))
 	}
 	q := event.Questions[0]
+	if q.ID != "database" {
+		t.Fatalf("question id = %q, want database", q.ID)
+	}
 	if q.Question != "Which database should we use?" || q.Header != "Database" {
 		t.Fatalf("question = %#v", q)
 	}
 	if len(q.Options) != 2 || q.Options[0].Label != "Postgres" || q.Options[1].Description != "Keep it embedded" {
 		t.Fatalf("options = %#v", q.Options)
+	}
+	if q.Options[0].ID != "database-option-1" || q.Options[1].ID != "database-option-2" {
+		t.Fatalf("option ids = %#v", q.Options)
 	}
 	if stdin.String() != "" {
 		t.Fatalf("request_user_input should not write before the answer, got %q", stdin.String())

@@ -503,6 +503,8 @@ type modelSwitchState struct {
 // pendingPermission represents a permission request waiting for user response.
 type pendingPermission struct {
 	RequestID       string
+	InteractionID   string
+	InteractionKind InteractionKind
 	ToolName        string
 	ToolInput       map[string]any
 	InputPreview    string
@@ -3266,6 +3268,75 @@ found:
 // lookupPending returns the interactive state and its pending permission for
 // the given key, or nil/nil if the state is absent or has no pending. Caller
 // must NOT hold interactiveMu.
+func newInteractionID() string {
+	return fmt.Sprintf("interaction-%d", time.Now().UnixNano())
+}
+
+// RespondInteraction resolves the structured interaction currently waiting on
+// a session. The native JSON-RPC request id never leaves cc-connect.
+func (e *Engine) RespondInteraction(sessionKey, interactionID, decision string, answers map[string][]string) error {
+	iKey := e.interactiveKeyForSessionKey(sessionKey)
+	state, pending := e.lookupPending(iKey)
+	if state == nil || pending == nil {
+		return fmt.Errorf("no pending interaction for session %q", sessionKey)
+	}
+	if pending.InteractionID != interactionID {
+		return fmt.Errorf("interaction %q is not pending", interactionID)
+	}
+
+	result := PermissionResult{Behavior: "allow", UpdatedInput: pending.ToolInput}
+	if len(pending.Questions) > 0 {
+		collected := make(map[int]string, len(pending.Questions))
+		for idx, question := range pending.Questions {
+			values := answers[question.ID]
+			if len(values) == 0 {
+				values = answers[question.Question]
+			}
+			if len(values) == 0 {
+				return fmt.Errorf("missing answer for question %q", question.ID)
+			}
+			collected[idx] = interactionAnswerText(question, values)
+		}
+		result.UpdatedInput = buildAskQuestionResponse(pending.ToolInput, pending.Questions, collected)
+	} else {
+		decision = strings.ToLower(strings.TrimSpace(decision))
+		switch decision {
+		case "allow", "allow_all":
+			result.Behavior = "allow"
+		case "deny":
+			result.Behavior = "deny"
+			result.Message = "User denied this tool use."
+		default:
+			return fmt.Errorf("unsupported interaction decision %q", decision)
+		}
+	}
+	if err := state.agentSession.RespondPermission(pending.RequestID, result); err != nil {
+		return err
+	}
+	state.mu.Lock()
+	state.pending = nil
+	state.mu.Unlock()
+	pending.resolve()
+	return nil
+}
+
+func interactionAnswerText(question UserQuestion, values []string) string {
+	labels := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		for _, option := range question.Options {
+			if value == option.ID || value == option.Label {
+				value = option.Label
+				break
+			}
+		}
+		if value != "" {
+			labels = append(labels, value)
+		}
+	}
+	return strings.Join(labels, ", ")
+}
+
 func (e *Engine) lookupPending(iKey string) (*interactiveState, *pendingPermission) {
 	e.interactiveMu.Lock()
 	state := e.interactiveStates[iKey]
@@ -3335,7 +3406,11 @@ func buildAskQuestionResponse(originalInput map[string]any, questions []UserQues
 	answers := make(map[string]any)
 	for idx, ans := range collected {
 		if idx >= 0 && idx < len(questions) {
-			answers[questions[idx].Question] = ans
+			key := questions[idx].ID
+			if key == "" {
+				key = questions[idx].Question
+			}
+			answers[key] = ans
 		}
 	}
 	result["answers"] = answers
@@ -5147,7 +5222,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			)
 
 			pending := &pendingPermission{
-				RequestID:    event.RequestID,
+				RequestID:     event.RequestID,
+				InteractionID: newInteractionID(),
+				InteractionKind: func() InteractionKind {
+					if isAskQuestion {
+						return InteractionKindQuestion
+					}
+					return InteractionKindApproval
+				}(),
 				ToolName:     event.ToolName,
 				ToolInput:    event.ToolInputRaw,
 				InputPreview: event.ToolInput,
@@ -5158,9 +5240,27 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.pending = pending
 			state.mu.Unlock()
 
-			if isAskQuestion {
+			structuredSent := false
+			if sender, ok := p.(InteractionSender); ok {
+				request := InteractionRequest{
+					InteractionID: pending.InteractionID,
+					Kind:          pending.InteractionKind,
+					ToolName:      event.ToolName,
+					InputPreview:  event.ToolInput,
+					Questions:     event.Questions,
+				}
+				if !isAskQuestion {
+					request.Options = []InteractionOption{
+						{ID: "allow", Label: e.i18n.T(MsgPermBtnAllow)},
+						{ID: "deny", Label: e.i18n.T(MsgPermBtnDeny)},
+						{ID: "allow_all", Label: e.i18n.T(MsgPermBtnAllowAll)},
+					}
+				}
+				structuredSent = sender.SendInteraction(e.ctx, replyCtx, request) == nil
+			}
+			if !structuredSent && isAskQuestion {
 				e.sendAskQuestionPrompt(p, replyCtx, event.Questions, 0)
-			} else {
+			} else if !structuredSent {
 				permLimit := e.display.ToolMaxLen
 				if permLimit > 0 {
 					permLimit = permLimit * 8 / 5
