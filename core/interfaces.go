@@ -355,6 +355,34 @@ type InlineButtonSender interface {
 	SendWithButtons(ctx context.Context, replyCtx any, content string, buttons [][]ButtonOption) error
 }
 
+// InteractionSender is an optional structured interaction channel. Platforms
+// that do not implement it continue to use the legacy card/button prompt path.
+type InteractionSender interface {
+	SendInteraction(ctx context.Context, replyCtx any, request InteractionRequest) error
+}
+
+type InteractionKind string
+
+const (
+	InteractionKindQuestion InteractionKind = "question"
+	InteractionKindApproval InteractionKind = "approval"
+)
+
+type InteractionRequest struct {
+	InteractionID string              `json:"interaction_id"`
+	Kind          InteractionKind     `json:"kind"`
+	ToolName      string              `json:"tool_name,omitempty"`
+	InputPreview  string              `json:"input_preview,omitempty"`
+	Questions     []UserQuestion      `json:"questions,omitempty"`
+	Options       []InteractionOption `json:"options,omitempty"`
+}
+
+type InteractionOption struct {
+	ID          string `json:"id"`
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
 // CardSender is an optional interface for platforms that support sending
 // structured rich cards (e.g. Feishu Interactive Card). Platforms that do not
 // implement this interface will receive a plain-text fallback via Card.RenderText().

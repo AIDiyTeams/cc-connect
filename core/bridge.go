@@ -179,6 +179,16 @@ type bridgeCardAction struct {
 	Project    string `json:"project,omitempty"`
 }
 
+type bridgeRespondInteraction struct {
+	Type          string              `json:"type"`
+	SessionKey    string              `json:"session_key"`
+	ReplyCtx      string              `json:"reply_ctx"`
+	InteractionID string              `json:"interaction_id"`
+	Decision      string              `json:"decision,omitempty"`
+	Answers       map[string][]string `json:"answers,omitempty"`
+	Project       string              `json:"project,omitempty"`
+}
+
 type bridgePreviewAck struct {
 	Type          string `json:"type"`
 	RefID         string `json:"ref_id"`
@@ -816,6 +826,26 @@ func (bp *BridgePlatform) SendWithButtons(ctx context.Context, replyCtx any, con
 	})
 }
 
+func (bp *BridgePlatform) SendInteraction(ctx context.Context, replyCtx any, request InteractionRequest) error {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok {
+		return fmt.Errorf("bridge: invalid reply context")
+	}
+	a := bp.server.getAdapter(rc.Platform)
+	if a == nil || !a.capabilities["interactions"] {
+		return ErrNotSupported
+	}
+	return bp.server.sendToAdapter(rc.Platform, map[string]any{
+		"type":           "interaction_requested",
+		"session_key":    rc.SessionKey,
+		"reply_ctx":      rc.ReplyCtx,
+		"interaction_id": request.InteractionID,
+		"kind":           request.Kind,
+		"questions":      request.Questions,
+		"options":        request.Options,
+	})
+}
+
 func (bp *BridgePlatform) UpdateMessage(ctx context.Context, replyCtx any, content string) error {
 	rc, ok := replyCtx.(*bridgeReplyCtx)
 	if !ok {
@@ -1269,6 +1299,8 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 			adapter.handleMessage(raw)
 		case "card_action":
 			adapter.handleCardAction(raw)
+		case "respond_interaction":
+			adapter.handleRespondInteraction(raw)
 		case "preview_ack":
 			adapter.handlePreviewAck(raw)
 		case "ping":
@@ -1279,6 +1311,21 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 		default:
 			slog.Debug("bridge: unknown message type", "platform", reg.Platform, "type", base.Type)
 		}
+	}
+}
+
+func (a *bridgeAdapter) handleRespondInteraction(raw json.RawMessage) {
+	var response bridgeRespondInteraction
+	if err := json.Unmarshal(raw, &response); err != nil || response.InteractionID == "" || response.SessionKey == "" {
+		slog.Debug("bridge: invalid respond_interaction payload", "error", err)
+		return
+	}
+	ref := a.server.resolveEngine(response.SessionKey, response.Project)
+	if ref == nil {
+		return
+	}
+	if err := ref.engine.RespondInteraction(response.SessionKey, response.InteractionID, response.Decision, response.Answers); err != nil {
+		slog.Warn("bridge: interaction response rejected", "interaction_id", response.InteractionID, "error", err)
 	}
 }
 

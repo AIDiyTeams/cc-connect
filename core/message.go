@@ -218,6 +218,7 @@ const (
 
 // UserQuestion represents a structured question from AskUserQuestion.
 type UserQuestion struct {
+	ID          string               `json:"id,omitempty"`
 	Question    string               `json:"question"`
 	Header      string               `json:"header"`
 	Options     []UserQuestionOption `json:"options"`
@@ -226,6 +227,7 @@ type UserQuestion struct {
 
 // UserQuestionOption is one choice in a UserQuestion.
 type UserQuestionOption struct {
+	ID          string `json:"id,omitempty"`
 	Label       string `json:"label"`
 	Description string `json:"description"`
 }
