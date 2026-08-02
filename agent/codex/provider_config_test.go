@@ -213,3 +213,76 @@ func TestEnsureCodexAuth_OverwritesExisting(t *testing.T) {
 		t.Errorf("auth.json missing new key\ngot:\n%s", content)
 	}
 }
+
+func TestEnsureCodexHomeInheritedConfigSyncsPermissionProfiles(t *testing.T) {
+	globalHome := t.TempDir()
+	perWorkspaceHome := filepath.Join(t.TempDir(), ".codex")
+	t.Setenv("CODEX_HOME", globalHome)
+
+	globalConfig := `model = "deepseek-v4-flash"
+default_permissions = "tomako-brand-fence"
+
+[permissions.tomako-brand-fence]
+description = "Brand workspace fence"
+
+[permissions.tomako-brand-fence.filesystem]
+":minimal" = "read"
+"/home/ubuntu/Skills-OL" = "read"
+
+[permissions.tomako-brand-fence.filesystem.":workspace_roots"]
+"." = "write"
+".codex" = "read"
+".codex/memories" = "write"
+
+[permissions.tomako-brand-fence.network]
+enabled = true
+
+[projects."/host-only"]
+trust_level = "trusted"
+`
+	if err := os.WriteFile(filepath.Join(globalHome, "config.toml"), []byte(globalConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCodexHomeInheritedConfig(perWorkspaceHome); err != nil {
+		t.Fatalf("ensureCodexHomeInheritedConfig() error = %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(perWorkspaceHome, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	for _, want := range []string{
+		`default_permissions = "tomako-brand-fence"`,
+		`[permissions.tomako-brand-fence.filesystem]`,
+		`"/home/ubuntu/Skills-OL" = "read"`,
+		`[permissions.tomako-brand-fence.filesystem.":workspace_roots"]`,
+		`".codex/memories" = "write"`,
+		`[permissions.tomako-brand-fence.network]`,
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("per-workspace config missing %q\ngot:\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "/host-only") {
+		t.Fatalf("global project trust leaked into per-workspace config:\n%s", content)
+	}
+}
+
+func TestExtractTrustOnlyDropsStalePermissionProfile(t *testing.T) {
+	config := `default_permissions = "stale"
+
+[permissions.stale]
+extends = ":danger-full-access"
+
+[projects."/brand-workspace"]
+trust_level = "trusted"
+`
+	got := extractTrustOnly(config)
+	if strings.Contains(got, "default_permissions") || strings.Contains(got, "permissions.stale") {
+		t.Fatalf("stale permission config survived:\n%s", got)
+	}
+	if !strings.Contains(got, `[projects."/brand-workspace"]`) || !strings.Contains(got, `trust_level = "trusted"`) {
+		t.Fatalf("workspace trust was not preserved:\n%s", got)
+	}
+}

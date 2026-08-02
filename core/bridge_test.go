@@ -307,6 +307,114 @@ func TestBridge_MessageRouting(t *testing.T) {
 	}
 }
 
+type bridgeInteractionResponse struct {
+	requestID string
+	result    PermissionResult
+}
+
+type bridgeInteractionAgentSession struct {
+	*blockingSendAgentSession
+	responses chan bridgeInteractionResponse
+}
+
+func newBridgeInteractionAgentSession(id string) *bridgeInteractionAgentSession {
+	return &bridgeInteractionAgentSession{
+		blockingSendAgentSession: newBlockingSendSession(id),
+		responses:                make(chan bridgeInteractionResponse, 1),
+	}
+}
+
+func (s *bridgeInteractionAgentSession) RespondPermission(requestID string, result PermissionResult) error {
+	s.responses <- bridgeInteractionResponse{requestID: requestID, result: result}
+	return nil
+}
+
+func TestBridge_CodexQuestionInteractionRoundTrip(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	bp := bs.NewPlatform("test-proj")
+	sess := newBridgeInteractionAgentSession("codex-interaction")
+	e := NewEngine("test-proj", &controllableAgent{nextSession: sess}, []Platform{bp}, "", LangEnglish)
+	bs.RegisterEngine("test-proj", e, bp)
+
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "bridge", []string{"text", "interactions"})
+
+	mustWriteJSON(t, conn, map[string]any{
+		"type":        "message",
+		"msg_id":      "m-interaction-1",
+		"session_key": "bridge:room-1:user-1",
+		"user_id":     "user-1",
+		"content":     "Ask me which database to use",
+		"reply_ctx":   "llm-interaction-1",
+	})
+
+	select {
+	case <-sess.sendStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("agent prompt did not start")
+	}
+
+	sess.events <- Event{
+		Type:         EventPermissionRequest,
+		RequestID:    `"rui-live-1"`,
+		ToolName:     "AskUserQuestion",
+		ToolInput:    `{"questions":[{"id":"database","question":"Which database should we use?"}]}`,
+		ToolInputRaw: map[string]any{"questions": []any{map[string]any{"id": "database", "question": "Which database should we use?"}}},
+		Questions: []UserQuestion{{
+			ID:       "database",
+			Header:   "Database",
+			Question: "Which database should we use?",
+			Options: []UserQuestionOption{
+				{ID: "postgres", Label: "PostgreSQL", Description: "Use the existing relational database"},
+				{ID: "sqlite", Label: "SQLite", Description: "Keep it embedded"},
+			},
+		}},
+	}
+
+	request := readMsg(t, conn)
+	if request["type"] != "interaction_requested" {
+		t.Fatalf("type = %q, want interaction_requested", request["type"])
+	}
+	interactionID, _ := request["interaction_id"].(string)
+	if interactionID == "" {
+		t.Fatal("interaction_id should be present")
+	}
+	questions, ok := request["questions"].([]any)
+	if !ok || len(questions) != 1 {
+		t.Fatalf("questions = %#v, want one question", request["questions"])
+	}
+	question, ok := questions[0].(map[string]any)
+	if !ok || question["id"] != "database" || question["question"] != "Which database should we use?" {
+		t.Fatalf("question = %#v", questions[0])
+	}
+
+	mustWriteJSON(t, conn, map[string]any{
+		"type":           "respond_interaction",
+		"session_key":    "bridge:room-1:user-1",
+		"reply_ctx":      "llm-interaction-1",
+		"interaction_id": interactionID,
+		"answers": map[string][]string{
+			"database": {"postgres"},
+		},
+	})
+
+	select {
+	case response := <-sess.responses:
+		if response.requestID != `"rui-live-1"` {
+			t.Fatalf("native request id = %q, want raw Codex JSON-RPC id", response.requestID)
+		}
+		answers, ok := response.result.UpdatedInput["answers"].(map[string]any)
+		if !ok || answers["database"] != "PostgreSQL" {
+			t.Fatalf("Codex answers = %#v, want database=PostgreSQL", response.result.UpdatedInput["answers"])
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("respond_interaction did not reach the Codex session")
+	}
+
+	close(sess.unblock)
+	sess.events <- Event{Type: EventResult, Content: "done", Done: true}
+}
+
 func TestBridge_MessageReplyCtxCarriesProgressHints(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
 
