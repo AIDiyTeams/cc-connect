@@ -31,6 +31,44 @@ func TestAppServerSession_ApplyThreadRuntimeState(t *testing.T) {
 	}
 }
 
+func TestAppServerSession_SessionRuntimeSelectsTurnModelAndMetadata(t *testing.T) {
+	s := &appServerSession{}
+	s.alive.Store(true)
+	err := s.SetSessionRuntime(core.SessionRuntime{
+		LogicalModel:       "VISION_BALANCED_V1",
+		GatewayModel:       "tomako/vision-balanced-v1",
+		RoutePolicyID:      "rp-vision-balanced",
+		RoutePolicyVersion: 7,
+		InferenceRequestID: "infer-123",
+		RequiredModalities: []string{"TEXT", "IMAGE"},
+		WorkspaceID:        "ws-1",
+		BrandID:            "brand-1",
+		UserID:             "42",
+		ChatSessionID:      "csess-1",
+		TaskID:             "cmsg-1",
+		TurnNo:             2,
+	})
+	if err != nil {
+		t.Fatalf("SetSessionRuntime: %v", err)
+	}
+	if got := s.GetModel(); got != "tomako/vision-balanced-v1" {
+		t.Fatalf("model = %q", got)
+	}
+	metadata := s.responsesAPIClientMetadata()
+	if metadata["tomako.inference_request_id"] != "infer-123" {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+	if metadata["tomako.required_modalities"] != "TEXT,IMAGE" {
+		t.Fatalf("required modalities = %q", metadata["tomako.required_modalities"])
+	}
+	if metadata["tomako.user_id"] != "42" {
+		t.Fatalf("user metadata = %#v", metadata)
+	}
+	if _, ok := metadata["tomako.gateway_model"]; ok {
+		t.Fatalf("gateway model must travel as turn/start.model, not metadata: %#v", metadata)
+	}
+}
+
 func TestAppServerSession_FencedThreadParamsOverrideUnsafeGlobalMode(t *testing.T) {
 	s := &appServerSession{
 		workDir:            "/srv/tomako/workspaces/brand-42",

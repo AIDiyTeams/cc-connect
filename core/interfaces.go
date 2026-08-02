@@ -463,6 +463,13 @@ type AgentSession interface {
 	Close() error
 }
 
+// SessionRuntimeConfigurer is implemented by agent sessions that can apply a
+// trusted model-routing snapshot to the next Send call without mutating global
+// agent configuration or another concurrent session.
+type SessionRuntimeConfigurer interface {
+	SetSessionRuntime(runtime SessionRuntime) error
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"

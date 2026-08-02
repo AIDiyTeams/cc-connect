@@ -334,6 +334,7 @@ type queuedMessage struct {
 	msgSessionKey     string // session key for extracting chat ID
 	channelKey        string // platform-provided channel identifier (preferred over sessionKey extraction)
 	userMessageTimeMs int64  // Feishu create_time ms (optional); see Message.UserMessageTimeMs
+	runtime           SessionRuntime
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
@@ -2997,6 +2998,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		msgSessionKey:     msg.SessionKey,
 		channelKey:        msg.ChannelKey,
 		userMessageTimeMs: msg.UserMessageTimeMs,
+		runtime:           msg.Runtime,
 	})
 	queueDepth := len(state.pendingMessages)
 	state.mu.Unlock()
@@ -3692,7 +3694,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// EventPermissionRequest while blocked — the event loop must run in parallel.
 	sendDone := make(chan error, 1)
 	go func() {
-		sendDone <- state.agentSession.Send(promptContent, msg.Images, msg.Files)
+		sendDone <- sendWithSessionRuntime(state.agentSession, msg.Runtime, promptContent, msg.Images, msg.Files)
 	}()
 
 	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx, msg.Content)
@@ -5716,7 +5718,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 				nextSend := make(chan error, 1)
 				go func() {
-					nextSend <- state.agentSession.Send(queuedPrompt, queued.images, queued.files)
+					nextSend <- sendWithSessionRuntime(state.agentSession, queued.runtime, queuedPrompt, queued.images, queued.files)
 				}()
 				pendingSend = nextSend
 
@@ -6045,7 +6047,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 
 		sendDone := make(chan error, 1)
 		go func() {
-			sendDone <- state.agentSession.Send(prompt, queued.images, queued.files)
+			sendDone <- sendWithSessionRuntime(state.agentSession, queued.runtime, prompt, queued.images, queued.files)
 		}()
 
 		var stopTyping func()
@@ -6056,6 +6058,21 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		slog.Info("processing queued message", "session", sessionKey)
 		e.processInteractiveEvents(state, session, sessions, sessionKey, queued.messageID, time.Now(), stopTyping, sendDone, queued.replyCtx, queued.content)
 	}
+}
+
+func sendWithSessionRuntime(
+	session AgentSession,
+	runtime SessionRuntime,
+	prompt string,
+	images []ImageAttachment,
+	files []FileAttachment,
+) error {
+	if configurable, ok := session.(SessionRuntimeConfigurer); ok {
+		if err := configurable.SetSessionRuntime(runtime); err != nil {
+			return fmt.Errorf("configure session runtime: %w", err)
+		}
+	}
+	return session.Send(prompt, images, files)
 }
 
 // ──────────────────────────────────────────────────────────────

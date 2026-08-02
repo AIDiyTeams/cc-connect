@@ -169,6 +169,7 @@ type bridgeMessage struct {
 	Images     []bridgeImageData `json:"images,omitempty"`
 	Files      []bridgeFileData  `json:"files,omitempty"`
 	Audio      *bridgeAudioData  `json:"audio,omitempty"`
+	Runtime    SessionRuntime    `json:"runtime,omitempty"`
 }
 
 type bridgeCardAction struct {
@@ -1358,6 +1359,7 @@ func (a *bridgeAdapter) handleMessage(raw json.RawMessage) {
 		UserID:     m.UserID,
 		UserName:   m.UserName,
 		Content:    m.Content,
+		Runtime:    normalizeSessionRuntime(m.Runtime),
 		ReplyCtx:   newBridgeReplyCtx(a, m.SessionKey, m.ReplyCtx),
 	}
 
@@ -1400,6 +1402,47 @@ func (a *bridgeAdapter) handleMessage(raw json.RawMessage) {
 	if ref.platform.handler != nil {
 		ref.platform.handler(ref.platform, msg)
 	}
+}
+
+func normalizeSessionRuntime(runtime SessionRuntime) SessionRuntime {
+	runtime.LogicalModel = boundedOpaqueValue(runtime.LogicalModel, 64)
+	runtime.GatewayModel = boundedOpaqueValue(runtime.GatewayModel, 128)
+	runtime.RoutePolicyID = boundedOpaqueValue(runtime.RoutePolicyID, 64)
+	runtime.InferenceRequestID = boundedOpaqueValue(runtime.InferenceRequestID, 96)
+	runtime.WorkspaceID = boundedOpaqueValue(runtime.WorkspaceID, 64)
+	runtime.BrandID = boundedOpaqueValue(runtime.BrandID, 128)
+	runtime.UserID = boundedOpaqueValue(runtime.UserID, 32)
+	runtime.ChatSessionID = boundedOpaqueValue(runtime.ChatSessionID, 64)
+	runtime.TaskID = boundedOpaqueValue(runtime.TaskID, 96)
+	if runtime.RoutePolicyVersion < 0 {
+		runtime.RoutePolicyVersion = 0
+	}
+	if runtime.TurnNo < 0 {
+		runtime.TurnNo = 0
+	}
+	modalities := make([]string, 0, len(runtime.RequiredModalities))
+	for _, modality := range runtime.RequiredModalities {
+		switch strings.ToUpper(strings.TrimSpace(modality)) {
+		case "TEXT":
+			modalities = append(modalities, "TEXT")
+		case "IMAGE":
+			modalities = append(modalities, "IMAGE")
+		case "AUDIO":
+			modalities = append(modalities, "AUDIO")
+		case "VIDEO":
+			modalities = append(modalities, "VIDEO")
+		}
+	}
+	runtime.RequiredModalities = modalities
+	return runtime
+}
+
+func boundedOpaqueValue(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if len(value) > max {
+		return value[:max]
+	}
+	return value
 }
 
 func (a *bridgeAdapter) handleCardAction(raw json.RawMessage) {

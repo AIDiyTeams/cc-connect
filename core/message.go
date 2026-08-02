@@ -185,6 +185,7 @@ type Message struct {
 	ReplyCtx     any                 // platform-specific context needed for replying
 	FromVoice    bool                // true if message originated from voice transcription
 	ModeOverride string              // if set, temporarily override agent permission mode for this message
+	Runtime      SessionRuntime      // trusted per-turn model routing metadata from the platform adapter
 	// IsPermissionResponse is set by inline-button / card-action paths in
 	// platforms when a synthesized message is forwarded as a permission
 	// decision (e.g. Telegram handleCallbackQuery for perm:allow/deny,
@@ -200,6 +201,24 @@ type Message struct {
 	// drop late redeliveries that reuse a new message_id but an older create_time
 	// than a message already processed. Zero means unset (no ordering hint).
 	UserMessageTimeMs int64
+}
+
+// SessionRuntime carries opaque control-plane routing data for one agent turn.
+// It is never inferred from prompt text and must only be populated by a trusted
+// platform adapter such as the authenticated Tomako Bridge connection.
+type SessionRuntime struct {
+	LogicalModel       string   `json:"logical_model,omitempty"`
+	GatewayModel       string   `json:"gateway_model,omitempty"`
+	RoutePolicyID      string   `json:"route_policy_id,omitempty"`
+	RoutePolicyVersion int64    `json:"route_policy_version,omitempty"`
+	InferenceRequestID string   `json:"inference_request_id,omitempty"`
+	RequiredModalities []string `json:"required_modalities,omitempty"`
+	WorkspaceID        string   `json:"workspace_id,omitempty"`
+	BrandID            string   `json:"brand_id,omitempty"`
+	UserID             string   `json:"user_id,omitempty"`
+	ChatSessionID      string   `json:"chat_session_id,omitempty"`
+	TaskID             string   `json:"task_id,omitempty"`
+	TurnNo             int      `json:"turn_no,omitempty"`
 }
 
 // EventType distinguishes different kinds of agent output.

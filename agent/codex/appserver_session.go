@@ -188,6 +188,7 @@ type appServerSession struct {
 	runtimeMu sync.RWMutex
 	usage     *core.UsageReport
 	context   *core.ContextUsage
+	runtime   core.SessionRuntime
 }
 
 const (
@@ -494,6 +495,9 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	if effort := s.GetReasoningEffort(); effort != "" {
 		params["effort"] = effort
 	}
+	if metadata := s.responsesAPIClientMetadata(); len(metadata) > 0 {
+		params["responsesapiClientMetadata"] = metadata
+	}
 	if profile := strings.TrimSpace(s.permissionsProfile); profile != "" {
 		params["permissions"] = profile
 		params["approvalPolicy"] = "never"
@@ -517,6 +521,52 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	s.stateMu.Unlock()
 
 	return nil
+}
+
+// SetSessionRuntime applies a control-plane snapshot to this app-server
+// session only. turn/start repeats the model on every turn, so concurrent
+// sessions never depend on the Agent's process-wide provider switcher.
+func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error {
+	if !s.alive.Load() {
+		return fmt.Errorf("session is closed")
+	}
+	s.runtimeMu.Lock()
+	defer s.runtimeMu.Unlock()
+	s.runtime = runtime
+	if model := strings.TrimSpace(runtime.GatewayModel); model != "" {
+		s.model = model
+	}
+	return nil
+}
+
+func (s *appServerSession) responsesAPIClientMetadata() map[string]string {
+	s.runtimeMu.RLock()
+	defer s.runtimeMu.RUnlock()
+	runtime := s.runtime
+	metadata := make(map[string]string, 12)
+	put := func(key, value string) {
+		if value = strings.TrimSpace(value); value != "" {
+			metadata[key] = value
+		}
+	}
+	put("tomako.logical_model", runtime.LogicalModel)
+	put("tomako.route_policy_id", runtime.RoutePolicyID)
+	if runtime.RoutePolicyVersion > 0 {
+		metadata["tomako.route_policy_version"] = fmt.Sprintf("%d", runtime.RoutePolicyVersion)
+	}
+	put("tomako.inference_request_id", runtime.InferenceRequestID)
+	put("tomako.workspace_id", runtime.WorkspaceID)
+	put("tomako.brand_id", runtime.BrandID)
+	put("tomako.user_id", runtime.UserID)
+	put("tomako.chat_session_id", runtime.ChatSessionID)
+	put("tomako.task_id", runtime.TaskID)
+	if runtime.TurnNo > 0 {
+		metadata["tomako.turn_no"] = fmt.Sprintf("%d", runtime.TurnNo)
+	}
+	if len(runtime.RequiredModalities) > 0 {
+		metadata["tomako.required_modalities"] = strings.Join(runtime.RequiredModalities, ",")
+	}
+	return metadata
 }
 
 func (s *appServerSession) stageImages(prompt string, images []core.ImageAttachment) (string, []string, error) {
