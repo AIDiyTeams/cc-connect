@@ -85,6 +85,7 @@ Configure the project in cc-connect:
 name = "tomako-studio"
 mode = "multi-workspace"
 base_dir = "/home/ubuntu/workspaces"
+workspace_namespace = "prod"
 skip_git = true
 
 [projects.agent]
@@ -122,8 +123,13 @@ all current Codex processes run as the same service user.
 Each brand gets one real directory under:
 
 ```text
-/home/ubuntu/workspaces/workspace-<workspace-id>/brand-<brand-id>/
+/home/ubuntu/workspaces/<environment>/workspace-<workspace-id>/brand-<brand-id>/
 ```
+
+Run production and test as separate cc-connect processes and give each project
+a distinct `workspace_namespace` such as `prod` or `test`. The namespace is a
+validated single path segment, so independently generated matching IDs cannot
+share files even when both processes use the same host and `base_dir`.
 
 Private outputs, `.codex`, `.codex/memories`, and `.tmp` are real directories.
 Shared Skills, dependencies, package metadata, and platform facts may remain

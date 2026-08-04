@@ -16,6 +16,8 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+var validWorkspaceNamespace = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+
 // validRunAsUserName is the portable-username character set plus digits.
 // POSIX does not require a specific pattern, but every mainstream Linux and
 // macOS system accepts these characters for login names. Rejecting anything
@@ -507,10 +509,11 @@ type ReferenceConfig struct {
 
 // ProjectConfig binds one agent (with a specific work_dir) to one or more platforms.
 type ProjectConfig struct {
-	Name    string `toml:"name"`
-	Mode    string `toml:"mode,omitempty"`     // "" or "multi-workspace"
-	BaseDir string `toml:"base_dir,omitempty"` // parent dir for workspaces
-	SkipGit *bool  `toml:"skip_git,omitempty"`
+	Name               string `toml:"name"`
+	Mode               string `toml:"mode,omitempty"`                // "" or "multi-workspace"
+	BaseDir            string `toml:"base_dir,omitempty"`            // parent dir for workspaces
+	WorkspaceNamespace string `toml:"workspace_namespace,omitempty"` // optional environment segment below base_dir
+	SkipGit            *bool  `toml:"skip_git,omitempty"`
 	// WorkspaceInitAllowLocalPaths allows /workspace init and the conversational
 	// init flow to bind existing local directories. Default false keeps init
 	// limited to git URLs; use /workspace bind or /workspace route for explicit
@@ -590,6 +593,15 @@ type ProjectConfig struct {
 	// WorkspaceShare configures shared skill-library symlinks for multi-workspace
 	// user dirs. Nil → built-in defaults (Skills-OL layout). See demos.
 	WorkspaceShare *WorkspaceShareConfig `toml:"workspace_share,omitempty"`
+}
+
+// EffectiveBaseDir prevents independently operated environments from resolving
+// matching workspace and brand IDs into the same directory tree.
+func (p ProjectConfig) EffectiveBaseDir() string {
+	if p.WorkspaceNamespace == "" {
+		return p.BaseDir
+	}
+	return filepath.Join(p.BaseDir, p.WorkspaceNamespace)
 }
 
 type AgentConfig struct {
@@ -1137,7 +1149,8 @@ func (c *Config) validateInternal(permissive bool) error {
 		if proj.Agent.Type == "" {
 			return fmt.Errorf("config: %s.agent.type is required", prefix)
 		}
-		if len(proj.Platforms) == 0 && !permissive {
+		bridgeEnabled := c.Bridge.Enabled != nil && *c.Bridge.Enabled
+		if len(proj.Platforms) == 0 && !permissive && !bridgeEnabled {
 			return fmt.Errorf("config: %s needs at least one [[projects.platforms]]", prefix)
 		}
 		for j, p := range proj.Platforms {
@@ -1148,6 +1161,9 @@ func (c *Config) validateInternal(permissive bool) error {
 		if proj.Mode == "multi-workspace" {
 			if proj.BaseDir == "" {
 				return fmt.Errorf("project %q: multi-workspace mode requires base_dir", proj.Name)
+			}
+			if proj.WorkspaceNamespace != "" && !validWorkspaceNamespace.MatchString(proj.WorkspaceNamespace) {
+				return fmt.Errorf("project %q: workspace_namespace must be a lowercase path segment using letters, digits, '-' or '_'", proj.Name)
 			}
 			if _, ok := proj.Agent.Options["work_dir"]; ok {
 				return fmt.Errorf("project %q: multi-workspace mode conflicts with agent work_dir (use base_dir instead)", proj.Name)

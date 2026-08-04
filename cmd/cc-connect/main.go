@@ -423,7 +423,7 @@ func main() {
 
 		// Wire multi-workspace mode
 		if proj.Mode == "multi-workspace" {
-			baseDir := proj.BaseDir
+			baseDir := proj.EffectiveBaseDir()
 			if strings.HasPrefix(baseDir, "~/") {
 				home, _ := os.UserHomeDir()
 				baseDir = filepath.Join(home, baseDir[2:])

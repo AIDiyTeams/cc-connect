@@ -641,6 +641,8 @@ GET /api/v1/status?token=mgmt-secret
 ### 5.3.1 用户记忆 Facts（Codex extension）
 
 按 `session_key` 路由到对应 workspace。带 Brand 作用域时使用
+配置环境命名空间时使用
+`{base_dir}/{workspace_namespace}/workspace-{workspaceId}/brand-{brandId}`，否则保持
 `{base_dir}/workspace-{workspaceId}/brand-{brandId}`；没有 Brand 的兼容请求仍使用
 `{base_dir}/user-{userId}`。接口在解析后的目录中读写 Codex 记忆扩展：
 

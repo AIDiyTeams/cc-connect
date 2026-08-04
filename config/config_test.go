@@ -57,6 +57,19 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: `projects[0] needs at least one [[projects.platforms]]`,
 		},
 		{
+			name: "bridge supplies the runtime platform",
+			cfg: Config{
+				Bridge: BridgeConfig{Enabled: func() *bool { value := true; return &value }()},
+				Projects: []ProjectConfig{
+					func() ProjectConfig {
+						p := validProject("demo")
+						p.Platforms = nil
+						return p
+					}(),
+				},
+			},
+		},
+		{
 			name: "requires platform type",
 			cfg: Config{
 				Projects: []ProjectConfig{
@@ -96,6 +109,35 @@ func TestConfigValidate(t *testing.T) {
 				},
 			},
 			wantErr: `project "demo": multi-workspace mode conflicts with agent work_dir`,
+		},
+		{
+			name: "multi workspace rejects unsafe namespace",
+			cfg: Config{
+				Projects: []ProjectConfig{
+					func() ProjectConfig {
+						p := validProject("demo")
+						p.Mode = "multi-workspace"
+						p.BaseDir = "~/workspace"
+						p.WorkspaceNamespace = "../prod"
+						return p
+					}(),
+				},
+			},
+			wantErr: `project "demo": workspace_namespace must be a lowercase path segment`,
+		},
+		{
+			name: "multi workspace accepts environment namespace",
+			cfg: Config{
+				Projects: []ProjectConfig{
+					func() ProjectConfig {
+						p := validProject("demo")
+						p.Mode = "multi-workspace"
+						p.BaseDir = "~/workspace"
+						p.WorkspaceNamespace = "prod"
+						return p
+					}(),
+				},
+			},
 		},
 		{
 			name: "accepts valid config",
@@ -186,6 +228,51 @@ func TestConfigValidate(t *testing.T) {
 			}
 			assertErrContains(t, err, tt.wantErr)
 		})
+	}
+}
+
+func TestProjectConfigEffectiveBaseDir(t *testing.T) {
+	project := ProjectConfig{BaseDir: "/srv/tomako/workspaces", WorkspaceNamespace: "test"}
+	if got, want := project.EffectiveBaseDir(), "/srv/tomako/workspaces/test"; got != want {
+		t.Fatalf("EffectiveBaseDir() = %q, want %q", got, want)
+	}
+
+	project.WorkspaceNamespace = ""
+	if got, want := project.EffectiveBaseDir(), project.BaseDir; got != want {
+		t.Fatalf("EffectiveBaseDir() without namespace = %q, want %q", got, want)
+	}
+}
+
+func TestLoadBridgeOnlyNamespacedProject(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := `
+data_dir = "` + filepath.Join(dir, "state") + `"
+
+[bridge]
+enabled = true
+port = 9810
+token = "bridge-secret"
+
+[[projects]]
+name = "tomako-test"
+mode = "multi-workspace"
+base_dir = "/srv/tomako/workspaces"
+workspace_namespace = "test"
+
+[projects.agent]
+type = "codex"
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got, want := cfg.Projects[0].EffectiveBaseDir(), "/srv/tomako/workspaces/test"; got != want {
+		t.Fatalf("EffectiveBaseDir() = %q, want %q", got, want)
 	}
 }
 

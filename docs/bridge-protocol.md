@@ -647,6 +647,8 @@ Business adapters may append a stable Brand scope:
 ```
 
 In multi-workspace mode, `:brand:` sessions resolve to
+`{base_dir}/{workspace_namespace}/workspace-{workspace_id}/brand-{brand_id}`
+when `workspace_namespace` is configured; otherwise the legacy path remains
 `{base_dir}/workspace-{workspace_id}/brand-{brand_id}`.
 Different users in the same Workspace and Brand therefore share the working
 directory while retaining separate conversation session keys.

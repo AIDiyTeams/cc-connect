@@ -647,6 +647,8 @@ Session key 遵循以下格式：
 ```
 
 在 multi-workspace 模式下，带 `:brand:` 的会话解析到
+配置 `workspace_namespace` 时目录为
+`{base_dir}/{workspace_namespace}/workspace-{workspace_id}/brand-{brand_id}`；未配置时保持
 `{base_dir}/workspace-{workspace_id}/brand-{brand_id}`。同一 Workspace、同一 Brand 下的不同用户
 共享工作目录，但仍使用各自独立的对话 session key。
 

@@ -669,6 +669,8 @@ Sends a message to a session. The message is delivered to the agent as if the us
 ### 5.3.1 User Memory Facts (Codex extension)
 
 Routes by `session_key` to the matching workspace. Brand-scoped sessions use
+`{base_dir}/{workspace_namespace}/workspace-{workspaceId}/brand-{brandId}` when an
+environment namespace is configured, otherwise
 `{base_dir}/workspace-{workspaceId}/brand-{brandId}`; compatibility requests without
 a Brand retain `{base_dir}/user-{userId}`. Codex memory extension files live under:
 

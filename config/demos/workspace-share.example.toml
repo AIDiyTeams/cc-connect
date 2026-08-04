@@ -50,6 +50,7 @@ token_stream_reply_prefixes = ["cmsg-"]
 name = "tomako-studio"
 mode = "multi-workspace"
 base_dir = "/home/ubuntu/workspaces"
+workspace_namespace = "prod"
 skip_git = true
 
 [projects.agent]

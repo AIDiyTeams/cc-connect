@@ -667,6 +667,7 @@ level = "info" # debug, info, warn, error
 # mode = "multi-workspace"
 # skip_git = true # skip bind git repo, create a dir directly
 # base_dir = "~/workspace"
+# workspace_namespace = "prod" # optional environment root under base_dir
 # workspace_init_allow_local_paths = true  # Optional: allow /workspace init <local-dir>; default false keeps init git-URL only
 #
 # # Shared skill library forwarding (optional; defaults = Skills-OL / Tomako layout).
