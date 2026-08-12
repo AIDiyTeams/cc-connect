@@ -1278,6 +1278,7 @@ func TestNormalizeSessionRuntime_WhitelistsModalitiesAndBoundsOpaqueValues(t *te
 	runtime := normalizeSessionRuntime(SessionRuntime{
 		LogicalModel:       strings.Repeat("x", 80),
 		GatewayModel:       "  tomako/vision-balanced-v1  ",
+		WebSearch:          " LIVE ",
 		RoutePolicyVersion: -1,
 		TurnNo:             -2,
 		RequiredModalities: []string{"text", " IMAGE ", "unknown"},
@@ -1288,6 +1289,9 @@ func TestNormalizeSessionRuntime_WhitelistsModalitiesAndBoundsOpaqueValues(t *te
 	}
 	if runtime.GatewayModel != "tomako/vision-balanced-v1" {
 		t.Fatalf("gateway model = %q", runtime.GatewayModel)
+	}
+	if runtime.WebSearch != "live" {
+		t.Fatalf("web search = %q", runtime.WebSearch)
 	}
 	if runtime.RoutePolicyVersion != 0 || runtime.TurnNo != 0 {
 		t.Fatalf("negative numbers were not normalized: %#v", runtime)

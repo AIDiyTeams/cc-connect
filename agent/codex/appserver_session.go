@@ -145,6 +145,7 @@ type appServerSession struct {
 	workDir            string
 	model              string
 	effort             string
+	webSearch          string
 	mode               string
 	permissionsProfile string
 	baseURL            string
@@ -166,6 +167,8 @@ type appServerSession struct {
 
 	pendingMu sync.Mutex
 	pending   map[int64]chan rpcResponseEnvelope
+	threadMu  sync.Mutex
+	resumeID  string
 
 	approvalsMu      sync.Mutex
 	pendingApprovals map[string]chan core.PermissionResult
@@ -214,6 +217,7 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 		cancel:             cancel,
 		pending:            make(map[int64]chan rpcResponseEnvelope),
 		pendingApprovals:   make(map[string]chan core.PermissionResult),
+		resumeID:           resumeID,
 	}
 	s.alive.Store(true)
 
@@ -227,12 +231,18 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 		return nil, err
 	}
 
-	if err := s.ensureThread(resumeID); err != nil {
-		_ = s.Close()
-		return nil, err
-	}
-	if err := s.refreshUsage(context.Background()); err != nil {
-		slog.Debug("codex app-server: initial rate limit fetch failed", "error", err)
+	// Existing sessions must be resumed eagerly so a stale thread ID can still
+	// trigger the engine's normal fresh-session fallback. New threads are
+	// created on first Send, after the trusted per-task runtime has arrived.
+	if resumeID != "" && resumeID != core.ContinueSession {
+		if err := s.ensureThread(resumeID); err != nil {
+			_ = s.Close()
+			return nil, err
+		}
+		s.resumeID = ""
+		if err := s.refreshUsage(context.Background()); err != nil {
+			slog.Debug("codex app-server: initial rate limit fetch failed", "error", err)
+		}
 	}
 
 	return s, nil
@@ -294,7 +304,6 @@ func (s *appServerSession) connect() error {
 	go s.waitLoop()
 	return nil
 }
-
 func (s *appServerSession) initialize() error {
 	params := map[string]any{
 		"clientInfo": map[string]any{
@@ -359,6 +368,25 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 	return nil
 }
 
+func (s *appServerSession) ensureThreadForSend() error {
+	if s.CurrentSessionID() != "" {
+		return nil
+	}
+	s.threadMu.Lock()
+	defer s.threadMu.Unlock()
+	if s.CurrentSessionID() != "" {
+		return nil
+	}
+	if err := s.ensureThread(s.resumeID); err != nil {
+		return fmt.Errorf("codex app-server initialize thread: %w", err)
+	}
+	s.resumeID = ""
+	if err := s.refreshUsage(context.Background()); err != nil {
+		slog.Debug("codex app-server: initial rate limit fetch failed", "error", err)
+	}
+	return nil
+}
+
 func (s *appServerSession) threadRequestParams() map[string]any {
 	params := map[string]any{
 		"experimentalRawEvents":  false,
@@ -367,6 +395,9 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	}
 	if model := s.GetModel(); model != "" {
 		params["model"] = model
+	}
+	if searchMode := s.getWebSearch(); searchMode != "" {
+		params["config"] = map[string]any{"web_search": searchMode}
 	}
 	if profile := strings.TrimSpace(s.permissionsProfile); profile != "" {
 		params["permissions"] = profile
@@ -465,6 +496,9 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	if err != nil {
 		return err
 	}
+	if err := s.ensureThreadForSend(); err != nil {
+		return err
+	}
 
 	threadID := s.CurrentSessionID()
 	if threadID == "" {
@@ -536,7 +570,14 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	if model := strings.TrimSpace(runtime.GatewayModel); model != "" {
 		s.model = model
 	}
+	s.webSearch = normalizeWebSearch(runtime.WebSearch)
 	return nil
+}
+
+func (s *appServerSession) getWebSearch() string {
+	s.runtimeMu.RLock()
+	defer s.runtimeMu.RUnlock()
+	return strings.TrimSpace(s.webSearch)
 }
 
 func (s *appServerSession) responsesAPIClientMetadata() map[string]string {
