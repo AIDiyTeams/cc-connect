@@ -27,21 +27,23 @@ type codexSession struct {
 	workDir       string
 	model         string
 	effort        string
+	webSearch     string
 	mode          string
-	baseURL       string // provider base URL; passed as -c openai_base_url=<url>
-	modelProvider string // Codex model_provider name; passed as -c model_provider=<name>
+	baseURL       string   // provider base URL; passed as -c openai_base_url=<url>
+	modelProvider string   // Codex model_provider name; passed as -c model_provider=<name>
 	cliBin        string   // CLI binary, default "codex"
 	cliExtraArgs  []string // extra args from cli_path, prepended before exec args
 	extraEnv      []string
 	events        chan core.Event
-	threadID  atomic.Value // stores string — Codex thread_id
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	alive     atomic.Bool
-	closeOnce sync.Once
-	cmdMu     sync.Mutex
-	cmds      map[*exec.Cmd]struct{}
+	threadID      atomic.Value // stores string — Codex thread_id
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+	alive         atomic.Bool
+	closeOnce     sync.Once
+	cmdMu         sync.Mutex
+	cmds          map[*exec.Cmd]struct{}
+	runtimeMu     sync.RWMutex
 
 	pendingMsgs []string // buffered agent_message texts awaiting classification
 
@@ -176,6 +178,10 @@ func (cs *codexSession) stageImages(prompt string, images []core.ImageAttachment
 }
 
 func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []string {
+	cs.runtimeMu.RLock()
+	model := cs.model
+	webSearch := cs.webSearch
+	cs.runtimeMu.RUnlock()
 	tid := cs.CurrentSessionID()
 	isResume := tid != ""
 
@@ -225,8 +231,8 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 		}
 	}
 
-	if cs.model != "" {
-		args = append(args, "--model", cs.model)
+	if model != "" {
+		args = append(args, "--model", model)
 	}
 	if cs.modelProvider != "" {
 		args = append(args, "-c", fmt.Sprintf("model_provider=%q", cs.modelProvider))
@@ -236,6 +242,9 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 	}
 	if cs.effort != "" {
 		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", cs.effort))
+	}
+	if webSearch != "" {
+		args = append(args, "-c", fmt.Sprintf("web_search=%q", webSearch))
 	}
 
 	if isResume {
@@ -780,11 +789,29 @@ func (cs *codexSession) GetWorkDir() string {
 }
 
 func (cs *codexSession) GetModel() string {
+	cs.runtimeMu.RLock()
+	defer cs.runtimeMu.RUnlock()
 	if model := strings.TrimSpace(cs.model); model != "" {
 		return model
 	}
 	model, _ := cs.runtimeConfig()
 	return model
+}
+
+// SetSessionRuntime applies trusted task routing immediately before the exec
+// subprocess is built. This keeps native search scoped to the requested turn
+// instead of enabling it for every Codex agent in the project.
+func (cs *codexSession) SetSessionRuntime(runtime core.SessionRuntime) error {
+	if !cs.alive.Load() {
+		return fmt.Errorf("session is closed")
+	}
+	cs.runtimeMu.Lock()
+	defer cs.runtimeMu.Unlock()
+	if model := strings.TrimSpace(runtime.GatewayModel); model != "" {
+		cs.model = model
+	}
+	cs.webSearch = normalizeWebSearch(runtime.WebSearch)
+	return nil
 }
 
 func (cs *codexSession) GetReasoningEffort() string {

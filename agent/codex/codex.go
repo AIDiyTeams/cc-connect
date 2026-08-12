@@ -145,6 +145,15 @@ func normalizeBackend(raw string) string {
 	}
 }
 
+func normalizeWebSearch(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "live", "cached", "disabled":
+		return strings.ToLower(strings.TrimSpace(raw))
+	default:
+		return ""
+	}
+}
+
 func normalizeAppServerURL(raw string) string {
 	url := strings.TrimSpace(raw)
 	if url == "" {

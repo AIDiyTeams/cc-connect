@@ -209,6 +209,7 @@ type Message struct {
 type SessionRuntime struct {
 	LogicalModel       string   `json:"logical_model,omitempty"`
 	GatewayModel       string   `json:"gateway_model,omitempty"`
+	WebSearch          string   `json:"web_search,omitempty"`
 	RoutePolicyID      string   `json:"route_policy_id,omitempty"`
 	RoutePolicyVersion int64    `json:"route_policy_version,omitempty"`
 	InferenceRequestID string   `json:"inference_request_id,omitempty"`
