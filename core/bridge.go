@@ -1407,6 +1407,16 @@ func (a *bridgeAdapter) handleMessage(raw json.RawMessage) {
 func normalizeSessionRuntime(runtime SessionRuntime) SessionRuntime {
 	runtime.LogicalModel = boundedOpaqueValue(runtime.LogicalModel, 64)
 	runtime.GatewayModel = boundedOpaqueValue(runtime.GatewayModel, 128)
+	switch strings.ToLower(strings.TrimSpace(runtime.WebSearch)) {
+	case "live":
+		runtime.WebSearch = "live"
+	case "cached":
+		runtime.WebSearch = "cached"
+	case "disabled":
+		runtime.WebSearch = "disabled"
+	default:
+		runtime.WebSearch = ""
+	}
 	runtime.RoutePolicyID = boundedOpaqueValue(runtime.RoutePolicyID, 64)
 	runtime.InferenceRequestID = boundedOpaqueValue(runtime.InferenceRequestID, 96)
 	runtime.WorkspaceID = boundedOpaqueValue(runtime.WorkspaceID, 64)

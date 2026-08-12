@@ -100,6 +100,27 @@ func TestBuildExecArgs_IncludesModelProvider(t *testing.T) {
 	}
 }
 
+func TestBuildExecArgs_IncludesNativeWebSearch(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "o3", "", "full-auto", "", "", nil, "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	if err := cs.SetSessionRuntime(core.SessionRuntime{
+		GatewayModel: "tomako/deepseek-v4-flash-search",
+		WebSearch:    "live",
+	}); err != nil {
+		t.Fatalf("SetSessionRuntime: %v", err)
+	}
+
+	args := cs.buildExecArgs("hello", nil)
+	if !containsSequence(args, []string{"-c", `web_search="live"`}) {
+		t.Fatalf("args missing native web_search config flag: %v", args)
+	}
+	if !containsSequence(args, []string{"--model", "tomako/deepseek-v4-flash-search"}) {
+		t.Fatalf("args missing task-scoped gateway model: %v", args)
+	}
+}
+
 func TestBuildExecArgs_ResumeOmitsCdFlag(t *testing.T) {
 	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "", "", "full-auto", "thread-abc", "", nil, "")
 	if err != nil {
@@ -127,11 +148,11 @@ func TestBuildExecArgs_ResumeOmitsCdFlag(t *testing.T) {
 // that this backend cannot answer.
 func TestBuildExecArgs_ModeMapping(t *testing.T) {
 	tests := []struct {
-		mode             string
-		wantSandbox      string // "" means no --sandbox flag (only yolo)
-		wantApproval     bool   // true means -c approval_policy="never" must be present
-		wantBypass       bool   // true means --dangerously-bypass-approvals-and-sandbox
-		wantNoFullAuto   bool   // always true: --full-auto is removed in codex 0.137+
+		mode           string
+		wantSandbox    string // "" means no --sandbox flag (only yolo)
+		wantApproval   bool   // true means -c approval_policy="never" must be present
+		wantBypass     bool   // true means --dangerously-bypass-approvals-and-sandbox
+		wantNoFullAuto bool   // always true: --full-auto is removed in codex 0.137+
 	}{
 		{mode: "suggest", wantSandbox: "read-only", wantApproval: true, wantNoFullAuto: true},
 		{mode: "auto-edit", wantSandbox: "workspace-write", wantApproval: true, wantNoFullAuto: true},

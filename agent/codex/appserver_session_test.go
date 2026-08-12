@@ -14,6 +14,20 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+func TestThreadParamsIncludeTaskScopedNativeWebSearch(t *testing.T) {
+	s := &appServerSession{
+		workDir:   "/srv/tomako/workspaces/brand-42",
+		model:     "tomako/deepseek-v4-flash-search",
+		webSearch: "live",
+	}
+
+	params := s.threadRequestParams()
+	config, ok := params["config"].(map[string]any)
+	if !ok || config["web_search"] != "live" {
+		t.Fatalf("thread params missing task-scoped native web search: %#v", params)
+	}
+}
+
 func TestAppServerSession_ApplyThreadRuntimeState(t *testing.T) {
 	s := &appServerSession{}
 	effort := "xhigh"
@@ -37,6 +51,7 @@ func TestAppServerSession_SessionRuntimeSelectsTurnModelAndMetadata(t *testing.T
 	err := s.SetSessionRuntime(core.SessionRuntime{
 		LogicalModel:       "VISION_BALANCED_V1",
 		GatewayModel:       "tomako/vision-balanced-v1",
+		WebSearch:          "live",
 		RoutePolicyID:      "rp-vision-balanced",
 		RoutePolicyVersion: 7,
 		InferenceRequestID: "infer-123",
@@ -53,6 +68,9 @@ func TestAppServerSession_SessionRuntimeSelectsTurnModelAndMetadata(t *testing.T
 	}
 	if got := s.GetModel(); got != "tomako/vision-balanced-v1" {
 		t.Fatalf("model = %q", got)
+	}
+	if got := s.getWebSearch(); got != "live" {
+		t.Fatalf("web search = %q", got)
 	}
 	metadata := s.responsesAPIClientMetadata()
 	if metadata["tomako.inference_request_id"] != "infer-123" {
