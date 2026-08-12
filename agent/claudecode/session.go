@@ -52,6 +52,10 @@ type claudeSession struct {
 	// usageMu guards lastUsage. Populated from the most recent result event.
 	usageMu   sync.Mutex
 	lastUsage *core.ContextUsage
+	// toolTraces pairs assistant tool_use items with the following user
+	// tool_result item. Claude Code emits both, but the result does not repeat
+	// the tool name or input needed by timing/audit consumers.
+	toolTraces sync.Map // tool_use_id -> claudeToolTrace
 
 	// gracefulStopTimeout is how long Close() waits for a clean exit
 	// (stdin close → Stop hooks → process exit) before escalating to
@@ -691,11 +695,23 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 		switch contentType {
 		case "tool_use":
 			toolName, _ := item["name"].(string)
+			toolUseID, _ := item["id"].(string)
 			if toolName == "AskUserQuestion" {
 				continue
 			}
 			inputSummary := summarizeInput(toolName, item["input"])
-			evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: inputSummary}
+			if toolUseID != "" {
+				cs.toolTraces.Store(toolUseID, claudeToolTrace{
+					toolName: toolName,
+					input:    inputSummary,
+				})
+			}
+			evt := core.Event{
+				Type:      core.EventToolUse,
+				TraceID:   toolUseID,
+				ToolName:  toolName,
+				ToolInput: inputSummary,
+			}
 			select {
 			case cs.events <- evt:
 			case <-cs.ctx.Done():
@@ -740,12 +756,69 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 		contentType, _ := item["type"].(string)
 		if contentType == "tool_result" {
 			isError, _ := item["is_error"].(bool)
+			toolUseID, _ := item["tool_use_id"].(string)
+			trace := claudeToolTrace{}
+			if stored, found := cs.toolTraces.LoadAndDelete(toolUseID); found {
+				trace, _ = stored.(claudeToolTrace)
+			}
+			result := summarizeClaudeToolResult(item["content"])
 			if isError {
-				result, _ := item["content"].(string)
 				slog.Debug("claudeSession: tool error", "content", result)
+			}
+			success := !isError
+			status := "completed"
+			if isError {
+				status = "failed"
+			}
+			evt := core.Event{
+				Type:        core.EventToolResult,
+				TraceID:     toolUseID,
+				ToolName:    trace.toolName,
+				ToolInput:   trace.input,
+				ToolResult:  result,
+				Content:     result,
+				ToolStatus:  status,
+				ToolSuccess: &success,
+			}
+			select {
+			case cs.events <- evt:
+			case <-cs.ctx.Done():
+				return
 			}
 		}
 	}
+}
+
+type claudeToolTrace struct {
+	toolName string
+	input    string
+}
+
+func summarizeClaudeToolResult(value any) string {
+	var result string
+	switch typed := value.(type) {
+	case string:
+		result = typed
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if block, ok := item.(map[string]any); ok {
+				if text, ok := block["text"].(string); ok && text != "" {
+					parts = append(parts, text)
+				}
+			}
+		}
+		result = strings.Join(parts, "\n")
+	default:
+		if encoded, err := json.Marshal(value); err == nil {
+			result = string(encoded)
+		}
+	}
+	result = strings.TrimSpace(result)
+	if len(result) > 2_000 {
+		return result[:2_000]
+	}
+	return result
 }
 
 func (cs *claudeSession) handleResult(raw map[string]any) {

@@ -80,4 +80,18 @@ func TestWorkspaceAgentOptions_PreservesStdIOAppServerURL(t *testing.T) {
 	if got := opts["app_server_url"]; got != "stdio://" {
 		t.Fatalf("WorkspaceAgentOptions()[app_server_url] = %#v, want stdio://", got)
 	}
+	if _, ok := opts["web_search"]; ok {
+		t.Fatalf("WorkspaceAgentOptions() must not enable web search globally: %#v", opts)
+	}
+}
+
+func TestNormalizeWebSearch(t *testing.T) {
+	for _, mode := range []string{"live", "cached", "disabled"} {
+		if got := normalizeWebSearch(" " + mode + " "); got != mode {
+			t.Fatalf("normalizeWebSearch(%q) = %q, want %q", mode, got, mode)
+		}
+	}
+	if got := normalizeWebSearch("bing"); got != "" {
+		t.Fatalf("normalizeWebSearch(bing) = %q, want empty", got)
+	}
 }
