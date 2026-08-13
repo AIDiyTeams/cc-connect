@@ -4019,7 +4019,6 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	if startElapsed >= slowAgentStart {
 		slog.Warn("slow agent session start", "elapsed", startElapsed, "agent", agent.Name(), "session_id", startSessionID)
 	}
-
 	// Surface any startup warning (e.g. permission mode downgrade under root) to the IM user.
 	if warner, ok := agentSession.(StartupWarner); ok {
 		if msg := warner.StartupWarning(); msg != "" {
@@ -4753,16 +4752,49 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		buildResolvedRichCard := func(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string {
 			return richCardSupporter.BuildRichCard(status, title, steps, resolveRichCardMarkdown(markdown, !streaming), streaming, statusFooter)
 		}
-		if reporter, ok := p.(AgentTraceReporter); ok && (event.Type == EventToolUse || event.Type == EventToolResult) {
+		if reporter, ok := p.(AgentTraceReporter); ok && (event.Type == EventToolUse || event.Type == EventToolResult || event.Type == EventLifecycle) {
 			trace := AgentTraceEvent{TraceID: event.TraceID, Type: event.Type, ToolName: event.ToolName,
 				Input: event.ToolInput, Output: event.ToolResult, Status: event.ToolStatus,
 				ExitCode: event.ToolExitCode, Success: event.ToolSuccess}
+			if event.Metadata != nil {
+				if duration, ok := event.Metadata["duration_ms"].(int64); ok {
+					trace.DurationMs = duration
+				} else if duration, ok := event.Metadata["duration_ms"].(int); ok {
+					trace.DurationMs = int64(duration)
+				}
+			}
 			if trace.Output == "" {
 				trace.Output = event.Content
 			}
 			if err := reporter.ReportAgentTrace(e.ctx, replyCtx, trace); err != nil {
 				slog.Debug("agent trace report failed", "platform", p.Name(), "error", err)
 			}
+		}
+		if event.Type == EventStructuredResult {
+			var deliveryErr error
+			if reporter, ok := p.(AgentStructuredResultReporter); ok && event.Metadata != nil {
+				stage, _ := event.Metadata["stage"].(string)
+				result, _ := event.Metadata["result"].(map[string]any)
+				if stage != "" && result != nil {
+					if err := reporter.ReportAgentStructuredResult(e.ctx, replyCtx, stage, result); err != nil {
+						deliveryErr = err
+					}
+				} else {
+					deliveryErr = fmt.Errorf("structured result is missing stage or result")
+				}
+			} else {
+				deliveryErr = fmt.Errorf("platform %q cannot report structured results", p.Name())
+			}
+			if deliveryErr != nil {
+				slog.Warn("agent structured result report failed", "platform", p.Name(), "error", deliveryErr)
+			}
+			if event.DeliveryAck != nil {
+				select {
+				case event.DeliveryAck <- deliveryErr:
+				default:
+				}
+			}
+			continue
 		}
 
 		switch event.Type {

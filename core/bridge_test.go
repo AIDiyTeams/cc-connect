@@ -1274,18 +1274,53 @@ func TestBridge_SessionNameInStatus(t *testing.T) {
 	}
 }
 
+func TestBridge_ReportAgentStructuredResultRequiresCapabilityAndDelivers(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	withoutCapability := dialWS(t, wsURL, nil)
+	register(t, withoutCapability, "plain-backend", []string{"text"})
+	bp := bs.NewPlatform("proj")
+	plainCtx := newBridgeReplyCtx(
+		bs.getAdapter("plain-backend"),
+		"plain-backend:workspace:user",
+		"llm-brand-plain",
+	)
+	if err := bp.ReportAgentStructuredResult(context.Background(), plainCtx, "core", map[string]any{"productType": "SaaS"}); err == nil {
+		t.Fatal("structured result succeeded without the agent_trace capability")
+	}
+
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "agent_trace"})
+	rc := newBridgeReplyCtx(
+		bs.getAdapter("java-backend"),
+		"java-backend:workspace:user",
+		"llm-brand-capable",
+	)
+	if err := bp.ReportAgentStructuredResult(context.Background(), rc, "core", map[string]any{"productType": "SaaS"}); err != nil {
+		t.Fatalf("ReportAgentStructuredResult: %v", err)
+	}
+	msg := readMsg(t, conn)
+	if msg["type"] != "agent_structured_result" || msg["stage"] != "core" {
+		t.Fatalf("structured result payload = %#v", msg)
+	}
+}
+
 func TestNormalizeSessionRuntime_WhitelistsModalitiesAndBoundsOpaqueValues(t *testing.T) {
 	runtime := normalizeSessionRuntime(SessionRuntime{
+		Scene:              strings.Repeat("s", 80),
 		LogicalModel:       strings.Repeat("x", 80),
 		GatewayModel:       "  tomako/vision-balanced-v1  ",
 		WebSearch:          " LIVE ",
 		RoutePolicyVersion: -1,
 		TurnNo:             -2,
 		RequiredModalities: []string{"text", " IMAGE ", "unknown"},
+		ReasoningEffort:    " LOW ",
 	})
 
 	if len(runtime.LogicalModel) != 64 {
 		t.Fatalf("logical model length = %d, want 64", len(runtime.LogicalModel))
+	}
+	if len(runtime.Scene) != 64 || runtime.ReasoningEffort != "low" {
+		t.Fatalf("scene/effort normalization failed: %#v", runtime)
 	}
 	if runtime.GatewayModel != "tomako/vision-balanced-v1" {
 		t.Fatalf("gateway model = %q", runtime.GatewayModel)

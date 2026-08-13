@@ -506,12 +506,51 @@ Notify the adapter of a server-side error.
 | `token_stream` | Prefer by-token `reply_stream` for Studio chat (`reply_ctx` prefix `cmsg-`). LLM Task (`llm-`) keeps coarse `preview_start` / `update_message` + default throttle. | `reply_stream` (Studio only) |
 | `delete_message` | Delete messages | `delete_message` |
 | `reconstruct_reply` | Can reconstruct reply context from session_key | Enables cron/heartbeat messages |
+| `agent_trace` | Trusted control-plane diagnostics and validated staged results for `llm-` reply contexts | `agent_trace`, `agent_structured_result` |
 
 If a capability is not declared, cc-connect will automatically degrade:
 - No `card` → cards are rendered as plain text via `RenderText()`.
 - No `buttons` → buttons are omitted or rendered as text hints.
 - No `preview` → streaming is disabled; only the final reply is sent.
 - No `typing` → typing indicators are skipped.
+
+### Trusted Agent control-plane events
+
+Adapters that declare `agent_trace` may receive two internal event types for
+LLM tasks. These are control-plane messages, not user-visible chat output.
+
+`agent_trace` contains bounded tool/lifecycle metadata. Lifecycle events use
+`event_type: "lifecycle"`, `tool_name: "AgentLifecycle"`, a stable stage name
+in `input`, and the measured child duration in `duration_ms`. Prompt text,
+chain-of-thought, and unrestricted tool output must not be placed in this
+channel.
+
+`agent_structured_result` transports one result that was validated by a
+scene-specific dynamic tool:
+
+```json
+{
+  "type": "agent_structured_result",
+  "session_key": "tomako:workspace:user",
+  "reply_ctx": "llm-123",
+  "stage": "core",
+  "result": {},
+  "occurred_at": "2026-08-13T08:00:00Z"
+}
+```
+
+cc-connect only emits structured results for `llm-` reply contexts and only to
+an authenticated adapter that declared `agent_trace`. The receiving control
+plane remains responsible for authority validation and durable persistence.
+
+For the `brand_analysis` scene, cc-connect also enforces the staged protocol at
+the dynamic-tool boundary. Evidence must complete before `core`; `core` may be
+published once; a ready `competitors` stage requires completion of the first
+native Web Search observed after `core`; and no stage may be published twice.
+An `unavailable` competitor stage is the explicit fallback when native search
+cannot run. The crawler's full deterministic result is emitted to the control
+plane, while the Agent receives a bounded semantic-only evidence projection so
+logos, colors, raw CSS, and large asset lists do not inflate model context.
 
 ### Image Object
 
