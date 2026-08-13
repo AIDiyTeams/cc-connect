@@ -1,3 +1,12 @@
+<!-- tomako-delivery-contract: v1 -->
+
+# Tomako delivery gates
+
+- The sole operational delivery policy is the adjacent `tomako-dev-skills/docs/DELIVERY_GOVERNANCE.md`. This repository guide owns Go architecture and tests only.
+- A frozen `cc-connect` change is tested through the mapped child `test` route; coordinated component testing uses the parent workspace manifest. Formal environments are deployed only by `tomako-deployer`, never GitHub Actions, direct SSH, manual service restarts, or a laptop.
+- If this work also changes `Tomako-portal`, the backend commit must by default be deployed to backend `test`, verified by exact runtime revision and health, and exercised through local frontend against `https://test.tomako.ai` before nontechnical acceptance. Only an explicit development/review-only instruction may defer this gate.
+- On uncertainty about bridge/backend behavior, credentials, data, servers, networking, controller or infrastructure, stop side effects and output the central copy-ready WeChat escalation addressed to **徐老师**. Frontend-only behavior/build questions are addressed to **天天姐**. Include task, background, current stage, concrete symptom/error, paused actions, repository/branch/commit, and time.
+
 # CC-Connect Development Guide
 
 ## Project Overview
