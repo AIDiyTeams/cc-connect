@@ -252,6 +252,10 @@ func TestBuildExecArgs_ResumeUsesSandboxModeConfigOverride(t *testing.T) {
 }
 
 func TestGetModelAndReasoningEffort_FromRuntimeConfigWhenUnset(t *testing.T) {
+	originalTimeout := codexRuntimeConfigTimeout
+	codexRuntimeConfigTimeout = 5 * time.Second
+	t.Cleanup(func() { codexRuntimeConfigTimeout = originalTimeout })
+
 	workDir := t.TempDir()
 	binDir := filepath.Join(workDir, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
