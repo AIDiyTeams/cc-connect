@@ -387,24 +387,25 @@ type BridgePlatform struct {
 
 // Compile-time interface checks.
 var (
-	_ Platform                  = (*BridgePlatform)(nil)
-	_ CardSender                = (*BridgePlatform)(nil)
-	_ InlineButtonSender        = (*BridgePlatform)(nil)
-	_ MessageUpdater            = (*BridgePlatform)(nil)
-	_ StatusFooterSender        = (*BridgePlatform)(nil)
-	_ StatusFooterUpdater       = (*BridgePlatform)(nil)
-	_ StreamCompleter           = (*BridgePlatform)(nil)
-	_ PreviewStarter            = (*BridgePlatform)(nil)
-	_ PreviewCleaner            = (*BridgePlatform)(nil)
-	_ PreviewFinishPreference   = (*BridgePlatform)(nil)
-	_ TypingIndicator           = (*BridgePlatform)(nil)
-	_ AudioSender               = (*BridgePlatform)(nil)
-	_ VideoSender               = (*BridgePlatform)(nil)
-	_ ImageSender               = (*BridgePlatform)(nil)
-	_ FileSender                = (*BridgePlatform)(nil)
-	_ CardNavigable             = (*BridgePlatform)(nil)
-	_ ReplyContextReconstructor = (*BridgePlatform)(nil)
-	_ AgentTraceReporter        = (*BridgePlatform)(nil)
+	_ Platform                      = (*BridgePlatform)(nil)
+	_ CardSender                    = (*BridgePlatform)(nil)
+	_ InlineButtonSender            = (*BridgePlatform)(nil)
+	_ MessageUpdater                = (*BridgePlatform)(nil)
+	_ StatusFooterSender            = (*BridgePlatform)(nil)
+	_ StatusFooterUpdater           = (*BridgePlatform)(nil)
+	_ StreamCompleter               = (*BridgePlatform)(nil)
+	_ PreviewStarter                = (*BridgePlatform)(nil)
+	_ PreviewCleaner                = (*BridgePlatform)(nil)
+	_ PreviewFinishPreference       = (*BridgePlatform)(nil)
+	_ TypingIndicator               = (*BridgePlatform)(nil)
+	_ AudioSender                   = (*BridgePlatform)(nil)
+	_ VideoSender                   = (*BridgePlatform)(nil)
+	_ ImageSender                   = (*BridgePlatform)(nil)
+	_ FileSender                    = (*BridgePlatform)(nil)
+	_ CardNavigable                 = (*BridgePlatform)(nil)
+	_ ReplyContextReconstructor     = (*BridgePlatform)(nil)
+	_ AgentTraceReporter            = (*BridgePlatform)(nil)
+	_ AgentStructuredResultReporter = (*BridgePlatform)(nil)
 )
 
 func (bp *BridgePlatform) Name() string { return "bridge" }
@@ -427,7 +428,7 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 	}
 	now := time.Now().UTC()
 	key := rc.ReplyCtx + ":" + event.TraceID
-	var durationMs int64
+	durationMs := event.DurationMs
 	if event.Type == EventToolUse {
 		bp.traceStarted.Store(key, now)
 	} else if started, found := bp.traceStarted.LoadAndDelete(key); found {
@@ -453,6 +454,34 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 	}
 	if event.Success != nil {
 		payload["success"] = *event.Success
+	}
+	return bp.server.sendToAdapter(rc.Platform, payload)
+}
+
+func (bp *BridgePlatform) ReportAgentStructuredResult(
+	ctx context.Context,
+	replyCtx any,
+	stage string,
+	result map[string]any,
+) error {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok || !strings.HasPrefix(rc.ReplyCtx, "llm-") {
+		return fmt.Errorf("bridge: structured result requires an llm task reply context")
+	}
+	a := bp.server.getAdapter(rc.Platform)
+	if a == nil {
+		return fmt.Errorf("bridge: adapter %q not connected", rc.Platform)
+	}
+	if !a.capabilities["agent_trace"] {
+		return fmt.Errorf("bridge: adapter %q does not support agent structured results", rc.Platform)
+	}
+	payload := map[string]any{
+		"type":        "agent_structured_result",
+		"session_key": rc.SessionKey,
+		"reply_ctx":   rc.ReplyCtx,
+		"stage":       boundedOpaqueValue(stage, 32),
+		"result":      result,
+		"occurred_at": time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	return bp.server.sendToAdapter(rc.Platform, payload)
 }
@@ -1405,6 +1434,7 @@ func (a *bridgeAdapter) handleMessage(raw json.RawMessage) {
 }
 
 func normalizeSessionRuntime(runtime SessionRuntime) SessionRuntime {
+	runtime.Scene = boundedOpaqueValue(runtime.Scene, 64)
 	runtime.LogicalModel = boundedOpaqueValue(runtime.LogicalModel, 64)
 	runtime.GatewayModel = boundedOpaqueValue(runtime.GatewayModel, 128)
 	switch strings.ToLower(strings.TrimSpace(runtime.WebSearch)) {
@@ -1424,6 +1454,12 @@ func normalizeSessionRuntime(runtime SessionRuntime) SessionRuntime {
 	runtime.UserID = boundedOpaqueValue(runtime.UserID, 32)
 	runtime.ChatSessionID = boundedOpaqueValue(runtime.ChatSessionID, 64)
 	runtime.TaskID = boundedOpaqueValue(runtime.TaskID, 96)
+	switch strings.ToLower(strings.TrimSpace(runtime.ReasoningEffort)) {
+	case "low", "medium", "high", "xhigh":
+		runtime.ReasoningEffort = strings.ToLower(strings.TrimSpace(runtime.ReasoningEffort))
+	default:
+		runtime.ReasoningEffort = ""
+	}
 	if runtime.RoutePolicyVersion < 0 {
 		runtime.RoutePolicyVersion = 0
 	}

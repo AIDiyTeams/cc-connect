@@ -22,14 +22,22 @@ type AgentTraceReporter interface {
 }
 
 type AgentTraceEvent struct {
-	TraceID  string
-	Type     EventType
-	ToolName string
-	Input    string
-	Output   string
-	Status   string
-	ExitCode *int
-	Success  *bool
+	TraceID    string
+	Type       EventType
+	ToolName   string
+	Input      string
+	Output     string
+	Status     string
+	ExitCode   *int
+	Success    *bool
+	DurationMs int64
+}
+
+// AgentStructuredResultReporter transports a validated dynamic-tool result to
+// the trusted control plane. It is intentionally separate from visible chat
+// output and from the redacted tool-audit stream.
+type AgentStructuredResultReporter interface {
+	ReportAgentStructuredResult(ctx context.Context, replyCtx any, stage string, result map[string]any) error
 }
 
 // ErrNotSupported indicates a platform doesn't support a particular operation.
