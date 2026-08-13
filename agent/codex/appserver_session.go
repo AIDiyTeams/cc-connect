@@ -2,12 +2,15 @@ package codex
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -192,6 +195,21 @@ type appServerSession struct {
 	usage     *core.UsageReport
 	context   *core.ContextUsage
 	runtime   core.SessionRuntime
+
+	brandFlowMu sync.Mutex
+	brandFlow   brandAnalysisFlow
+}
+
+type brandAnalysisFlow struct {
+	evidenceRunning       bool
+	evidenceReady         bool
+	corePublishing        bool
+	corePublished         bool
+	searchTraceID         string
+	searchAttempts        int
+	searchCompleted       bool
+	competitorsPublishing bool
+	competitorsPublished  bool
 }
 
 const (
@@ -200,6 +218,7 @@ const (
 )
 
 func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, permissionsProfile, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string) (*appServerSession, error) {
+	sessionStartedAt := time.Now()
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
 		url:                url,
@@ -221,15 +240,20 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 	}
 	s.alive.Store(true)
 
+	connectStartedAt := time.Now()
 	if err := s.connect(); err != nil {
 		cancel()
 		return nil, err
 	}
+	s.emitLifecycle("app_server_process_started", time.Since(connectStartedAt))
 
+	initializeStartedAt := time.Now()
 	if err := s.initialize(); err != nil {
 		_ = s.Close()
 		return nil, err
 	}
+	s.emitLifecycle("app_server_initialized", time.Since(initializeStartedAt))
+	s.emitLifecycle("agent_session_started", time.Since(sessionStartedAt))
 
 	// Existing sessions must be resumed eagerly so a stale thread ID can still
 	// trigger the engine's normal fresh-session fallback. New threads are
@@ -337,6 +361,7 @@ func (s *appServerSession) initialize() error {
 }
 
 func (s *appServerSession) ensureThread(resumeID string) error {
+	startedAt := time.Now()
 	if resumeID != "" && resumeID != core.ContinueSession {
 		params := s.threadRequestParams()
 		params["threadId"] = resumeID
@@ -352,6 +377,7 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 		s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 		s.threadID.Store(resp.Thread.ID)
 		slog.Info("codex app-server thread resumed", "thread_id", resp.Thread.ID)
+		s.emitLifecycle("agent_thread_ready", time.Since(startedAt))
 		return nil
 	}
 
@@ -365,6 +391,7 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 	s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 	s.threadID.Store(resp.Thread.ID)
 	slog.Info("codex app-server thread started", "thread_id", resp.Thread.ID)
+	s.emitLifecycle("agent_thread_ready", time.Since(startedAt))
 	return nil
 }
 
@@ -398,6 +425,9 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	}
 	if searchMode := s.getWebSearch(); searchMode != "" {
 		params["config"] = map[string]any{"web_search": searchMode}
+	}
+	if s.isBrandAnalysisRuntime() {
+		params["dynamicTools"] = brandAnalysisDynamicTools()
 	}
 	if profile := strings.TrimSpace(s.permissionsProfile); profile != "" {
 		params["permissions"] = profile
@@ -539,6 +569,7 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 		params["approvalPolicy"] = approval
 	}
 
+	turnStartedAt := time.Now()
 	var resp turnStartResponse
 	if err := s.request("turn/start", params, &resp); err != nil {
 		return fmt.Errorf("codex app-server turn/start: %w", err)
@@ -546,6 +577,7 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	if resp.Turn.ID == "" {
 		return fmt.Errorf("codex app-server turn/start returned empty turn id")
 	}
+	s.emitLifecycle("agent_turn_started", time.Since(turnStartedAt))
 
 	s.stateMu.Lock()
 	s.currentTurn = resp.Turn.ID
@@ -569,6 +601,9 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	s.runtime = runtime
 	if model := strings.TrimSpace(runtime.GatewayModel); model != "" {
 		s.model = model
+	}
+	if effort := strings.TrimSpace(runtime.ReasoningEffort); effort != "" {
+		s.effort = normalizeRuntimeReasoningEffort(effort)
 	}
 	s.webSearch = normalizeWebSearch(runtime.WebSearch)
 	return nil
@@ -855,12 +890,685 @@ func (s *appServerSession) handleRequestUserInput(rawID json.RawMessage, paramsR
 }
 
 func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRaw json.RawMessage) {
+	var params struct {
+		CallID    string         `json:"callId"`
+		Tool      string         `json:"tool"`
+		Arguments map[string]any `json:"arguments"`
+	}
+	if err := json.Unmarshal(paramsRaw, &params); err != nil {
+		s.writeDynamicToolResponse(rawID, false, "invalid tool arguments")
+		return
+	}
+	if !s.isBrandAnalysisRuntime() {
+		s.writeDynamicToolResponse(rawID, false, "tool not available for this task")
+		return
+	}
+	go func() {
+		switch params.Tool {
+		case "collect_brand_evidence":
+			if err := s.beginBrandEvidenceCollection(); err != nil {
+				s.writeDynamicToolResponse(rawID, false, err.Error())
+				return
+			}
+			result, err := s.collectBrandEvidence(params.Arguments)
+			if err != nil {
+				s.finishBrandEvidenceCollection(false)
+				s.writeDynamicToolResponse(rawID, false, err.Error())
+				return
+			}
+			if err := s.publishStructuredResult("evidence", result); err != nil {
+				s.finishBrandEvidenceCollection(false)
+				s.writeDynamicToolResponse(rawID, false, err.Error())
+				return
+			}
+			s.finishBrandEvidenceCollection(true)
+			encoded, _ := json.Marshal(brandEvidenceForModel(result))
+			s.writeDynamicToolResponse(rawID, true, string(encoded))
+		case "publish_brand_analysis_stage":
+			stage, result, err := validateBrandAnalysisStage(params.Arguments)
+			if err != nil {
+				s.writeDynamicToolResponse(rawID, false, err.Error())
+				return
+			}
+			if err := s.beginBrandAnalysisStagePublication(stage, result); err != nil {
+				s.writeDynamicToolResponse(rawID, false, err.Error())
+				return
+			}
+			if err := s.publishStructuredResult(stage, result); err != nil {
+				s.finishBrandAnalysisStagePublication(stage, false)
+				s.writeDynamicToolResponse(rawID, false, err.Error())
+				return
+			}
+			s.finishBrandAnalysisStagePublication(stage, true)
+			s.writeDynamicToolResponse(rawID, true, "stage accepted for persistence")
+		default:
+			s.writeDynamicToolResponse(rawID, false, "unknown dynamic tool")
+		}
+	}()
+}
+
+func (s *appServerSession) publishStructuredResult(stage string, result map[string]any) error {
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	deliveryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	ack := make(chan error, 1)
+	event := core.Event{
+		Type:        core.EventStructuredResult,
+		Metadata:    map[string]any{"stage": stage, "result": result},
+		DeliveryAck: ack,
+	}
+	select {
+	case s.events <- event:
+	case <-deliveryCtx.Done():
+		return fmt.Errorf("structured result delivery unavailable: %w", deliveryCtx.Err())
+	}
+	select {
+	case err := <-ack:
+		if err != nil {
+			return fmt.Errorf("structured result delivery failed: %w", err)
+		}
+		return nil
+	case <-deliveryCtx.Done():
+		return fmt.Errorf("structured result delivery not acknowledged: %w", deliveryCtx.Err())
+	}
+}
+
+func (s *appServerSession) beginBrandEvidenceCollection() error {
+	s.brandFlowMu.Lock()
+	defer s.brandFlowMu.Unlock()
+	if s.brandFlow.evidenceReady {
+		return fmt.Errorf("brand evidence has already been collected")
+	}
+	if s.brandFlow.evidenceRunning {
+		return fmt.Errorf("brand evidence collection is already running")
+	}
+	if s.brandFlow.corePublished || s.brandFlow.competitorsPublished {
+		return fmt.Errorf("brand evidence cannot be collected after analysis publication")
+	}
+	s.brandFlow.evidenceRunning = true
+	return nil
+}
+
+func (s *appServerSession) finishBrandEvidenceCollection(success bool) {
+	s.brandFlowMu.Lock()
+	defer s.brandFlowMu.Unlock()
+	s.brandFlow.evidenceRunning = false
+	if success {
+		s.brandFlow.evidenceReady = true
+	}
+}
+
+func (s *appServerSession) beginBrandAnalysisStagePublication(stage string, result map[string]any) error {
+	s.brandFlowMu.Lock()
+	defer s.brandFlowMu.Unlock()
+	switch stage {
+	case "core":
+		if !s.brandFlow.evidenceReady {
+			return fmt.Errorf("core cannot be published before brand evidence is ready")
+		}
+		if s.brandFlow.searchAttempts > 0 {
+			return fmt.Errorf("core cannot be published after native web search has started")
+		}
+		if s.brandFlow.corePublished || s.brandFlow.corePublishing {
+			return fmt.Errorf("core has already been published")
+		}
+		s.brandFlow.corePublishing = true
+	case "competitors":
+		if !s.brandFlow.corePublished {
+			return fmt.Errorf("competitors cannot be published before core")
+		}
+		if s.brandFlow.competitorsPublished || s.brandFlow.competitorsPublishing {
+			return fmt.Errorf("competitors have already been published")
+		}
+		if s.brandFlow.searchAttempts > 1 {
+			return fmt.Errorf("competitors cannot be published after more than one native web search attempt")
+		}
+		status, _ := result["status"].(string)
+		if status != "unavailable" && !s.brandFlow.searchCompleted {
+			return fmt.Errorf("ready competitors require one completed native web search")
+		}
+		if status == "unavailable" && s.brandFlow.searchTraceID != "" && !s.brandFlow.searchCompleted {
+			return fmt.Errorf("competitors cannot be closed while native web search is running")
+		}
+		s.brandFlow.competitorsPublishing = true
+	default:
+		return fmt.Errorf("unsupported brand analysis stage")
+	}
+	return nil
+}
+
+func (s *appServerSession) finishBrandAnalysisStagePublication(stage string, success bool) {
+	s.brandFlowMu.Lock()
+	defer s.brandFlowMu.Unlock()
+	switch stage {
+	case "core":
+		s.brandFlow.corePublishing = false
+		if success {
+			s.brandFlow.corePublished = true
+		}
+	case "competitors":
+		s.brandFlow.competitorsPublishing = false
+		if success {
+			s.brandFlow.competitorsPublished = true
+		}
+	}
+}
+
+func (s *appServerSession) advanceBrandAnalysisStage(stage string, result map[string]any) error {
+	if err := s.beginBrandAnalysisStagePublication(stage, result); err != nil {
+		return err
+	}
+	s.finishBrandAnalysisStagePublication(stage, true)
+	return nil
+}
+
+func (s *appServerSession) noteBrandWebSearchStarted(traceID string) {
+	if !s.isBrandAnalysisRuntime() {
+		return
+	}
+	s.brandFlowMu.Lock()
+	defer s.brandFlowMu.Unlock()
+	s.brandFlow.searchAttempts++
+	if !s.brandFlow.corePublished {
+		slog.Warn("brand analysis native web search started before core", "trace_id", traceID)
+		return
+	}
+	if s.brandFlow.competitorsPublished {
+		slog.Warn("brand analysis native web search started after competitors", "trace_id", traceID)
+		return
+	}
+	if s.brandFlow.searchTraceID != "" {
+		slog.Warn("brand analysis attempted more than one native web search",
+			"trace_id", traceID, "attempt", s.brandFlow.searchAttempts)
+		return
+	}
+	s.brandFlow.searchTraceID = traceID
+}
+
+func (s *appServerSession) noteBrandWebSearchCompleted(traceID string) {
+	if !s.isBrandAnalysisRuntime() {
+		return
+	}
+	s.brandFlowMu.Lock()
+	defer s.brandFlowMu.Unlock()
+	if traceID != "" && traceID == s.brandFlow.searchTraceID {
+		s.brandFlow.searchCompleted = true
+	}
+}
+
+func brandEvidenceForModel(result map[string]any) map[string]any {
+	compact := make(map[string]any, 16)
+	for _, key := range []string{
+		"brandName", "productName", "canonicalUrl", "oneLiner", "description",
+		"productType", "audience",
+	} {
+		if value, ok := result[key]; ok && value != nil {
+			if text := boundedText(value, 1200); text != "" {
+				compact[key] = text
+			}
+		}
+	}
+	for _, key := range []string{"categories", "targetMarkets", "keyFeatures", "slogans", "headings"} {
+		if values := normalizedStringList(result[key], 12, 320); len(values) > 0 {
+			compact[key] = stringsToAny(values)
+		}
+	}
+	if meta, ok := result["meta"].(map[string]any); ok {
+		compact["meta"] = boundedEvidenceObject(meta, 2)
+	}
+	if jsonLD := compactJSONLDEvidence(result["jsonLd"]); len(jsonLD) > 0 {
+		compact["jsonLd"] = jsonLD
+	}
+	if pages := compactBrandEvidencePages(result["evidencePages"]); len(pages) > 0 {
+		compact["evidencePages"] = pages
+	}
+	return compact
+}
+
+func compactBrandEvidencePages(raw any) []any {
+	items, _ := raw.([]any)
+	pages := make([]any, 0, min(len(items), 6))
+	for _, item := range items {
+		page, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		compact := map[string]any{}
+		for _, key := range []string{"url", "role", "title", "description"} {
+			if value := boundedText(page[key], map[string]int{
+				"url": 2048, "role": 32, "title": 240, "description": 500,
+			}[key]); value != "" {
+				compact[key] = value
+			}
+		}
+		if values := normalizedStringList(page["headings"], 8, 240); len(values) > 0 {
+			compact["headings"] = stringsToAny(values)
+		}
+		if values := normalizedStringList(page["snippets"], 8, 360); len(values) > 0 {
+			compact["snippets"] = stringsToAny(values)
+		}
+		if len(compact) > 0 {
+			pages = append(pages, compact)
+		}
+		if len(pages) == 6 {
+			break
+		}
+	}
+	return pages
+}
+
+func compactJSONLDEvidence(raw any) []any {
+	items, _ := raw.([]any)
+	compact := make([]any, 0, min(len(items), 5))
+	for _, item := range items {
+		object, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		selected := map[string]any{}
+		for _, key := range []string{
+			"@type", "name", "description", "brand", "applicationCategory",
+			"operatingSystem", "audience", "offers",
+		} {
+			if value, exists := object[key]; exists {
+				selected[key] = boundedEvidenceValue(value, 2)
+			}
+		}
+		if len(selected) > 0 {
+			compact = append(compact, selected)
+		}
+		if len(compact) == 5 {
+			break
+		}
+	}
+	return compact
+}
+
+func boundedEvidenceObject(raw map[string]any, depth int) map[string]any {
+	compact := make(map[string]any, min(len(raw), 16))
+	count := 0
+	for key, value := range raw {
+		if count == 16 {
+			break
+		}
+		compact[boundedText(key, 80)] = boundedEvidenceValue(value, depth)
+		count++
+	}
+	return compact
+}
+
+func boundedEvidenceValue(raw any, depth int) any {
+	if depth <= 0 {
+		return boundedText(fmt.Sprint(raw), 400)
+	}
+	switch value := raw.(type) {
+	case string:
+		return boundedText(value, 500)
+	case float64, int, int64, bool:
+		return value
+	case map[string]any:
+		return boundedEvidenceObject(value, depth-1)
+	case []any:
+		items := make([]any, 0, min(len(value), 6))
+		for _, item := range value {
+			items = append(items, boundedEvidenceValue(item, depth-1))
+			if len(items) == 6 {
+				break
+			}
+		}
+		return items
+	default:
+		return boundedText(fmt.Sprint(value), 400)
+	}
+}
+
+func (s *appServerSession) writeDynamicToolResponse(rawID json.RawMessage, success bool, message string) {
 	_ = s.writeJSON(map[string]any{
 		"jsonrpc": "2.0", "id": rawID,
 		"result": map[string]any{
-			"success":      false,
-			"contentItems": []map[string]any{{"type": "inputText", "text": "tool not available on this client"}},
+			"success":      success,
+			"contentItems": []map[string]any{{"type": "inputText", "text": message}},
 		},
+	})
+}
+
+func (s *appServerSession) isBrandAnalysisRuntime() bool {
+	s.runtimeMu.RLock()
+	defer s.runtimeMu.RUnlock()
+	return strings.EqualFold(strings.TrimSpace(s.runtime.Scene), "brand_analysis")
+}
+
+func brandAnalysisDynamicTools() []map[string]any {
+	return []map[string]any{
+		{
+			"type":        "function",
+			"name":        "collect_brand_evidence",
+			"description": "Fetch the submitted official website once and return deterministic first-party brand evidence. Call this before semantic analysis.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"url": map[string]any{"type": "string", "format": "uri"},
+				},
+				"required":             []string{"url"},
+				"additionalProperties": false,
+			},
+			"deferLoading": false,
+		},
+		{
+			"type":        "function",
+			"name":        "publish_brand_analysis_stage",
+			"description": "Persist one validated brand-analysis stage. Publish core before competitor search; publish competitors after the single native web search finishes or becomes unavailable.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"stage":  map[string]any{"type": "string", "enum": []string{"core", "competitors"}},
+					"result": map[string]any{"type": "object"},
+				},
+				"required":             []string{"stage", "result"},
+				"additionalProperties": false,
+			},
+			"deferLoading": false,
+		},
+	}
+}
+
+func (s *appServerSession) collectBrandEvidence(arguments map[string]any) (map[string]any, error) {
+	rawURL, _ := arguments["url"].(string)
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil, fmt.Errorf("url must be an absolute public http/https URL")
+	}
+	if !isPublicHostname(parsed.Hostname()) {
+		return nil, fmt.Errorf("url host must be public")
+	}
+	script := strings.TrimSpace(os.Getenv("TOMAKO_BRAND_CRAWL_SCRIPT"))
+	if script == "" {
+		script = "/home/ubuntu/Skills-OL/brand-crawl.mjs"
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, 35*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "node", script, parsed.String(),
+		"--onboarding-fast", "--max-screenshots=0", "--emit-platform-result")
+	cmd.Dir = s.workDir
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("brand evidence collection timed out")
+		}
+		message := strings.TrimSpace(stderr.String())
+		if len(message) > 600 {
+			message = message[:600]
+		}
+		return nil, fmt.Errorf("brand evidence collection failed: %s", message)
+	}
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		var event struct {
+			Type   string         `json:"type"`
+			Result map[string]any `json:"result"`
+		}
+		if json.Unmarshal([]byte(line), &event) == nil && event.Type == "platform_result" && event.Result != nil {
+			return event.Result, nil
+		}
+	}
+	return nil, fmt.Errorf("brand evidence collector returned no structured result")
+}
+
+func validateBrandAnalysisStage(arguments map[string]any) (string, map[string]any, error) {
+	stage, _ := arguments["stage"].(string)
+	result, _ := arguments["result"].(map[string]any)
+	if result == nil {
+		return "", nil, fmt.Errorf("result must be an object")
+	}
+	allowed := map[string]struct{}{}
+	switch stage {
+	case "core":
+		clean, err := normalizeCoreBrandAnalysis(result)
+		if err != nil {
+			return "", nil, err
+		}
+		return stage, clean, nil
+	case "competitors":
+		allowed["competitors"] = struct{}{}
+		allowed["status"] = struct{}{}
+	default:
+		return "", nil, fmt.Errorf("unsupported brand analysis stage")
+	}
+	clean := make(map[string]any, len(result))
+	for key, value := range result {
+		if _, ok := allowed[key]; ok {
+			clean[key] = value
+		}
+	}
+	if stage == "competitors" {
+		clean["competitors"] = normalizeCompetitorCandidates(result["competitors"])
+		if len(clean["competitors"].([]any)) == 0 {
+			clean["status"] = "unavailable"
+		} else {
+			clean["status"] = "complete"
+		}
+	}
+	return stage, clean, nil
+}
+
+func normalizeCoreBrandAnalysis(result map[string]any) (map[string]any, error) {
+	clean := make(map[string]any, 11)
+	for _, key := range []string{"productName", "brandName", "oneLiner", "description", "audience"} {
+		if value := boundedText(result[key], 1200); value != "" {
+			clean[key] = value
+		}
+	}
+	productType := boundedText(result["productType"], 48)
+	if _, ok := stringSet(
+		"SaaS", "Software", "Hardware", "Service", "E-commerce", "Marketplace",
+		"Media / Content", "Game", "API / Developer Tool", "Agency", "Other",
+	)[productType]; !ok {
+		return nil, fmt.Errorf("core.productType is invalid")
+	}
+	clean["productType"] = productType
+	platforms := normalizedStringList(result["platforms"], 9, 48)
+	allowedPlatforms := stringSet(
+		"Web", "iOS", "Android", "WeChat Mini Program", "Desktop", "API",
+		"Browser Extension", "Physical / Offline", "Other",
+	)
+	for _, platform := range platforms {
+		if _, ok := allowedPlatforms[platform]; !ok {
+			return nil, fmt.Errorf("core.platforms contains an invalid value")
+		}
+	}
+	if len(platforms) == 0 {
+		return nil, fmt.Errorf("core.platforms is required")
+	}
+	clean["platforms"] = stringsToAny(platforms)
+	features := normalizedStringList(result["keyFeatures"], 8, 240)
+	if len(features) < 3 {
+		return nil, fmt.Errorf("core.keyFeatures requires at least 3 items")
+	}
+	clean["keyFeatures"] = stringsToAny(features)
+	if categories := normalizedStringList(result["categories"], 4, 80); len(categories) > 0 {
+		clean["categories"] = stringsToAny(categories)
+	}
+	if markets := normalizedStringList(result["targetMarkets"], 8, 80); len(markets) > 0 {
+		clean["targetMarkets"] = stringsToAny(markets)
+	}
+	segments := normalizeAudienceSegments(result["audienceSegments"])
+	if len(segments) > 0 {
+		clean["audienceSegments"] = segments
+	}
+	if _, hasAudience := clean["audience"]; !hasAudience && len(segments) == 0 {
+		return nil, fmt.Errorf("core audience evidence is required")
+	}
+	return clean, nil
+}
+
+func normalizeAudienceSegments(raw any) []any {
+	items, _ := raw.([]any)
+	clean := make([]any, 0, 4)
+	seen := make(map[string]struct{})
+	for _, item := range items {
+		segment, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		name := boundedText(segment["name"], 100)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		clean = append(clean, map[string]any{
+			"name":        name,
+			"description": boundedText(segment["description"], 400),
+		})
+		if len(clean) == 4 {
+			break
+		}
+	}
+	return clean
+}
+
+func normalizeCompetitorCandidates(raw any) []any {
+	items, _ := raw.([]any)
+	clean := make([]any, 0, len(items))
+	seenNames := map[string]struct{}{}
+	seenHosts := map[string]struct{}{}
+	for _, item := range items {
+		candidate, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		name := strings.TrimSpace(stringFromAny(candidate["name"]))
+		parsed, err := url.Parse(strings.TrimSpace(stringFromAny(candidate["websiteUrl"])))
+		host := strings.ToLower(parsed.Hostname())
+		if err != nil || name == "" || parsed.User != nil || host == "" || !strings.Contains(host, ".") {
+			continue
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			continue
+		}
+		if parsed.Port() != "" && parsed.Port() != "80" && parsed.Port() != "443" {
+			continue
+		}
+		if !isPublicHostname(host) {
+			continue
+		}
+		nameKey := strings.ToLower(name)
+		if _, duplicate := seenNames[nameKey]; duplicate {
+			continue
+		}
+		if _, duplicate := seenHosts[host]; duplicate {
+			continue
+		}
+		seenNames[nameKey] = struct{}{}
+		seenHosts[host] = struct{}{}
+		relationship := stringFromAny(candidate["relationship"])
+		if relationship != "direct" && relationship != "adjacent" && relationship != "alternative" {
+			relationship = "adjacent"
+		}
+		confidence := stringFromAny(candidate["confidence"])
+		if confidence != "medium" {
+			confidence = "low"
+		}
+		clean = append(clean, map[string]any{
+			"name":         boundedText(name, 120),
+			"websiteUrl":   "https://" + host + "/",
+			"businessLine": boundedText(candidate["businessLine"], 200),
+			"angle":        boundedText(candidate["angle"], 400),
+			"relationship": relationship,
+			"confidence":   confidence,
+		})
+		if len(clean) == 5 {
+			break
+		}
+	}
+	return clean
+}
+
+func stringFromAny(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func nonEmptyAnySlice(value any) bool {
+	items, ok := value.([]any)
+	return ok && len(items) > 0
+}
+
+func boundedText(value any, max int) string {
+	text := strings.TrimSpace(stringFromAny(value))
+	if len(text) > max {
+		return text[:max]
+	}
+	return text
+}
+
+func normalizedStringList(raw any, limit, maxLength int) []string {
+	items, _ := raw.([]any)
+	clean := make([]string, 0, min(len(items), limit))
+	seen := make(map[string]struct{})
+	for _, item := range items {
+		value := boundedText(item, maxLength)
+		key := strings.ToLower(value)
+		if value == "" {
+			continue
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		clean = append(clean, value)
+		if len(clean) == limit {
+			break
+		}
+	}
+	return clean
+}
+
+func stringsToAny(values []string) []any {
+	items := make([]any, 0, len(values))
+	for _, value := range values {
+		items = append(items, value)
+	}
+	return items
+}
+
+func stringSet(values ...string) map[string]struct{} {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		set[value] = struct{}{}
+	}
+	return set
+}
+
+func isPublicHostname(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	if host == "" || host == "localhost" || strings.HasSuffix(host, ".localhost") ||
+		strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
+		return false
+	}
+	if address, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
+		return address.IsGlobalUnicast() && !address.IsPrivate() && !address.IsLoopback() &&
+			!address.IsLinkLocalUnicast() && !address.IsUnspecified()
+	}
+	return strings.Contains(host, ".")
+}
+
+func (s *appServerSession) emitLifecycle(stage string, duration time.Duration) {
+	s.emit(core.Event{
+		Type:       core.EventLifecycle,
+		TraceID:    fmt.Sprintf("lifecycle-%s-%d", stage, time.Now().UnixNano()),
+		ToolName:   "AgentLifecycle",
+		ToolInput:  stage,
+		ToolStatus: "completed",
+		Metadata:   map[string]any{"duration_ms": duration.Milliseconds()},
 	})
 }
 
@@ -1337,6 +2045,7 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 
 	case "webSearch":
 		query, _ := item["query"].(string)
+		s.noteBrandWebSearchStarted(itemID)
 		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "WebSearch", ToolInput: query})
 
 	case "dynamicToolCall":
@@ -1428,6 +2137,7 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 
 	case "webSearch":
 		query, _ := item["query"].(string)
+		s.noteBrandWebSearchCompleted(itemID)
 		s.emit(core.Event{
 			Type:       core.EventToolResult,
 			TraceID:    itemID,

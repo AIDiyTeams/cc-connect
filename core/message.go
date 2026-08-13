@@ -207,6 +207,7 @@ type Message struct {
 // It is never inferred from prompt text and must only be populated by a trusted
 // platform adapter such as the authenticated Tomako Bridge connection.
 type SessionRuntime struct {
+	Scene              string   `json:"scene,omitempty"`
 	LogicalModel       string   `json:"logical_model,omitempty"`
 	GatewayModel       string   `json:"gateway_model,omitempty"`
 	WebSearch          string   `json:"web_search,omitempty"`
@@ -219,6 +220,7 @@ type SessionRuntime struct {
 	UserID             string   `json:"user_id,omitempty"`
 	ChatSessionID      string   `json:"chat_session_id,omitempty"`
 	TaskID             string   `json:"task_id,omitempty"`
+	ReasoningEffort    string   `json:"reasoning_effort,omitempty"`
 	TurnNo             int      `json:"turn_no,omitempty"`
 }
 
@@ -234,6 +236,8 @@ const (
 	EventPermissionRequest EventType = "permission_request" // agent requests permission via stdio protocol
 	EventThinking          EventType = "thinking"           // thinking/processing status
 	EventPlanUpdate        EventType = "plan_update"        // agent-authored task plan/status update
+	EventLifecycle         EventType = "lifecycle"          // internal runtime stage timing
+	EventStructuredResult  EventType = "structured_result"  // trusted structured stage result
 )
 
 // UserQuestion represents a structured question from AskUserQuestion.
@@ -275,6 +279,7 @@ type Event struct {
 	CacheCreationInputTokens int            // cache-write tokens (new content written to cache)
 	CacheReadInputTokens     int            // cache-read tokens (prior context retrieved from cache)
 	Metadata                 map[string]any // optional metadata from agent (e.g. compaction_continue)
+	DeliveryAck              chan error     // optional in-process acknowledgement for trusted result delivery
 	Synthetic                bool           // true if this is a synthetic/generated message (not from real user)
 }
 
