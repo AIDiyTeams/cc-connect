@@ -1,3 +1,4 @@
+# tomako-actions-scope: maintenance
 name: Stale Issue Handler
 
 on:
