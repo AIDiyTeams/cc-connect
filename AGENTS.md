@@ -1,11 +1,13 @@
 <!-- tomako-delivery-contract: v1 -->
+<!-- tomako-protected-project-two-checks: v1 -->
 
 # Tomako delivery gates
 
 - The sole operational delivery policy is the adjacent `tomako-dev-skills/docs/DELIVERY_GOVERNANCE.md`. This repository guide owns Go architecture and tests only.
-- A frozen `cc-connect` change is tested through the mapped child `test` route; coordinated component testing uses the parent workspace manifest. Formal environments are deployed only by `tomako-deployer`, never GitHub Actions, direct SSH, manual service restarts, or a laptop.
+- CC Connect currently has no approved automatic test or production deployment path. After the two confirmations below, code may be committed and pushed only to this repository's `main`; do not push `test`, invoke `tomako-deployer`, use GitHub Actions, expand to a workspace release, connect through SSH, or replace services manually.
 - If this work also changes `Tomako-portal`, the backend commit must by default be deployed to backend `test`, verified by exact runtime revision and health, and exercised through local frontend against `https://test.tomako.ai` before nontechnical acceptance. Only an explicit development/review-only instruction may defer this gate.
 - On uncertainty about bridge/backend behavior, credentials, data, servers, networking, controller or infrastructure, stop side effects and output the central copy-ready WeChat escalation addressed to **徐老师**. Frontend-only behavior/build questions are addressed to **天天姐**. Include task, background, current stage, concrete symptom/error, paused actions, repository/branch/commit, and time.
+- **Protected-project two checks:** read-only inspection is allowed, but before changing any CC Connect file, stop and obtain the **first explicit confirmation from 徐老师** for the stated scope. After implementation and tests, obtain the **second confirmation from 徐老师** with a traceable reference before commit or push to `main`. Any scope expansion requires confirmation again.
 
 # CC-Connect Development Guide
 
