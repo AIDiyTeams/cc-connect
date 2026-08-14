@@ -178,6 +178,11 @@ type appServerSession struct {
 
 	threadID atomic.Value
 	alive    atomic.Bool
+	// threadBrandTools records whether the current app-server thread was
+	// created with the brand-analysis dynamic tool set. Dynamic tools are a
+	// thread-start capability, so a reused thread must be replaced when a turn
+	// crosses the brand-analysis boundary.
+	threadBrandTools bool
 
 	closeOnce sync.Once
 	wg        sync.WaitGroup
@@ -376,6 +381,7 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 		}
 		s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 		s.threadID.Store(resp.Thread.ID)
+		s.threadBrandTools = s.isBrandAnalysisRuntime()
 		slog.Info("codex app-server thread resumed", "thread_id", resp.Thread.ID)
 		s.emitLifecycle("agent_thread_ready", time.Since(startedAt))
 		return nil
@@ -390,6 +396,7 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 	}
 	s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 	s.threadID.Store(resp.Thread.ID)
+	s.threadBrandTools = s.isBrandAnalysisRuntime()
 	slog.Info("codex app-server thread started", "thread_id", resp.Thread.ID)
 	s.emitLifecycle("agent_thread_ready", time.Since(startedAt))
 	return nil
@@ -597,7 +604,6 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 		return fmt.Errorf("session is closed")
 	}
 	s.runtimeMu.Lock()
-	defer s.runtimeMu.Unlock()
 	s.runtime = runtime
 	if model := strings.TrimSpace(runtime.GatewayModel); model != "" {
 		s.model = model
@@ -606,6 +612,25 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 		s.effort = normalizeRuntimeReasoningEffort(effort)
 	}
 	s.webSearch = normalizeWebSearch(runtime.WebSearch)
+	s.runtimeMu.Unlock()
+
+	// Each bridge task is a new Agent turn. Do not leak evidence/search guards
+	// from an earlier brand-analysis task that happened to share the same
+	// workspace session.
+	s.brandFlowMu.Lock()
+	s.brandFlow = brandAnalysisFlow{}
+	s.brandFlowMu.Unlock()
+
+	// App-server dynamic tools are fixed at thread/start (or thread/resume), not
+	// turn/start. Replace a reused thread when entering or leaving the dedicated
+	// brand-analysis tool mode so the model sees exactly the tools for this turn.
+	wantsBrandTools := strings.EqualFold(strings.TrimSpace(runtime.Scene), "brand_analysis")
+	s.threadMu.Lock()
+	if s.CurrentSessionID() != "" && s.threadBrandTools != wantsBrandTools {
+		s.threadID.Store("")
+		s.resumeID = ""
+	}
+	s.threadMu.Unlock()
 	return nil
 }
 
