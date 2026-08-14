@@ -68,6 +68,53 @@ func TestBrandAnalysisRuntimeIsAppliedBeforeDeferredThreadCreation(t *testing.T)
 	}
 }
 
+func TestSessionRuntimeReplacesThreadAcrossBrandToolBoundary(t *testing.T) {
+	s := &appServerSession{}
+	s.alive.Store(true)
+	s.threadID.Store("thread-without-brand-tools")
+
+	if err := s.SetSessionRuntime(core.SessionRuntime{Scene: "brand_analysis"}); err != nil {
+		t.Fatalf("enter brand runtime: %v", err)
+	}
+	if got := s.CurrentSessionID(); got != "" {
+		t.Fatalf("thread without brand tools was reused: %q", got)
+	}
+
+	s.threadID.Store("thread-with-brand-tools")
+	s.threadBrandTools = true
+	if err := s.SetSessionRuntime(core.SessionRuntime{Scene: "studio_chat"}); err != nil {
+		t.Fatalf("leave brand runtime: %v", err)
+	}
+	if got := s.CurrentSessionID(); got != "" {
+		t.Fatalf("brand-tool thread leaked into a non-brand turn: %q", got)
+	}
+}
+
+func TestBrandAnalysisRuntimeResetsPerTaskFlowOnReusedBrandThread(t *testing.T) {
+	s := &appServerSession{}
+	s.alive.Store(true)
+	s.runtime = core.SessionRuntime{Scene: "brand_analysis"}
+	s.threadID.Store("warm-brand-thread")
+	s.threadBrandTools = true
+	s.brandFlow = brandAnalysisFlow{
+		evidenceReady:        true,
+		corePublished:        true,
+		searchAttempts:       1,
+		searchCompleted:      true,
+		competitorsPublished: true,
+	}
+
+	if err := s.SetSessionRuntime(core.SessionRuntime{Scene: "brand_analysis"}); err != nil {
+		t.Fatalf("reuse brand runtime: %v", err)
+	}
+	if got := s.CurrentSessionID(); got != "warm-brand-thread" {
+		t.Fatalf("warm brand thread should be reused, got %q", got)
+	}
+	if s.brandFlow != (brandAnalysisFlow{}) {
+		t.Fatalf("brand flow leaked from previous task: %#v", s.brandFlow)
+	}
+}
+
 func TestBrandAnalysisFlowEnforcesEvidenceCoreSearchCompetitorOrder(t *testing.T) {
 	s := &appServerSession{}
 	s.runtime = core.SessionRuntime{Scene: "brand_analysis"}
