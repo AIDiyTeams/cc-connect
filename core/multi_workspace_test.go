@@ -19,6 +19,15 @@ func (a *namedTestAgent) StartSession(_ context.Context, _ string) (AgentSession
 func (a *namedTestAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) { return nil, nil }
 func (a *namedTestAgent) Stop() error                                                { return nil }
 
+type skillDirTestAgent struct {
+	*namedTestAgent
+	dirs []string
+}
+
+func (a *skillDirTestAgent) SkillDirs() []string {
+	return append([]string(nil), a.dirs...)
+}
+
 // mockChannelResolver implements both Platform and ChannelNameResolver.
 type mockChannelResolver struct {
 	name  string
@@ -748,6 +757,106 @@ func TestCommandContextWithWorkspace_UnboundChannelFallsBack(t *testing.T) {
 	}
 	if interactiveKey != msg.SessionKey {
 		t.Errorf("expected interactiveKey to equal sessionKey when unbound, got %q want %q", interactiveKey, msg.SessionKey)
+	}
+}
+
+func TestCommandContextWithWorkspace_BrandSessionUsesExistingWorkspace(t *testing.T) {
+	baseDir := t.TempDir()
+	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
+	msg := &Message{
+		Platform:   "java-backend",
+		SessionKey: "java-backend:workspace-a:10:brand:brand-42:task:llm-1",
+	}
+	wantWS := normalizeWorkspacePath(filepath.Join(baseDir, "workspace-workspace-a", "brand-brand-42"))
+	if err := os.MkdirAll(wantWS, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wantWS = normalizeWorkspacePath(wantWS)
+
+	agent, sessions, interactiveKey, workspaceDir, err := e.commandContextWithWorkspace(nil, msg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if agent == e.agent || sessions == e.sessions {
+		t.Fatal("brand session should use workspace-scoped agent and sessions")
+	}
+	if workspaceDir != wantWS {
+		t.Fatalf("workspaceDir = %q, want %q", workspaceDir, wantWS)
+	}
+	if wantKey := wantWS + ":" + msg.SessionKey; interactiveKey != wantKey {
+		t.Fatalf("interactiveKey = %q, want %q", interactiveKey, wantKey)
+	}
+}
+
+func TestCommandContextWithWorkspace_BrandSessionInitializesNewWorkspace(t *testing.T) {
+	baseDir := t.TempDir()
+	sharedRoot := t.TempDir()
+	sharedSkills := filepath.Join(sharedRoot, "skills")
+	if err := os.MkdirAll(sharedSkills, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
+	e.SetWorkspaceShare(WorkspaceShareOptions{SharedSkillsDir: sharedRoot})
+	msg := &Message{
+		Platform:   "java-backend",
+		SessionKey: "java-backend:workspace-new:10:brand:brand-new:task:llm-2",
+	}
+	wantWS := normalizeWorkspacePath(filepath.Join(baseDir, "workspace-workspace-new", "brand-brand-new"))
+
+	_, _, _, workspaceDir, err := e.commandContextWithWorkspace(nil, msg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if workspaceDir != wantWS {
+		t.Fatalf("workspaceDir = %q, want %q", workspaceDir, wantWS)
+	}
+	if info, err := os.Stat(filepath.Join(wantWS, ".codex")); err != nil || !info.IsDir() {
+		t.Fatalf("new brand workspace .codex dir was not initialized: info=%v err=%v", info, err)
+	}
+	link := filepath.Join(wantWS, "skills")
+	if got, err := filepath.EvalSymlinks(link); err != nil || !sameFilePath(got, sharedSkills) {
+		t.Fatalf("workspace skills link = %q, err=%v; want %q", got, err, sharedSkills)
+	}
+}
+
+func TestSetWorkspaceShare_PrioritizesEnvironmentSkills(t *testing.T) {
+	baseDir := t.TempDir()
+	testRoot := filepath.Join(t.TempDir(), "Skills-OL-test")
+	productionSkills := filepath.Join(t.TempDir(), "production-skills")
+	testSkillDir := filepath.Join(testRoot, "skills", "kol-creator-discovery")
+	productionSkillDir := filepath.Join(productionSkills, "kol-creator-discovery")
+	for _, dir := range []string{testSkillDir, productionSkillDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(testSkillDir, "SKILL.md"), []byte("test environment skill"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(productionSkillDir, "SKILL.md"), []byte("production legacy skill"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SKILLS_OL_DIR", testRoot)
+
+	agent := &skillDirTestAgent{
+		namedTestAgent: &namedTestAgent{name: "skill-dir-test-agent"},
+		dirs:           []string{productionSkills},
+	}
+	e := NewEngine("test", agent, nil, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	e.SetWorkspaceShare(WorkspaceShareOptions{SharedSkillsEnv: "SKILLS_OL_DIR"})
+
+	wantFirst := filepath.Join(testRoot, "skills")
+	if dirs := e.SkillDirs(); len(dirs) < 2 || dirs[0] != wantFirst || dirs[1] != productionSkills {
+		t.Fatalf("SkillDirs() = %v, want environment dir first then production fallback", dirs)
+	}
+	skill := e.skills.Resolve("kol-creator-discovery")
+	if skill == nil {
+		t.Fatal("environment skill was not registered")
+	}
+	if skill.Source != testSkillDir {
+		t.Fatalf("resolved skill source = %q, want %q", skill.Source, testSkillDir)
 	}
 }
 

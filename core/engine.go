@@ -613,6 +613,25 @@ func (e *Engine) SetMultiWorkspace(baseDir, bindingStorePath string) {
 // Must be called after SetMultiWorkspace. Empty fields keep built-in defaults.
 func (e *Engine) SetWorkspaceShare(opts WorkspaceShareOptions) {
 	e.workspaceShare = opts.Normalize()
+	e.refreshSharedSkillRegistry()
+}
+
+// refreshSharedSkillRegistry makes slash-command discovery use the same
+// environment-specific Skills-OL tree that is linked into workspaces. The
+// shared directory must come first so a test/prod skill overrides an older
+// same-named copy from the agent's user-level skill directories.
+func (e *Engine) refreshSharedSkillRegistry() {
+	dirs := make([]string, 0, 4)
+	if sharedRoot := findSharedSkillsDir(e.baseDir, e.workspaceShare); sharedRoot != "" {
+		sharedSkills := filepath.Join(sharedRoot, "skills")
+		if info, err := os.Stat(sharedSkills); err == nil && info.IsDir() {
+			dirs = append(dirs, sharedSkills)
+		}
+	}
+	if sp, ok := e.agent.(SkillProvider); ok {
+		dirs = append(dirs, sp.SkillDirs()...)
+	}
+	e.skills.SetDirs(dirs)
 }
 
 // ResolveMemoryWorkDir returns the Codex cwd that memory fact writes must use
@@ -15739,6 +15758,17 @@ func (e *Engine) commandContext(p Platform, msg *Message) (Agent, *SessionManage
 func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *SessionManager, string, string, error) {
 	if !e.multiWorkspace {
 		return e.agent, e.sessions, msg.SessionKey, "", nil
+	}
+	// Java bridge tasks carry their stable business workspace in the session
+	// key rather than a platform channel binding. Route these commands before
+	// the channel lookup so Slash Skills run in the same brand workspace as
+	// ordinary Agent messages.
+	if workspace, ok := e.brandWorkspacePath(msg.SessionKey); ok {
+		agent, sessions, interactiveKey, effectiveDir, err := e.workspaceContext(workspace, msg.SessionKey)
+		if err != nil {
+			return nil, nil, "", "", err
+		}
+		return agent, sessions, interactiveKey, effectiveDir, nil
 	}
 	channelID := effectiveChannelID(msg)
 	channelKey := effectiveWorkspaceChannelKey(msg)
