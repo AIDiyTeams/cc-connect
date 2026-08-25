@@ -438,7 +438,11 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	// providers in every cc-connect project. ensureCodexProviderConfig below
 	// can still upsert per-session overrides on top of the inherited baseline.
 	if codexHome != "" {
-		if err := ensureCodexHomeInheritedConfig(codexHome); err != nil {
+		sharedSkillsDir := strings.TrimSpace(envValue(extraEnv, "SKILLS_OL_DIR"))
+		if sharedSkillsDir == "" {
+			sharedSkillsDir = strings.TrimSpace(os.Getenv("SKILLS_OL_DIR"))
+		}
+		if err := ensureCodexHomeInheritedConfig(codexHome, permissionsProfile, sharedSkillsDir); err != nil {
 			slog.Warn("codex: failed to inherit global config into per-user codex_home", "codex_home", codexHome, "error", err)
 		}
 	}

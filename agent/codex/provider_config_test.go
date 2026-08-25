@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -217,6 +218,7 @@ func TestEnsureCodexAuth_OverwritesExisting(t *testing.T) {
 func TestEnsureCodexHomeInheritedConfigSyncsPermissionProfiles(t *testing.T) {
 	globalHome := t.TempDir()
 	perWorkspaceHome := filepath.Join(t.TempDir(), ".codex")
+	sharedSkillsDir := filepath.Join(t.TempDir(), "Skills-OL-test")
 	t.Setenv("CODEX_HOME", globalHome)
 
 	globalConfig := `model = "deepseek-v4-flash"
@@ -243,8 +245,11 @@ trust_level = "trusted"
 	if err := os.WriteFile(filepath.Join(globalHome, "config.toml"), []byte(globalConfig), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := ensureCodexHomeInheritedConfig(perWorkspaceHome); err != nil {
+	if err := ensureCodexHomeInheritedConfig(perWorkspaceHome, "tomako-brand-fence", sharedSkillsDir); err != nil {
 		t.Fatalf("ensureCodexHomeInheritedConfig() error = %v", err)
+	}
+	if err := ensureCodexHomeInheritedConfig(perWorkspaceHome, "tomako-brand-fence", sharedSkillsDir); err != nil {
+		t.Fatalf("ensureCodexHomeInheritedConfig() second call error = %v", err)
 	}
 
 	data, err := os.ReadFile(filepath.Join(perWorkspaceHome, "config.toml"))
@@ -256,6 +261,7 @@ trust_level = "trusted"
 		`default_permissions = "tomako-brand-fence"`,
 		`[permissions.tomako-brand-fence.filesystem]`,
 		`"/home/ubuntu/Skills-OL" = "read"`,
+		fmt.Sprintf("%q = \"read\"", sharedSkillsDir),
 		`[permissions.tomako-brand-fence.filesystem.":workspace_roots"]`,
 		`".codex/memories" = "write"`,
 		`[permissions.tomako-brand-fence.network]`,
@@ -266,6 +272,18 @@ trust_level = "trusted"
 	}
 	if strings.Contains(content, "/host-only") {
 		t.Fatalf("global project trust leaked into per-workspace config:\n%s", content)
+	}
+	if got := strings.Count(content, fmt.Sprintf("%q = \"read\"", sharedSkillsDir)); got != 1 {
+		t.Fatalf("shared Skills read permission count = %d, want 1:\n%s", got, content)
+	}
+}
+
+func TestAddPermissionReadPathRejectsRelativeDirectory(t *testing.T) {
+	config := `[permissions.tomako-brand-fence.filesystem]
+":minimal" = "read"
+`
+	if got := addPermissionReadPath(config, "tomako-brand-fence", "Skills-OL-test"); got != config {
+		t.Fatalf("relative directory unexpectedly changed permission config:\n%s", got)
 	}
 }
 
