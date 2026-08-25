@@ -1522,11 +1522,6 @@ func stringFromAny(value any) string {
 	return text
 }
 
-func nonEmptyAnySlice(value any) bool {
-	items, ok := value.([]any)
-	return ok && len(items) > 0
-}
-
 func boundedText(value any, max int) string {
 	text := strings.TrimSpace(stringFromAny(value))
 	if len(text) > max {
