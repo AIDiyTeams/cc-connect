@@ -74,6 +74,7 @@ const (
 	messageRecallCheckTimeout = 2 * time.Second
 	messageRecallPollInterval = 2 * time.Second
 	recalledStopLockWait      = 2 * time.Second
+	stoppedTurnLockWait       = 2 * time.Second
 )
 
 // VersionInfo is set by main at startup so that /version works.
@@ -2603,6 +2604,21 @@ func (e *Engine) waitForSessionLock(session *Session, timeout time.Duration) boo
 	}
 }
 
+// waitForStoppedTurnLock handles the transient state created by /stop: the
+// interactive state is already gone, but the stopped turn still owns the
+// Session lock until its event loop observes stopCh and unwinds. An active
+// interactive state means this is an ordinary busy turn and must retain the
+// existing queue/busy behavior.
+func (e *Engine) waitForStoppedTurnLock(session *Session, interactiveKey string, timeout time.Duration) bool {
+	e.interactiveMu.Lock()
+	state, exists := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if exists && state != nil {
+		return false
+	}
+	return e.waitForSessionLock(session, timeout)
+}
+
 func (e *Engine) startMessageRecallMonitor(sessionKey string) context.CancelFunc {
 	ctx, cancel := context.WithCancel(e.ctx)
 	go func() {
@@ -2855,6 +2871,15 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
 	if !session.TryLock() {
+		// /stop removes the interactive state immediately so stale Agent events
+		// cannot reach the user, while the old processing goroutine releases the
+		// Session lock during its short asynchronous unwind. A follow-up arriving
+		// in that window is a new turn, not a message for a still-running task.
+		// Wait for the old owner to finish instead of leaking the internal /ps
+		// busy hint to the product surface.
+		if e.waitForStoppedTurnLock(session, interactiveKey, stoppedTurnLockWait) {
+			goto sessionLocked
+		}
 		if e.stopCurrentMessageIfRecalled(interactiveKey) {
 			if e.waitForSessionLock(session, recalledStopLockWait) {
 				goto sessionLocked

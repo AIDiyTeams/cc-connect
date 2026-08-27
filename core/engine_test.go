@@ -9800,6 +9800,77 @@ func TestExecuteCardAction_StopClearsInteractiveState(t *testing.T) {
 	}
 }
 
+// TestHandleMessage_AfterStopWaitsForPriorTurnLockRelease reproduces the
+// product race where /stop has already removed the interactive state, but the
+// stopped turn's goroutine has not released the Session lock yet. A follow-up
+// sent in that window must start a new turn instead of surfacing the internal
+// "Previous request still processing" hint.
+func TestHandleMessage_AfterStopWaitsForPriorTurnLockRelease(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	next := newQueuingSession("after-stop")
+	e := NewEngine("test", &controllableAgent{nextSession: next}, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+
+	// This is the exact state immediately after stopInteractiveSession: the
+	// live state has been removed, while the old processor still owns the lock.
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected prior turn lock setup to succeed")
+	}
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		session.Unlock()
+	}()
+
+	e.ReceiveMessage(p, &Message{
+		SessionKey: key,
+		Platform:   "test",
+		MessageID:  "follow-up-after-stop",
+		UserID:     "user1",
+		UserName:   "user1",
+		Content:    "continue with the corrected recipient",
+		ReplyCtx:   "ctx-follow-up",
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		next.sendMu.Lock()
+		sentToAgent := len(next.sendCalls) > 0
+		next.sendMu.Unlock()
+		if sentToAgent {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("follow-up was not delivered to agent; user-visible replies: %v", p.getSent())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	next.events <- Event{Type: EventResult, Content: "follow-up accepted", Done: true}
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		sent := p.getSent()
+		followUpReturned := false
+		for _, got := range sent {
+			if got == "follow-up accepted" {
+				followUpReturned = true
+			}
+		}
+		if followUpReturned {
+			for _, got := range sent {
+				if strings.Contains(got, e.i18n.T(MsgPreviousProcessing)) {
+					t.Fatalf("internal busy hint leaked after stop: %v", sent)
+				}
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("follow-up result was not returned; replies: %v", sent)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestCmdStop_ReturnsWhileCloseBlockedAndStopsEventLoop(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newBlockingCloseSession("stop-blocked")

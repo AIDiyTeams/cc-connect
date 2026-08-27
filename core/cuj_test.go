@@ -51,6 +51,9 @@ type cujAgent struct {
 	mu       sync.Mutex
 	sessions []*cujAgentSession
 	nextID   int
+	// nextDelayMs configures only the next created session. It lets CUJ tests
+	// keep a turn genuinely in flight while exercising stop/cancel behavior.
+	nextDelayMs int
 
 	// failStartCount lets tests simulate "agent process won't start" — the
 	// next N StartSession calls return failStartErr. Set both > 0 to use.
@@ -75,6 +78,8 @@ func (a *cujAgent) StartSession(_ context.Context, _ string) (AgentSession, erro
 	}
 	a.nextID++
 	s := newCUJAgentSession()
+	s.delayMs = a.nextDelayMs
+	a.nextDelayMs = 0
 	a.sessions = append(a.sessions, s)
 	return s, nil
 }
@@ -83,6 +88,23 @@ func (a *cujAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
 	return nil, nil
 }
 func (a *cujAgent) Stop() error { return nil }
+
+func (a *cujAgent) delayNextSession(delay time.Duration) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.nextDelayMs = int(delay / time.Millisecond)
+}
+
+func (a *cujAgent) firstSessionAcceptedPrompt() bool {
+	a.mu.Lock()
+	if len(a.sessions) == 0 {
+		a.mu.Unlock()
+		return false
+	}
+	s := a.sessions[0]
+	a.mu.Unlock()
+	return len(s.getSentPrompts()) > 0
+}
 
 // cujAgentSession is an AgentSession whose reply is controllable per-Send.
 // Tests can set reply (and optionally toolEvent) before each Send to drive
@@ -1392,8 +1414,9 @@ func TestCUJ_C2_PlanModeRequiresApproval(t *testing.T) {
 func TestCUJ_C5_StopKeepsSameSession(t *testing.T) {
 	env := newCUJEnv(t)
 	key := "test:c5"
+	env.agent.delayNextSession(2 * time.Second)
 	env.userSends("c5", "hello")
-	env.waitFor("turn1", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 1 })
+	env.waitFor("turn1 is running", 2*time.Second, env.agent.firstSessionAcceptedPrompt)
 	oldID := env.activeSession(key).ID
 
 	env.plat.clearSent()
@@ -1402,6 +1425,21 @@ func TestCUJ_C5_StopKeepsSameSession(t *testing.T) {
 
 	if env.activeSession(key).ID != oldID {
 		t.Fatalf("/stop changed active session %s → %s; should stay on same session", oldID, env.activeSession(key).ID)
+	}
+
+	// The next instruction may arrive immediately after the UI renders the
+	// stop acknowledgement. It must resume the same conversation as a new turn
+	// and must never expose cc-connect's internal /ps busy hint.
+	env.plat.clearSent()
+	env.userSends("c5", "continue with the correction")
+	env.waitFor("follow-up reply after stop", 2*time.Second, func() bool {
+		return len(env.plat.getSent()) >= 1
+	})
+	if env.sentContains("Previous request still processing") || env.sentContains("/ps <message>") {
+		t.Fatalf("follow-up after stop leaked internal busy hint: %v", env.plat.getSent())
+	}
+	if env.activeSession(key).ID != oldID {
+		t.Fatalf("follow-up after /stop changed active session %s → %s", oldID, env.activeSession(key).ID)
 	}
 }
 
