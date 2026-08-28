@@ -3337,6 +3337,11 @@ func (e *Engine) RespondInteraction(sessionKey, interactionID, decision string, 
 			if len(values) == 0 {
 				return fmt.Errorf("missing answer for question %q", question.ID)
 			}
+			for _, value := range values {
+				if strings.TrimSpace(value) == interactionSkippedAnswer && len(values) != 1 {
+					return fmt.Errorf("skipped answer for question %q cannot be combined with options", question.ID)
+				}
+			}
 			collected[idx] = interactionAnswerText(question, values)
 		}
 		result.UpdatedInput = buildAskQuestionResponse(pending.ToolInput, pending.Questions, collected)
@@ -3399,7 +3404,12 @@ func (e *Engine) hasPendingInteraction(sessionKey, interactionID string) bool {
 	return pending != nil
 }
 
+const interactionSkippedAnswer = "__tomako_skipped__"
+
 func interactionAnswerText(question UserQuestion, values []string) string {
+	if len(values) == 1 && strings.TrimSpace(values[0]) == interactionSkippedAnswer {
+		return "Skipped by user"
+	}
 	labels := make([]string, 0, len(values))
 	for _, value := range values {
 		value = strings.TrimSpace(value)

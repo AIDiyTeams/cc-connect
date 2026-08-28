@@ -6693,6 +6693,70 @@ func TestRespondInteractionUsesStableQuestionAndOptionIDs(t *testing.T) {
 	}
 }
 
+func TestRespondInteractionMapsAnExplicitSkipForTheNativeAgent(t *testing.T) {
+	e := newTestEngine()
+	rec := &recordingAgentSession{}
+	state := &interactiveState{
+		agentSession: rec,
+		pending: &pendingPermission{
+			RequestID:     "native-request",
+			InteractionID: "interaction-skip",
+			ToolName:      "AskUserQuestion",
+			ToolInput:     map[string]any{"questions": []any{}},
+			Questions: []UserQuestion{{
+				ID:       "database",
+				Question: "Which database?",
+				Options:  []UserQuestionOption{{ID: "postgres", Label: "PostgreSQL"}},
+			}},
+			Resolved: make(chan struct{}),
+		},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates["test:chat:user1"] = state
+	e.interactiveMu.Unlock()
+
+	if err := e.RespondInteraction("test:chat:user1", "interaction-skip", "", map[string][]string{
+		"database": {interactionSkippedAnswer},
+	}); err != nil {
+		t.Fatalf("RespondInteraction() error = %v", err)
+	}
+	answers, ok := rec.lastResult.UpdatedInput["answers"].(map[string]any)
+	if !ok || answers["database"] != "Skipped by user" {
+		t.Fatalf("answers = %#v, want database=Skipped by user", rec.lastResult.UpdatedInput["answers"])
+	}
+}
+
+func TestRespondInteractionRejectsSkipCombinedWithAnOption(t *testing.T) {
+	e := newTestEngine()
+	rec := &recordingAgentSession{}
+	e.interactiveMu.Lock()
+	e.interactiveStates["test:chat:user1"] = &interactiveState{
+		agentSession: rec,
+		pending: &pendingPermission{
+			RequestID:     "native-request",
+			InteractionID: "interaction-mixed-skip",
+			ToolName:      "AskUserQuestion",
+			ToolInput:     map[string]any{"questions": []any{}},
+			Questions: []UserQuestion{{
+				ID: "database", Question: "Which database?",
+				Options: []UserQuestionOption{{ID: "postgres", Label: "PostgreSQL"}},
+			}},
+			Resolved: make(chan struct{}),
+		},
+	}
+	e.interactiveMu.Unlock()
+
+	err := e.RespondInteraction("test:chat:user1", "interaction-mixed-skip", "", map[string][]string{
+		"database": {interactionSkippedAnswer, "postgres"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("RespondInteraction() error = %v, want mixed skip rejection", err)
+	}
+	if rec.lastID != "" {
+		t.Fatalf("native request was answered after invalid mixed skip")
+	}
+}
+
 func TestRespondInteractionFindsWorkspacePendingBehindRawPlaceholder(t *testing.T) {
 	e := newTestEngine()
 	rec := &recordingAgentSession{}
