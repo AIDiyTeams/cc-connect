@@ -6693,6 +6693,39 @@ func TestRespondInteractionUsesStableQuestionAndOptionIDs(t *testing.T) {
 	}
 }
 
+func TestRespondInteractionFindsWorkspacePendingBehindRawPlaceholder(t *testing.T) {
+	e := newTestEngine()
+	rec := &recordingAgentSession{}
+	sessionKey := "bridge:room-1:user-1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[sessionKey] = &interactiveState{}
+	e.interactiveStates["workspace-a:"+sessionKey] = &interactiveState{
+		agentSession: rec,
+		pending: &pendingPermission{
+			RequestID:     "native-request",
+			InteractionID: "interaction-workspace",
+			ToolName:      "AskUserQuestion",
+			ToolInput:     map[string]any{"questions": []any{}},
+			Questions: []UserQuestion{{
+				ID:       "mode",
+				Question: "Which mode?",
+				Options:  []UserQuestionOption{{ID: "advice", Label: "Advice only"}},
+			}},
+			Resolved: make(chan struct{}),
+		},
+	}
+	e.interactiveMu.Unlock()
+
+	if err := e.RespondInteraction(sessionKey, "interaction-workspace", "", map[string][]string{
+		"mode": {"advice"},
+	}); err != nil {
+		t.Fatalf("RespondInteraction() error = %v", err)
+	}
+	if rec.lastID != "native-request" {
+		t.Fatalf("native request id = %q, want native-request", rec.lastID)
+	}
+}
+
 func TestHandlePendingPermission_AskUserQuestion_SingleQuestion(t *testing.T) {
 	e := newTestEngine()
 	p := &stubPlatformEngine{n: "test"}

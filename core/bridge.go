@@ -1350,13 +1350,40 @@ func (a *bridgeAdapter) handleRespondInteraction(raw json.RawMessage) {
 		slog.Debug("bridge: invalid respond_interaction payload", "error", err)
 		return
 	}
-	ref := a.server.resolveEngine(response.SessionKey, response.Project)
+	ref := a.server.resolveInteractionEngine(response.SessionKey, response.Project, response.InteractionID)
 	if ref == nil {
+		slog.Warn("bridge: no engine for interaction response",
+			"interaction_id", response.InteractionID,
+			"session_key", response.SessionKey,
+			"project", response.Project)
 		return
 	}
 	if err := ref.engine.RespondInteraction(response.SessionKey, response.InteractionID, response.Decision, response.Answers); err != nil {
 		slog.Warn("bridge: interaction response rejected", "interaction_id", response.InteractionID, "error", err)
 	}
+}
+
+// resolveInteractionEngine routes a structured answer by its exact pending
+// interaction. Portal responses may omit project, and session ownership alone
+// is insufficient when engines use workspace-scoped session managers.
+func (bs *BridgeServer) resolveInteractionEngine(sessionKey, project, interactionID string) *bridgeEngineRef {
+	if ref := bs.resolveEngine(sessionKey, project); ref != nil &&
+		ref.engine.hasPendingInteraction(sessionKey, interactionID) {
+		return ref
+	}
+
+	bs.enginesMu.RLock()
+	refs := make([]*bridgeEngineRef, 0, len(bs.engines))
+	for _, ref := range bs.engines {
+		refs = append(refs, ref)
+	}
+	bs.enginesMu.RUnlock()
+	for _, ref := range refs {
+		if ref.engine.hasPendingInteraction(sessionKey, interactionID) {
+			return ref
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

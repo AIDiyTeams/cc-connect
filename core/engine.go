@@ -3321,13 +3321,9 @@ func newInteractionID() string {
 // RespondInteraction resolves the structured interaction currently waiting on
 // a session. The native JSON-RPC request id never leaves cc-connect.
 func (e *Engine) RespondInteraction(sessionKey, interactionID, decision string, answers map[string][]string) error {
-	iKey := e.interactiveKeyForSessionKey(sessionKey)
-	state, pending := e.lookupPending(iKey)
+	state, pending := e.lookupPendingInteraction(sessionKey, interactionID)
 	if state == nil || pending == nil {
 		return fmt.Errorf("no pending interaction for session %q", sessionKey)
-	}
-	if pending.InteractionID != interactionID {
-		return fmt.Errorf("interaction %q is not pending", interactionID)
 	}
 
 	result := PermissionResult{Behavior: "allow", UpdatedInput: pending.ToolInput}
@@ -3364,6 +3360,43 @@ func (e *Engine) RespondInteraction(sessionKey, interactionID, decision string, 
 	state.mu.Unlock()
 	pending.resolve()
 	return nil
+}
+
+// lookupPendingInteraction finds the exact interaction even when a stale raw
+// session placeholder shadows the live workspace-prefixed state. Structured
+// bridge responses do not always carry the original project name, so the
+// opaque interaction id is the authoritative discriminator.
+func (e *Engine) lookupPendingInteraction(sessionKey, interactionID string) (*interactiveState, *pendingPermission) {
+	iKey := e.interactiveKeyForSessionKey(sessionKey)
+	if state, pending := e.lookupPending(iKey); pending != nil && pending.InteractionID == interactionID {
+		return state, pending
+	}
+
+	e.interactiveMu.Lock()
+	candidates := make([]*interactiveState, 0, 2)
+	suffix := ":" + sessionKey
+	for key, state := range e.interactiveStates {
+		if key == iKey || (key != sessionKey && !strings.HasSuffix(key, suffix)) {
+			continue
+		}
+		candidates = append(candidates, state)
+	}
+	e.interactiveMu.Unlock()
+
+	for _, state := range candidates {
+		state.mu.Lock()
+		pending := state.pending
+		state.mu.Unlock()
+		if pending != nil && pending.InteractionID == interactionID {
+			return state, pending
+		}
+	}
+	return nil, nil
+}
+
+func (e *Engine) hasPendingInteraction(sessionKey, interactionID string) bool {
+	_, pending := e.lookupPendingInteraction(sessionKey, interactionID)
+	return pending != nil
 }
 
 func interactionAnswerText(question UserQuestion, values []string) string {

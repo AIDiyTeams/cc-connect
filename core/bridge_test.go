@@ -415,6 +415,58 @@ func TestBridge_CodexQuestionInteractionRoundTrip(t *testing.T) {
 	sess.events <- Event{Type: EventResult, Content: "done", Done: true}
 }
 
+func TestBridge_InteractionResponseRoutesPendingAcrossEnginesWithoutProject(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	targetPlatform := bs.NewPlatform("target-proj")
+	targetSession := newBridgeInteractionAgentSession("target-session")
+	targetEngine := NewEngine("target-proj", &controllableAgent{nextSession: targetSession}, []Platform{targetPlatform}, "", LangEnglish)
+	bs.RegisterEngine("target-proj", targetEngine, targetPlatform)
+
+	otherPlatform := bs.NewPlatform("other-proj")
+	otherEngine := NewEngine("other-proj", &stubAgent{}, []Platform{otherPlatform}, "", LangEnglish)
+	bs.RegisterEngine("other-proj", otherEngine, otherPlatform)
+
+	sessionKey := "bridge:room-multi:user-1"
+	targetEngine.interactiveMu.Lock()
+	targetEngine.interactiveStates["workspace-a:"+sessionKey] = &interactiveState{
+		agentSession: targetSession,
+		pending: &pendingPermission{
+			RequestID:     `"rui-multi-1"`,
+			InteractionID: "interaction-multi-1",
+			ToolName:      "AskUserQuestion",
+			ToolInput:     map[string]any{"questions": []any{}},
+			Questions: []UserQuestion{{
+				ID:       "mode",
+				Question: "Which mode?",
+				Options:  []UserQuestionOption{{ID: "advice", Label: "Advice only"}},
+			}},
+			Resolved: make(chan struct{}),
+		},
+	}
+	targetEngine.interactiveMu.Unlock()
+
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "bridge", []string{"text", "interactions"})
+	mustWriteJSON(t, conn, map[string]any{
+		"type":           "respond_interaction",
+		"session_key":    sessionKey,
+		"reply_ctx":      "llm-multi-1",
+		"interaction_id": "interaction-multi-1",
+		"answers": map[string][]string{
+			"mode": {"advice"},
+		},
+	})
+
+	select {
+	case response := <-targetSession.responses:
+		if response.requestID != `"rui-multi-1"` {
+			t.Fatalf("native request id = %q, want raw Codex JSON-RPC id", response.requestID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("respond_interaction without project did not reach the pending engine")
+	}
+}
+
 func TestBridge_MessageReplyCtxCarriesProgressHints(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
 
