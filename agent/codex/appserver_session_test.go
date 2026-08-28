@@ -26,6 +26,22 @@ func TestThreadParamsIncludeTaskScopedNativeWebSearch(t *testing.T) {
 	if !ok || config["web_search"] != "live" {
 		t.Fatalf("thread params missing task-scoped native web search: %#v", params)
 	}
+	if config["features.default_mode_request_user_input"] != true {
+		t.Fatalf("thread params missing Default mode request_user_input feature: %#v", params)
+	}
+}
+
+func TestThreadParamsEnableDefaultModeRequestUserInputWithoutWebSearch(t *testing.T) {
+	s := &appServerSession{workDir: "/srv/tomako"}
+
+	params := s.threadRequestParams()
+	config, ok := params["config"].(map[string]any)
+	if !ok || config["features.default_mode_request_user_input"] != true {
+		t.Fatalf("thread params missing Default mode request_user_input feature: %#v", params)
+	}
+	if _, ok := config["web_search"]; ok {
+		t.Fatalf("thread params unexpectedly enabled web search: %#v", params)
+	}
 }
 
 func TestBrandAnalysisRuntimeRegistersOnlyDedicatedDynamicTools(t *testing.T) {
@@ -446,8 +462,11 @@ func TestAppServerSession_FencedThreadParamsOverrideUnsafeGlobalMode(t *testing.
 		"experimentalRawEvents":  false,
 		"persistExtendedHistory": false,
 		"cwd":                    "/srv/tomako/workspaces/brand-42",
-		"permissions":            "tomako-brand-fence",
-		"approvalPolicy":         "never",
+		"config": map[string]any{
+			"features.default_mode_request_user_input": true,
+		},
+		"permissions":    "tomako-brand-fence",
+		"approvalPolicy": "never",
 	}
 	if !reflect.DeepEqual(params, want) {
 		t.Fatalf("thread params = %#v, want %#v", params, want)

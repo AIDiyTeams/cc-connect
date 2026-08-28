@@ -422,16 +422,20 @@ func (s *appServerSession) ensureThreadForSend() error {
 }
 
 func (s *appServerSession) threadRequestParams() map[string]any {
+	config := map[string]any{
+		"features.default_mode_request_user_input": true,
+	}
 	params := map[string]any{
 		"experimentalRawEvents":  false,
 		"persistExtendedHistory": false,
 		"cwd":                    s.workDir,
+		"config":                 config,
 	}
 	if model := s.GetModel(); model != "" {
 		params["model"] = model
 	}
 	if searchMode := s.getWebSearch(); searchMode != "" {
-		params["config"] = map[string]any{"web_search": searchMode}
+		config["web_search"] = searchMode
 	}
 	if s.isBrandAnalysisRuntime() {
 		params["dynamicTools"] = brandAnalysisDynamicTools()
