@@ -4377,6 +4377,45 @@ func TestExecuteCardActionStop_RemovesInteractiveState(t *testing.T) {
 	}
 }
 
+// The Tomako Bridge can route a task to an explicit brand-scoped runtime
+// workspace while the channel's persisted binding still points at the older
+// per-user workspace. Card actions do not carry the runtime workspace again,
+// so /stop must fall back to the one live state matching the raw session key
+// when the current binding resolves to a key with no running state.
+func TestExecuteCardActionStop_FallsBackToBrandScopedLiveState(t *testing.T) {
+	e := newTestEngine()
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	rawKey := "java-backend-test:tomako:4:brand:gp-1:task:llm-1"
+	boundWorkspace := filepath.Join(baseDir, "user-4")
+	liveWorkspace := filepath.Join(baseDir, "workspace-tomako", "brand-gp-1")
+	if err := os.MkdirAll(boundWorkspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.workspaceBindings.Bind(
+		"project:test",
+		"java-backend-test:tomako",
+		"user-4",
+		boundWorkspace,
+	)
+
+	liveKey := normalizeWorkspacePath(liveWorkspace) + ":" + rawKey
+	e.interactiveMu.Lock()
+	e.interactiveStates[liveKey] = &interactiveState{}
+	e.interactiveMu.Unlock()
+
+	e.executeCardAction("/stop", "", rawKey)
+
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[liveKey]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Fatal("expected /stop to remove the brand-scoped live state when the persisted binding is stale")
+	}
+}
+
 func TestCmdLang_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "inline-only"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)

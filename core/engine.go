@@ -11874,7 +11874,32 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		}
 
 	case "/stop":
-		e.stopInteractiveSession(interactiveKey, nil, nil)
+		stoppedKey := interactiveKey
+		stopped := e.stopInteractiveSession(stoppedKey, nil, nil)
+		if !stopped {
+			// Bridge card actions only carry the raw session key. A task message
+			// may have selected an explicit runtime workspace (for example a
+			// brand-scoped Tomako directory) while the channel's persisted
+			// binding still points at an older per-user workspace. In that case
+			// interactiveKeyForSessionKey resolves a valid but non-live key.
+			// Fall back to the actual live state for this session, matching the
+			// recovery already used by the text /stop command.
+			if found := e.findInteractiveKeyForSession(sessionKey); found != "" && found != stoppedKey {
+				stoppedKey = found
+				stopped = e.stopInteractiveSession(stoppedKey, nil, nil)
+			}
+		}
+		if stopped {
+			slog.Info("card action stopped interactive session",
+				"session_key", sessionKey,
+				"interactive_key", stoppedKey,
+			)
+		} else {
+			slog.Warn("card action stop found no live interactive session",
+				"session_key", sessionKey,
+				"resolved_interactive_key", interactiveKey,
+			)
+		}
 
 	case "/heartbeat":
 		if e.heartbeatScheduler == nil {
