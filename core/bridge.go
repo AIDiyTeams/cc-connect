@@ -407,6 +407,7 @@ var (
 	_ AgentTraceReporter                = (*BridgePlatform)(nil)
 	_ AgentStructuredResultReporter     = (*BridgePlatform)(nil)
 	_ TurnDispatchStatusReporter        = (*BridgePlatform)(nil)
+	_ TurnFailureReporter               = (*BridgePlatform)(nil)
 	_ InteractionResponseStatusReporter = (*BridgePlatform)(nil)
 )
 
@@ -441,6 +442,25 @@ func (bp *BridgePlatform) ReportTurnDispatchStatus(
 	}
 	if message := strings.TrimSpace(status.Message); message != "" {
 		payload["message"] = message
+	}
+	return bp.server.sendToAdapter(rc.Platform, payload)
+}
+
+func (bp *BridgePlatform) ReportTurnFailure(
+	ctx context.Context,
+	replyCtx any,
+	failure TurnFailure,
+) error {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok {
+		return fmt.Errorf("bridge: invalid reply context type %T", replyCtx)
+	}
+	payload := map[string]any{
+		"type":        "error",
+		"session_key": rc.SessionKey,
+		"reply_ctx":   rc.ReplyCtx,
+		"code":        strings.TrimSpace(failure.Code),
+		"error":       strings.TrimSpace(failure.Message),
 	}
 	return bp.server.sendToAdapter(rc.Platform, payload)
 }
@@ -1487,6 +1507,7 @@ func (a *bridgeAdapter) handleMessage(raw json.RawMessage) {
 	ref := a.server.resolveEngine(m.SessionKey, m.Project)
 	if ref == nil {
 		slog.Warn("bridge: no engine for session", "platform", a.platform, "session_key", m.SessionKey, "project", m.Project)
+		a.sendTurnDispatchRejection(m, "ENGINE_UNAVAILABLE", "no engine is available for this session")
 		return
 	}
 
@@ -1537,8 +1558,34 @@ func (a *bridgeAdapter) handleMessage(raw json.RawMessage) {
 		"user", m.UserID, "content_len", len(m.Content),
 	)
 
-	if ref.platform.handler != nil {
-		ref.platform.handler(ref.platform, msg)
+	if ref.platform.handler == nil {
+		slog.Warn("bridge: engine platform has no message handler", "platform", a.platform, "session_key", m.SessionKey, "project", m.Project)
+		a.sendTurnDispatchRejection(m, "ENGINE_NOT_READY", "engine message handler is not ready")
+		return
+	}
+	ref.platform.handler(ref.platform, msg)
+}
+
+// A successfully written WebSocket frame is not proof that a turn entered an
+// engine. Report pre-admission failures on the existing typed turn-status lane
+// so the control plane can fail the durable assistant message instead of
+// leaving it PENDING forever. Older adapters simply omit this capability.
+func (a *bridgeAdapter) sendTurnDispatchRejection(m bridgeMessage, code, message string) {
+	if a == nil || !a.capabilities["turn_status"] || strings.TrimSpace(m.ReplyCtx) == "" {
+		return
+	}
+	payload := map[string]any{
+		"type":        "turn_status",
+		"session_key": m.SessionKey,
+		"reply_ctx":   m.ReplyCtx,
+		"state":       "rejected",
+		"queue_depth": 0,
+		"code":        strings.TrimSpace(code),
+		"message":     strings.TrimSpace(message),
+	}
+	if err := a.server.sendToAdapter(a.platform, payload); err != nil {
+		slog.Warn("bridge: turn rejection delivery failed",
+			"reply_ctx", m.ReplyCtx, "code", code, "error", err)
 	}
 }
 

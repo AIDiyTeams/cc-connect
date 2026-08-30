@@ -53,6 +53,18 @@ type TurnDispatchStatus struct {
 	Message    string
 }
 
+// TurnFailureReporter carries terminal runtime failures on a typed transport
+// event. A failure is operational state, not an Agent-authored reply; control
+// planes must be able to mark the durable turn FAILED without parsing prose.
+type TurnFailureReporter interface {
+	ReportTurnFailure(ctx context.Context, replyCtx any, failure TurnFailure) error
+}
+
+type TurnFailure struct {
+	Code    string
+	Message string
+}
+
 // InteractionResponseStatusReporter is an optional machine-readable transport
 // for AskUserQuestion/approval acknowledgements. These acknowledgements are
 // runtime state, not Agent-authored conversation content.

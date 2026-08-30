@@ -307,6 +307,57 @@ func TestBridge_MessageRouting(t *testing.T) {
 	}
 }
 
+func TestBridge_MessageWithoutEngineReturnsTypedRejection(t *testing.T) {
+	_, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "turn_status"})
+
+	mustWriteJSON(t, conn, map[string]any{
+		"type":        "message",
+		"msg_id":      "m-no-engine",
+		"session_key": "java-backend:tn:1:project:missing",
+		"user_id":     "1",
+		"content":     "hello",
+		"reply_ctx":   "cmsg-no-engine",
+	})
+
+	msg := readMsg(t, conn)
+	if msg["type"] != "turn_status" || msg["state"] != "rejected" {
+		t.Fatalf("unexpected rejection frame: %v", msg)
+	}
+	if msg["reply_ctx"] != "cmsg-no-engine" || msg["code"] != "ENGINE_UNAVAILABLE" {
+		t.Fatalf("unexpected rejection identity: %v", msg)
+	}
+}
+
+func TestBridge_MessageWithoutHandlerReturnsTypedRejection(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	bp := bs.NewPlatform("test-proj")
+	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
+	bs.RegisterEngine("test-proj", e, bp)
+	bp.handler = nil
+
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "turn_status"})
+	mustWriteJSON(t, conn, map[string]any{
+		"type":        "message",
+		"msg_id":      "m-no-handler",
+		"session_key": "java-backend:tn:1:project:test-proj",
+		"user_id":     "1",
+		"content":     "hello",
+		"reply_ctx":   "cmsg-no-handler",
+		"project":     "test-proj",
+	})
+
+	msg := readMsg(t, conn)
+	if msg["type"] != "turn_status" || msg["state"] != "rejected" {
+		t.Fatalf("unexpected rejection frame: %v", msg)
+	}
+	if msg["reply_ctx"] != "cmsg-no-handler" || msg["code"] != "ENGINE_NOT_READY" {
+		t.Fatalf("unexpected rejection identity: %v", msg)
+	}
+}
+
 type bridgeInteractionResponse struct {
 	requestID string
 	result    PermissionResult
@@ -1160,6 +1211,31 @@ func TestBridge_TurnDispatchStatusIsNotAReply(t *testing.T) {
 	}
 	if msg["reply_ctx"] != "cmsg-queued" {
 		t.Fatalf("reply_ctx=%v", msg["reply_ctx"])
+	}
+}
+
+func TestBridge_TurnFailureUsesTypedErrorEvent(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text"})
+
+	bp := bs.NewPlatform("proj")
+	rc := newBridgeReplyCtx(
+		bs.getAdapter("java-backend"),
+		"java-backend:tn:1:project:p1",
+		"cmsg-runtime-error",
+	)
+	if err := bp.ReportTurnFailure(context.Background(), rc, TurnFailure{
+		Code: "AGENT_RUNTIME_ERROR", Message: "agent failed",
+	}); err != nil {
+		t.Fatalf("ReportTurnFailure: %v", err)
+	}
+	msg := readMsg(t, conn)
+	if msg["type"] != "error" || msg["reply_ctx"] != "cmsg-runtime-error" {
+		t.Fatalf("unexpected failure frame: %v", msg)
+	}
+	if msg["code"] != "AGENT_RUNTIME_ERROR" || msg["error"] != "agent failed" {
+		t.Fatalf("unexpected failure details: %v", msg)
 	}
 }
 

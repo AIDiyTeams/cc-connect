@@ -4757,7 +4757,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.mu.Lock()
 				p := state.platform
 				state.mu.Unlock()
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+				e.failTurn(p, replyCtx, "AGENT_PROMPT_FAILED", fmt.Sprintf(e.i18n.T(MsgError), err))
 				return
 			}
 			continue
@@ -4770,7 +4770,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.eventsNeedResync = true
 			p := state.platform
 			state.mu.Unlock()
-			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
+			e.failTurn(p, replyCtx, "AGENT_IDLE_TIMEOUT",
+				fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
 			e.cleanupInteractiveState(sessionKey, state)
 			return
 		case <-turnDeadlineCh:
@@ -4782,7 +4783,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()
-			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError),
+			e.failTurn(p, replyCtx, "AGENT_TURN_TIMEOUT", fmt.Sprintf(e.i18n.T(MsgError),
 				fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", e.maxTurnTime)))
 
 			// Two-phase shutdown: first try a graceful stop so the agent can
@@ -6014,7 +6015,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						break
 					}
 				}
-				e.send(p, replyCtx, userMsg)
+				e.failTurn(p, replyCtx, "AGENT_RUNTIME_ERROR", userMsg)
 			}
 			// Only drop queued messages if the agent session is dead.
 			// Some agents (e.g. Codex) emit EventError for per-turn failures
@@ -11473,6 +11474,21 @@ func (e *Engine) sendAlreadyRenderedWithError(p Platform, replyCtx any, content 
 // send wraps p.Send with error logging, slow-operation warnings, and outgoing rate limiting.
 func (e *Engine) send(p Platform, replyCtx any, content string) {
 	_ = e.sendWithError(p, replyCtx, content)
+}
+
+// failTurn prefers a typed terminal event when the platform supports one.
+// Plain chat adapters retain the existing localized visible reply fallback.
+func (e *Engine) failTurn(p Platform, replyCtx any, code, content string) {
+	if reporter, ok := p.(TurnFailureReporter); ok {
+		if err := reporter.ReportTurnFailure(e.ctx, replyCtx, TurnFailure{
+			Code: code, Message: content,
+		}); err == nil {
+			return
+		} else if !errors.Is(err, ErrNotSupported) {
+			slog.Warn("typed turn failure delivery failed", "platform", p.Name(), "code", code, "error", err)
+		}
+	}
+	e.send(p, replyCtx, content)
 }
 
 // sendRaw sends content without local-reference rendering. This is used for raw
