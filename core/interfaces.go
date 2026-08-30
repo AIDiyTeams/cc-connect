@@ -40,6 +40,32 @@ type AgentStructuredResultReporter interface {
 	ReportAgentStructuredResult(ctx context.Context, replyCtx any, stage string, result map[string]any) error
 }
 
+// TurnDispatchStatusReporter is an optional machine-readable transport for
+// admission-control outcomes. A queued or rejected turn is operational state,
+// not an Agent answer, so adapters must never receive it through Reply.
+type TurnDispatchStatusReporter interface {
+	ReportTurnDispatchStatus(ctx context.Context, replyCtx any, status TurnDispatchStatus) error
+}
+
+type TurnDispatchStatus struct {
+	State      string
+	QueueDepth int
+	Message    string
+}
+
+// InteractionResponseStatusReporter is an optional machine-readable transport
+// for AskUserQuestion/approval acknowledgements. These acknowledgements are
+// runtime state, not Agent-authored conversation content.
+type InteractionResponseStatusReporter interface {
+	ReportInteractionResponseStatus(ctx context.Context, replyCtx any, status InteractionResponseStatus) error
+}
+
+type InteractionResponseStatus struct {
+	InteractionID string
+	State         string
+	Code          string
+}
+
 // ErrNotSupported indicates a platform doesn't support a particular operation.
 var ErrNotSupported = errors.New("operation not supported by this platform")
 

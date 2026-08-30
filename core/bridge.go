@@ -387,25 +387,27 @@ type BridgePlatform struct {
 
 // Compile-time interface checks.
 var (
-	_ Platform                      = (*BridgePlatform)(nil)
-	_ CardSender                    = (*BridgePlatform)(nil)
-	_ InlineButtonSender            = (*BridgePlatform)(nil)
-	_ MessageUpdater                = (*BridgePlatform)(nil)
-	_ StatusFooterSender            = (*BridgePlatform)(nil)
-	_ StatusFooterUpdater           = (*BridgePlatform)(nil)
-	_ StreamCompleter               = (*BridgePlatform)(nil)
-	_ PreviewStarter                = (*BridgePlatform)(nil)
-	_ PreviewCleaner                = (*BridgePlatform)(nil)
-	_ PreviewFinishPreference       = (*BridgePlatform)(nil)
-	_ TypingIndicator               = (*BridgePlatform)(nil)
-	_ AudioSender                   = (*BridgePlatform)(nil)
-	_ VideoSender                   = (*BridgePlatform)(nil)
-	_ ImageSender                   = (*BridgePlatform)(nil)
-	_ FileSender                    = (*BridgePlatform)(nil)
-	_ CardNavigable                 = (*BridgePlatform)(nil)
-	_ ReplyContextReconstructor     = (*BridgePlatform)(nil)
-	_ AgentTraceReporter            = (*BridgePlatform)(nil)
-	_ AgentStructuredResultReporter = (*BridgePlatform)(nil)
+	_ Platform                          = (*BridgePlatform)(nil)
+	_ CardSender                        = (*BridgePlatform)(nil)
+	_ InlineButtonSender                = (*BridgePlatform)(nil)
+	_ MessageUpdater                    = (*BridgePlatform)(nil)
+	_ StatusFooterSender                = (*BridgePlatform)(nil)
+	_ StatusFooterUpdater               = (*BridgePlatform)(nil)
+	_ StreamCompleter                   = (*BridgePlatform)(nil)
+	_ PreviewStarter                    = (*BridgePlatform)(nil)
+	_ PreviewCleaner                    = (*BridgePlatform)(nil)
+	_ PreviewFinishPreference           = (*BridgePlatform)(nil)
+	_ TypingIndicator                   = (*BridgePlatform)(nil)
+	_ AudioSender                       = (*BridgePlatform)(nil)
+	_ VideoSender                       = (*BridgePlatform)(nil)
+	_ ImageSender                       = (*BridgePlatform)(nil)
+	_ FileSender                        = (*BridgePlatform)(nil)
+	_ CardNavigable                     = (*BridgePlatform)(nil)
+	_ ReplyContextReconstructor         = (*BridgePlatform)(nil)
+	_ AgentTraceReporter                = (*BridgePlatform)(nil)
+	_ AgentStructuredResultReporter     = (*BridgePlatform)(nil)
+	_ TurnDispatchStatusReporter        = (*BridgePlatform)(nil)
+	_ InteractionResponseStatusReporter = (*BridgePlatform)(nil)
 )
 
 func (bp *BridgePlatform) Name() string { return "bridge" }
@@ -416,6 +418,58 @@ func (bp *BridgePlatform) Start(handler MessageHandler) error {
 }
 
 func (bp *BridgePlatform) Stop() error { return nil }
+
+func (bp *BridgePlatform) ReportTurnDispatchStatus(
+	ctx context.Context,
+	replyCtx any,
+	status TurnDispatchStatus,
+) error {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok {
+		return fmt.Errorf("bridge: invalid reply context type %T", replyCtx)
+	}
+	a := bp.server.getAdapter(rc.Platform)
+	if a == nil || !a.capabilities["turn_status"] {
+		return ErrNotSupported
+	}
+	payload := map[string]any{
+		"type":        "turn_status",
+		"session_key": rc.SessionKey,
+		"reply_ctx":   rc.ReplyCtx,
+		"state":       strings.TrimSpace(status.State),
+		"queue_depth": status.QueueDepth,
+	}
+	if message := strings.TrimSpace(status.Message); message != "" {
+		payload["message"] = message
+	}
+	return bp.server.sendToAdapter(rc.Platform, payload)
+}
+
+func (bp *BridgePlatform) ReportInteractionResponseStatus(
+	ctx context.Context,
+	replyCtx any,
+	status InteractionResponseStatus,
+) error {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok {
+		return fmt.Errorf("bridge: invalid reply context type %T", replyCtx)
+	}
+	a := bp.server.getAdapter(rc.Platform)
+	if a == nil || !a.capabilities["interaction_status"] {
+		return ErrNotSupported
+	}
+	payload := map[string]any{
+		"type":           "interaction_response_status",
+		"session_key":    rc.SessionKey,
+		"reply_ctx":      rc.ReplyCtx,
+		"interaction_id": strings.TrimSpace(status.InteractionID),
+		"state":          strings.TrimSpace(status.State),
+	}
+	if code := strings.TrimSpace(status.Code); code != "" {
+		payload["code"] = code
+	}
+	return bp.server.sendToAdapter(rc.Platform, payload)
+}
 
 func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, event AgentTraceEvent) error {
 	rc, ok := replyCtx.(*bridgeReplyCtx)
@@ -1356,10 +1410,38 @@ func (a *bridgeAdapter) handleRespondInteraction(raw json.RawMessage) {
 			"interaction_id", response.InteractionID,
 			"session_key", response.SessionKey,
 			"project", response.Project)
+		a.sendInteractionResponseStatus(response, "rejected", "INTERACTION_NOT_PENDING")
 		return
 	}
 	if err := ref.engine.RespondInteraction(response.SessionKey, response.InteractionID, response.Decision, response.Answers); err != nil {
 		slog.Warn("bridge: interaction response rejected", "interaction_id", response.InteractionID, "error", err)
+		a.sendInteractionResponseStatus(response, "rejected", "INTERACTION_RUNTIME_REJECTED")
+		return
+	}
+	a.sendInteractionResponseStatus(response, "accepted", "")
+}
+
+func (a *bridgeAdapter) sendInteractionResponseStatus(
+	response bridgeRespondInteraction,
+	state string,
+	code string,
+) {
+	if a == nil || !a.capabilities["interaction_status"] || strings.TrimSpace(response.ReplyCtx) == "" {
+		return
+	}
+	payload := map[string]any{
+		"type":           "interaction_response_status",
+		"session_key":    response.SessionKey,
+		"reply_ctx":      response.ReplyCtx,
+		"interaction_id": response.InteractionID,
+		"state":          state,
+	}
+	if code != "" {
+		payload["code"] = code
+	}
+	if err := a.server.sendToAdapter(a.platform, payload); err != nil {
+		slog.Warn("bridge: interaction response status delivery failed",
+			"interaction_id", response.InteractionID, "state", state, "error", err)
 	}
 }
 

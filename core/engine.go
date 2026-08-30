@@ -3025,7 +3025,15 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	if len(state.pendingMessages) >= e.maxQueuedMessages {
 		depth := len(state.pendingMessages)
 		state.mu.Unlock()
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgQueueFull), depth))
+		message := fmt.Sprintf(e.i18n.T(MsgQueueFull), depth)
+		if reporter, ok := p.(TurnDispatchStatusReporter); ok {
+			if err := reporter.ReportTurnDispatchStatus(e.ctx, msg.ReplyCtx, TurnDispatchStatus{
+				State: "rejected", QueueDepth: depth, Message: message,
+			}); err == nil {
+				return true
+			}
+		}
+		e.reply(p, msg.ReplyCtx, message)
 		return true // handled: queue-full reply sent
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
@@ -3060,7 +3068,15 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		"user", msg.UserName,
 		"queue_depth", queueDepth,
 	)
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	message := e.i18n.T(MsgMessageQueued)
+	if reporter, ok := p.(TurnDispatchStatusReporter); ok {
+		if err := reporter.ReportTurnDispatchStatus(e.ctx, msg.ReplyCtx, TurnDispatchStatus{
+			State: "queued", QueueDepth: queueDepth, Message: message,
+		}); err == nil {
+			return true
+		}
+	}
+	e.reply(p, msg.ReplyCtx, message)
 	return true
 }
 
@@ -3252,9 +3268,13 @@ found:
 			UpdatedInput: updatedInput,
 		}); err != nil {
 			slog.Error("failed to send AskUserQuestion response", "error", err)
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+			if !e.reportInteractionResponseStatus(p, msg.ReplyCtx, pending.InteractionID, "rejected", "INTERACTION_RUNTIME_REJECTED") {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+			}
 		} else {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", q.Question, answer))
+			if !e.reportInteractionResponseStatus(p, msg.ReplyCtx, pending.InteractionID, "accepted", "") {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", q.Question, answer))
+			}
 		}
 
 		state.mu.Lock()
@@ -3309,6 +3329,24 @@ found:
 	pending.resolve()
 
 	return true
+}
+
+func (e *Engine) reportInteractionResponseStatus(
+	p Platform,
+	replyCtx any,
+	interactionID string,
+	state string,
+	code string,
+) bool {
+	reporter, ok := p.(InteractionResponseStatusReporter)
+	if !ok {
+		return false
+	}
+	return reporter.ReportInteractionResponseStatus(e.ctx, replyCtx, InteractionResponseStatus{
+		InteractionID: interactionID,
+		State:         state,
+		Code:          code,
+	}) == nil
 }
 
 // lookupPending returns the interactive state and its pending permission for

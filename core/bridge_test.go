@@ -1135,6 +1135,82 @@ func TestBridge_TokenStreamReplyStream(t *testing.T) {
 	}
 }
 
+func TestBridge_TurnDispatchStatusIsNotAReply(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "turn_status"})
+
+	bp := bs.NewPlatform("proj")
+	rc := newBridgeReplyCtx(
+		bs.getAdapter("java-backend"),
+		"java-backend:tn:1:project:p1",
+		"cmsg-queued",
+	)
+	if err := bp.ReportTurnDispatchStatus(context.Background(), rc, TurnDispatchStatus{
+		State: "queued", QueueDepth: 2, Message: "queued",
+	}); err != nil {
+		t.Fatalf("ReportTurnDispatchStatus: %v", err)
+	}
+	msg := readMsg(t, conn)
+	if msg["type"] != "turn_status" {
+		t.Fatalf("type=%v want turn_status", msg["type"])
+	}
+	if msg["state"] != "queued" || msg["queue_depth"] != float64(2) {
+		t.Fatalf("unexpected turn status: %v", msg)
+	}
+	if msg["reply_ctx"] != "cmsg-queued" {
+		t.Fatalf("reply_ctx=%v", msg["reply_ctx"])
+	}
+}
+
+func TestBridge_InteractionResponseStatusUsesTypedEvent(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "interaction_status"})
+
+	adapter := bs.getAdapter("java-backend")
+	adapter.sendInteractionResponseStatus(bridgeRespondInteraction{
+		SessionKey:    "java-backend:tn:1:project:p1",
+		ReplyCtx:      "cmsg-interaction",
+		InteractionID: "interaction-1",
+	}, "rejected", "INTERACTION_NOT_PENDING")
+
+	msg := readMsg(t, conn)
+	if msg["type"] != "interaction_response_status" || msg["state"] != "rejected" {
+		t.Fatalf("unexpected interaction status: %v", msg)
+	}
+	if msg["code"] != "INTERACTION_NOT_PENDING" {
+		t.Fatalf("code=%v", msg["code"])
+	}
+}
+
+func TestBridge_PlatformReportsInteractionResponseStatusWithoutReply(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "interaction_status"})
+
+	bp := bs.NewPlatform("proj")
+	rc := newBridgeReplyCtx(
+		bs.getAdapter("java-backend"),
+		"java-backend:tn:1:project:p1",
+		"cmsg-interaction-platform",
+	)
+	if err := bp.ReportInteractionResponseStatus(context.Background(), rc, InteractionResponseStatus{
+		InteractionID: "interaction-platform-1",
+		State:         "accepted",
+	}); err != nil {
+		t.Fatalf("ReportInteractionResponseStatus: %v", err)
+	}
+
+	msg := readMsg(t, conn)
+	if msg["type"] != "interaction_response_status" || msg["state"] != "accepted" {
+		t.Fatalf("unexpected interaction status: %v", msg)
+	}
+	if msg["interaction_id"] != "interaction-platform-1" {
+		t.Fatalf("interaction_id=%v", msg["interaction_id"])
+	}
+}
+
 func TestBridge_LlmTaskKeepsCoarseUpdateMessage(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
 	conn := dialWS(t, wsURL, nil)
