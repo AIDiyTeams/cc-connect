@@ -865,7 +865,7 @@ func TestAppServerSession_HandleRequestUserInputEmitsAskQuestion(t *testing.T) {
 	}
 }
 
-func TestAppServerSession_HandleRequestUserInputWritesCodexResponse(t *testing.T) {
+func TestAppServerSession_HandleRequestUserInputPreservesIDKeyedMultiSelectAnswers(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -904,7 +904,7 @@ func TestAppServerSession_HandleRequestUserInputWritesCodexResponse(t *testing.T
 		Behavior: "allow",
 		UpdatedInput: map[string]any{
 			"answers": map[string]any{
-				"Which database should we use?": "Postgres",
+				"database": "Postgres, SQLite",
 			},
 		},
 	}); err != nil {
@@ -928,6 +928,28 @@ func TestAppServerSession_HandleRequestUserInputWritesCodexResponse(t *testing.T
 		t.Fatalf("envelope = %#v", envelope)
 	}
 	got := envelope.Result.Answers["database"].Answers
+	if len(got) != 1 || got[0] != "Postgres, SQLite" {
+		t.Fatalf("answers[database] = %#v, want [Postgres, SQLite]", got)
+	}
+}
+
+func TestAppServerRequestUserInputResponseRetainsLegacyQuestionTextAnswers(t *testing.T) {
+	response := appServerRequestUserInputResponseFromResult(
+		[]appServerRequestUserInputQuestion{{
+			ID:       "database",
+			Question: "Which database should we use?",
+		}},
+		core.PermissionResult{
+			Behavior: "allow",
+			UpdatedInput: map[string]any{
+				"answers": map[string]any{
+					"Which database should we use?": "Postgres",
+				},
+			},
+		},
+	)
+
+	got := response.Answers["database"].Answers
 	if len(got) != 1 || got[0] != "Postgres" {
 		t.Fatalf("answers[database] = %#v, want [Postgres]", got)
 	}

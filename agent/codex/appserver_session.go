@@ -1672,7 +1672,15 @@ func appServerRequestUserInputResponseFromResult(questions []appServerRequestUse
 		if id == "" || text == "" {
 			continue
 		}
-		values := appServerRequestUserInputAnswerValues(answersRaw[text])
+		// Bridge-native interactions answer by the stable question ID. Older
+		// adapters used the rendered question text, so retain that only as a
+		// compatibility fallback. Looking up text alone silently converted a
+		// valid multi-select response into {"answers":{}} for Codex.
+		answer := answersRaw[id]
+		if answer == nil {
+			answer = answersRaw[text]
+		}
+		values := appServerRequestUserInputAnswerValues(answer)
 		if len(values) == 0 {
 			continue
 		}
