@@ -5495,6 +5495,25 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
 			}
+			// A clean EventResult with no text and no tool activity is not a
+			// successful turn. Codex can emit this shape after an upstream model
+			// provider rejects every retry (for example, insufficient balance).
+			// Reporting it as ordinary assistant text previously left durable LLM
+			// tasks in AWAITING_INPUT with the literal "(empty response)".
+			if strings.TrimSpace(fullResponse) == "" && toolCount == 0 {
+				cp.Finalize(ProgressCardStateFailed)
+				sp.discard()
+				state.mu.Lock()
+				state.eventsNeedResync = true
+				state.mu.Unlock()
+				if pendingSend != nil {
+					if err := <-pendingSend; err != nil {
+						slog.Debug("async send error after empty EventResult", "error", err)
+					}
+				}
+				e.failTurn(p, replyCtx, "AGENT_EMPTY_RESPONSE", e.i18n.T(MsgAgentEmptyResponse))
+				return
+			}
 			if fullResponse == "" {
 				fullResponse = e.i18n.T(MsgEmptyResponse)
 			}
