@@ -1610,6 +1610,9 @@ func normalizeSessionRuntime(runtime SessionRuntime) SessionRuntime {
 	runtime.UserID = boundedOpaqueValue(runtime.UserID, 32)
 	runtime.ChatSessionID = boundedOpaqueValue(runtime.ChatSessionID, 64)
 	runtime.TaskID = boundedOpaqueValue(runtime.TaskID, 96)
+	runtime.MachineCapabilityToken = boundedSecretValue(runtime.MachineCapabilityToken, 16*1024)
+	runtime.ImageCapabilityToken = boundedSecretValue(runtime.ImageCapabilityToken, 16*1024)
+	runtime.TaskAuthorityEnvelopeB64 = boundedSecretValue(runtime.TaskAuthorityEnvelopeB64, 192*1024)
 	switch strings.ToLower(strings.TrimSpace(runtime.ReasoningEffort)) {
 	case "low", "medium", "high", "xhigh":
 		runtime.ReasoningEffort = strings.ToLower(strings.TrimSpace(runtime.ReasoningEffort))
@@ -1643,6 +1646,14 @@ func boundedOpaqueValue(value string, max int) string {
 	value = strings.TrimSpace(value)
 	if len(value) > max {
 		return value[:max]
+	}
+	return value
+}
+
+func boundedSecretValue(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if len(value) > max || strings.ContainsAny(value, "\r\n\x00") {
+		return ""
 	}
 	return value
 }

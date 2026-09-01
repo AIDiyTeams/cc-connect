@@ -1510,14 +1510,17 @@ func TestBridge_ReportAgentStructuredResultRequiresCapabilityAndDelivers(t *test
 
 func TestNormalizeSessionRuntime_WhitelistsModalitiesAndBoundsOpaqueValues(t *testing.T) {
 	runtime := normalizeSessionRuntime(SessionRuntime{
-		Scene:              strings.Repeat("s", 80),
-		LogicalModel:       strings.Repeat("x", 80),
-		GatewayModel:       "  tomako/vision-balanced-v1  ",
-		WebSearch:          " LIVE ",
-		RoutePolicyVersion: -1,
-		TurnNo:             -2,
-		RequiredModalities: []string{"text", " IMAGE ", "unknown"},
-		ReasoningEffort:    " LOW ",
+		Scene:                    strings.Repeat("s", 80),
+		LogicalModel:             strings.Repeat("x", 80),
+		GatewayModel:             "  tomako/vision-balanced-v1  ",
+		WebSearch:                " LIVE ",
+		RoutePolicyVersion:       -1,
+		TurnNo:                   -2,
+		RequiredModalities:       []string{"text", " IMAGE ", "unknown"},
+		ReasoningEffort:          " LOW ",
+		MachineCapabilityToken:   " machine-token ",
+		ImageCapabilityToken:     " image-token ",
+		TaskAuthorityEnvelopeB64: " envelope ",
 	})
 
 	if len(runtime.LogicalModel) != 64 {
@@ -1537,5 +1540,16 @@ func TestNormalizeSessionRuntime_WhitelistsModalitiesAndBoundsOpaqueValues(t *te
 	}
 	if got, want := strings.Join(runtime.RequiredModalities, ","), "TEXT,IMAGE"; got != want {
 		t.Fatalf("modalities = %q, want %q", got, want)
+	}
+	if runtime.MachineCapabilityToken != "machine-token" ||
+		runtime.ImageCapabilityToken != "image-token" ||
+		runtime.TaskAuthorityEnvelopeB64 != "envelope" {
+		t.Fatalf("machine authority normalization failed: %#v", runtime)
+	}
+	invalid := normalizeSessionRuntime(SessionRuntime{
+		MachineCapabilityToken: "secret\nleak",
+	})
+	if invalid.MachineCapabilityToken != "" {
+		t.Fatalf("control-character secret was retained: %#v", invalid)
 	}
 }

@@ -24,26 +24,27 @@ import (
 // codexSession manages a multi-turn Codex conversation.
 // First Send() uses `codex exec`, subsequent ones use `codex exec resume <threadID>`.
 type codexSession struct {
-	workDir       string
-	model         string
-	effort        string
-	webSearch     string
-	mode          string
-	baseURL       string   // provider base URL; passed as -c openai_base_url=<url>
-	modelProvider string   // Codex model_provider name; passed as -c model_provider=<name>
-	cliBin        string   // CLI binary, default "codex"
-	cliExtraArgs  []string // extra args from cli_path, prepended before exec args
-	extraEnv      []string
-	events        chan core.Event
-	threadID      atomic.Value // stores string — Codex thread_id
-	ctx           context.Context
-	cancel        context.CancelFunc
-	wg            sync.WaitGroup
-	alive         atomic.Bool
-	closeOnce     sync.Once
-	cmdMu         sync.Mutex
-	cmds          map[*exec.Cmd]struct{}
-	runtimeMu     sync.RWMutex
+	workDir            string
+	model              string
+	effort             string
+	webSearch          string
+	mode               string
+	baseURL            string   // provider base URL; passed as -c openai_base_url=<url>
+	modelProvider      string   // Codex model_provider name; passed as -c model_provider=<name>
+	cliBin             string   // CLI binary, default "codex"
+	cliExtraArgs       []string // extra args from cli_path, prepended before exec args
+	extraEnv           []string
+	events             chan core.Event
+	threadID           atomic.Value // stores string — Codex thread_id
+	ctx                context.Context
+	cancel             context.CancelFunc
+	wg                 sync.WaitGroup
+	alive              atomic.Bool
+	closeOnce          sync.Once
+	cmdMu              sync.Mutex
+	cmds               map[*exec.Cmd]struct{}
+	runtimeMu          sync.RWMutex
+	taskRuntimeEnvFile string
 
 	pendingMsgs []string // buffered agent_message texts awaiting classification
 
@@ -125,8 +126,15 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 	cmd := exec.CommandContext(cs.ctx, bin, args...)
 	cmd.Dir = cs.workDir
 	prepareCmdForKill(cmd)
-	if len(cs.extraEnv) > 0 {
-		cmd.Env = core.MergeEnv(os.Environ(), cs.extraEnv)
+	cs.runtimeMu.RLock()
+	taskRuntimeEnvFile := cs.taskRuntimeEnvFile
+	cs.runtimeMu.RUnlock()
+	turnEnv := append([]string(nil), cs.extraEnv...)
+	if taskRuntimeEnvFile != "" {
+		turnEnv = append(turnEnv, "TOMAKO_TASK_ENV_FILE="+taskRuntimeEnvFile)
+	}
+	if len(turnEnv) > 0 {
+		cmd.Env = core.MergeEnv(os.Environ(), turnEnv)
 	}
 	cmd.Stdin = strings.NewReader(prompt)
 
@@ -807,6 +815,11 @@ func (cs *codexSession) SetSessionRuntime(runtime core.SessionRuntime) error {
 	}
 	cs.runtimeMu.Lock()
 	defer cs.runtimeMu.Unlock()
+	envFile, err := updateTaskRuntimeEnv(cs.taskRuntimeEnvFile, runtime)
+	if err != nil {
+		return err
+	}
+	cs.taskRuntimeEnvFile = envFile
 	if model := strings.TrimSpace(runtime.GatewayModel); model != "" {
 		cs.model = model
 	}
@@ -896,6 +909,10 @@ func (cs *codexSession) refreshContextUsageFromRollout() {
 
 func (cs *codexSession) Close() error {
 	cs.alive.Store(false)
+	cs.runtimeMu.Lock()
+	removeTaskRuntimeEnv(cs.taskRuntimeEnvFile)
+	cs.taskRuntimeEnvFile = ""
+	cs.runtimeMu.Unlock()
 	cs.cancel()
 	done := make(chan struct{})
 	go func() {
