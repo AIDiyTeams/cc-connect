@@ -65,7 +65,7 @@ func updateTaskRuntimeEnv(existingPath string, runtime core.SessionRuntime) (str
 		return existingPath, fmt.Errorf("create task runtime file: %w", err)
 	}
 	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
 		return existingPath, fmt.Errorf("protect task runtime file: %w", err)
