@@ -196,10 +196,11 @@ type appServerSession struct {
 	streamedItems    map[string]string
 	lastStreamedItem string
 
-	runtimeMu sync.RWMutex
-	usage     *core.UsageReport
-	context   *core.ContextUsage
-	runtime   core.SessionRuntime
+	runtimeMu          sync.RWMutex
+	usage              *core.UsageReport
+	context            *core.ContextUsage
+	runtime            core.SessionRuntime
+	taskRuntimeEnvFile string
 
 	brandFlowMu sync.Mutex
 	brandFlow   brandAnalysisFlow
@@ -425,6 +426,9 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	config := map[string]any{
 		"features.default_mode_request_user_input": true,
 	}
+	if envFile := s.currentTaskRuntimeEnvFile(); envFile != "" {
+		config["shell_environment_policy.set.TOMAKO_TASK_ENV_FILE"] = envFile
+	}
 	params := map[string]any{
 		"experimentalRawEvents":  false,
 		"persistExtendedHistory": false,
@@ -608,6 +612,13 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 		return fmt.Errorf("session is closed")
 	}
 	s.runtimeMu.Lock()
+	previousEnvFile := s.taskRuntimeEnvFile
+	envFile, err := updateTaskRuntimeEnv(s.taskRuntimeEnvFile, runtime)
+	if err != nil {
+		s.runtimeMu.Unlock()
+		return err
+	}
+	s.taskRuntimeEnvFile = envFile
 	s.runtime = runtime
 	if model := strings.TrimSpace(runtime.GatewayModel); model != "" {
 		s.model = model
@@ -617,6 +628,21 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	}
 	s.webSearch = normalizeWebSearch(runtime.WebSearch)
 	s.runtimeMu.Unlock()
+
+	// Resumed app-server threads were created before this turn's trusted
+	// runtime arrived. Resume the same thread once more with the task env-file
+	// path in its shell policy; subsequent turns keep the stable path while the
+	// file contents rotate atomically.
+	if previousEnvFile == "" && envFile != "" {
+		if currentID := s.CurrentSessionID(); currentID != "" {
+			s.threadMu.Lock()
+			if s.CurrentSessionID() == currentID {
+				s.resumeID = currentID
+				s.threadID.Store("")
+			}
+			s.threadMu.Unlock()
+		}
+	}
 
 	// Each bridge task is a new Agent turn. Do not leak evidence/search guards
 	// from an earlier brand-analysis task that happened to share the same
@@ -636,6 +662,12 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	}
 	s.threadMu.Unlock()
 	return nil
+}
+
+func (s *appServerSession) currentTaskRuntimeEnvFile() string {
+	s.runtimeMu.RLock()
+	defer s.runtimeMu.RUnlock()
+	return s.taskRuntimeEnvFile
 }
 
 func (s *appServerSession) getWebSearch() string {
@@ -1783,6 +1815,10 @@ func (s *appServerSession) Alive() bool {
 
 func (s *appServerSession) Close() error {
 	s.alive.Store(false)
+	s.runtimeMu.Lock()
+	removeTaskRuntimeEnv(s.taskRuntimeEnvFile)
+	s.taskRuntimeEnvFile = ""
+	s.runtimeMu.Unlock()
 	s.cancel()
 
 	s.procMu.Lock()

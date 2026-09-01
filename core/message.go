@@ -222,6 +222,11 @@ type SessionRuntime struct {
 	TaskID             string   `json:"task_id,omitempty"`
 	ReasoningEffort    string   `json:"reasoning_effort,omitempty"`
 	TurnNo             int      `json:"turn_no,omitempty"`
+	// Machine authority is delivered on the trusted Bridge runtime lane so it
+	// never enters the model-visible prompt or persisted chat history.
+	MachineCapabilityToken   string `json:"machine_capability_token,omitempty"`
+	ImageCapabilityToken     string `json:"image_capability_token,omitempty"`
+	TaskAuthorityEnvelopeB64 string `json:"task_authority_envelope_b64,omitempty"`
 }
 
 // EventType distinguishes different kinds of agent output.
