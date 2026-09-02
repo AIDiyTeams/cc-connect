@@ -6249,7 +6249,24 @@ func sendWithSessionRuntime(
 			return fmt.Errorf("configure session runtime: %w", err)
 		}
 	}
-	return session.Send(prompt, images, files)
+	return session.Send(promptWithScopedRuntime(runtime, prompt), images, files)
+}
+
+func promptWithScopedRuntime(runtime SessionRuntime, prompt string) string {
+	if strings.Contains(prompt, "[MACHINE_CAPABILITY_TOKEN=") {
+		return prompt
+	}
+	var prefix strings.Builder
+	if value := strings.TrimSpace(runtime.MachineCapabilityToken); value != "" {
+		fmt.Fprintf(&prefix, "[MACHINE_CAPABILITY_TOKEN=%s]\n", value)
+	}
+	if value := strings.TrimSpace(runtime.ImageCapabilityToken); value != "" {
+		fmt.Fprintf(&prefix, "[IMAGE_CAPABILITY_TOKEN=%s]\n", value)
+	}
+	if value := strings.TrimSpace(runtime.TaskAuthorityEnvelopeB64); value != "" {
+		fmt.Fprintf(&prefix, "[TASK_AUTHORITY_ENVELOPE_B64=%s]\n", value)
+	}
+	return prefix.String() + prompt
 }
 
 // ──────────────────────────────────────────────────────────────

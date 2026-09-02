@@ -24,6 +24,17 @@ func (a *stubAgent) Name() string { return "stub" }
 func (a *stubAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
 	return &stubAgentSession{}, nil
 }
+
+func TestPromptWithScopedRuntimeInjectsCapabilityMarkersOnce(t *testing.T) {
+	runtime := SessionRuntime{MachineCapabilityToken: "cap-123", ImageCapabilityToken: "img-456", TaskAuthorityEnvelopeB64: "auth-789"}
+	got := promptWithScopedRuntime(runtime, "run the skill")
+	if !strings.Contains(got, "[MACHINE_CAPABILITY_TOKEN=cap-123]") || !strings.Contains(got, "[TASK_AUTHORITY_ENVELOPE_B64=auth-789]") {
+		t.Fatalf("scoped runtime markers missing: %q", got)
+	}
+	if again := promptWithScopedRuntime(runtime, got); again != got {
+		t.Fatalf("markers duplicated on replay: %q", again)
+	}
+}
 func (a *stubAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) { return nil, nil }
 func (a *stubAgent) Stop() error                                                { return nil }
 

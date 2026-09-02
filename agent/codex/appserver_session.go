@@ -643,7 +643,6 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 			s.threadMu.Unlock()
 		}
 	}
-
 	// Each bridge task is a new Agent turn. Do not leak evidence/search guards
 	// from an earlier brand-analysis task that happened to share the same
 	// workspace session.
@@ -669,7 +668,6 @@ func (s *appServerSession) currentTaskRuntimeEnvFile() string {
 	defer s.runtimeMu.RUnlock()
 	return s.taskRuntimeEnvFile
 }
-
 func (s *appServerSession) getWebSearch() string {
 	s.runtimeMu.RLock()
 	defer s.runtimeMu.RUnlock()
@@ -1558,6 +1556,10 @@ func stringFromAny(value any) string {
 	return text
 }
 
+func nonEmptyAnySlice(value any) bool {
+	items, ok := value.([]any)
+	return ok && len(items) > 0
+}
 func boundedText(value any, max int) string {
 	text := strings.TrimSpace(stringFromAny(value))
 	if len(text) > max {
