@@ -222,6 +222,11 @@ type SessionRuntime struct {
 	TaskID             string   `json:"task_id,omitempty"`
 	ReasoningEffort    string   `json:"reasoning_effort,omitempty"`
 	TurnNo             int      `json:"turn_no,omitempty"`
+	// Scoped capabilities are control-plane data for the current turn. They are
+	// injected into the Agent prompt by the engine, never exposed to users.
+	MachineCapabilityToken   string `json:"machine_capability_token,omitempty"`
+	ImageCapabilityToken     string `json:"image_capability_token,omitempty"`
+	TaskAuthorityEnvelopeB64 string `json:"task_authority_envelope_b64,omitempty"`
 }
 
 // EventType distinguishes different kinds of agent output.
