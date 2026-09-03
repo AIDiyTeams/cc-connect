@@ -353,11 +353,11 @@ level = "info" # debug, info, warn, error
 # port = 9810                         # WebSocket listen port (default: 9810) / 监听端口
 # token = "your-bridge-secret"        # Auth token (required) / 认证密钥（必填）
 # path = "/bridge/ws"                 # URL path (default: "/bridge/ws") / URL 路径
-# # Which reply_ctx prefixes use by-token reply_stream (default: ["cmsg-"]).
-# # 哪些 reply_ctx 前缀走逐 token 流式（默认 ["cmsg-"]）。
+# # Which reply_ctx prefixes use by-token reply_stream (default: ["cmsg-", "llm-"]).
+# # 哪些 reply_ctx 前缀走逐 token 流式（默认 ["cmsg-", "llm-"]）。
 # # See config/demos/workspace-share.example.toml for factory / cross-business demos.
 # # 跨业务示例见 config/demos/workspace-share.example.toml。
-# token_stream_reply_prefixes = ["cmsg-"]
+# token_stream_reply_prefixes = ["cmsg-", "llm-"]
 # # token_stream_reply_prefixes = ["chat-", "job-"]  # factory MES example / 工厂示例
 
 # =============================================================================
