@@ -1329,13 +1329,31 @@ func TestBridge_ReportAgentTrace_ThinkingTruncatesTo64KB(t *testing.T) {
 	}
 }
 
-func TestBridge_ReportAgentTrace_ThinkingSkippedForNonLlmReplyCtx(t *testing.T) {
+func TestBridge_ReportAgentTrace_ThinkingForwardedForChatReplyCtx(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
 	conn := dialWS(t, wsURL, nil)
 	register(t, conn, "java-backend", []string{"text", "agent_trace"})
 
 	bp := bs.NewPlatform("test")
 	rc := &bridgeReplyCtx{Platform: "java-backend", SessionKey: "s", ReplyCtx: "cmsg-abc123"}
+	if err := bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{
+		TraceID: "trace-1", Type: EventThinking, Content: "chat thoughts",
+	}); err != nil {
+		t.Fatalf("ReportAgentTrace thinking: %v", err)
+	}
+	msg := readMsg(t, conn)
+	if msg["type"] != "agent_thinking" || msg["reply_ctx"] != "cmsg-abc123" {
+		t.Fatalf("chat thinking frame = %v", msg)
+	}
+}
+
+func TestBridge_ReportAgentTrace_ThinkingSkippedForOtherReplyCtx(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "agent_trace"})
+
+	bp := bs.NewPlatform("test")
+	rc := &bridgeReplyCtx{Platform: "java-backend", SessionKey: "s", ReplyCtx: "tg-chat-123"}
 	if err := bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{
 		TraceID: "trace-1", Type: EventThinking, Content: "secret thoughts",
 	}); err != nil {
@@ -1346,7 +1364,28 @@ func TestBridge_ReportAgentTrace_ThinkingSkippedForNonLlmReplyCtx(t *testing.T) 
 	}
 	var m map[string]any
 	if err := conn.ReadJSON(&m); err == nil {
-		t.Fatalf("expected no frame for non-llm reply ctx, got %v", m)
+		t.Fatalf("expected no frame for non-bridge reply ctx, got %v", m)
+	}
+}
+
+func TestBridge_ReportAgentTrace_ToolTraceStillTaskOnly(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "agent_trace"})
+
+	bp := bs.NewPlatform("test")
+	rc := &bridgeReplyCtx{Platform: "java-backend", SessionKey: "s", ReplyCtx: "cmsg-abc123"}
+	if err := bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{
+		TraceID: "trace-9", Type: EventToolUse, ToolName: "shell", Input: "ls",
+	}); err != nil {
+		t.Fatalf("ReportAgentTrace tool use: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	var m map[string]any
+	if err := conn.ReadJSON(&m); err == nil {
+		t.Fatalf("expected no tool trace frame for chat reply ctx, got %v", m)
 	}
 }
 

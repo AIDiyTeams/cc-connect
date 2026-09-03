@@ -418,7 +418,7 @@ func (bp *BridgePlatform) Stop() error { return nil }
 
 func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, event AgentTraceEvent) error {
 	rc, ok := replyCtx.(*bridgeReplyCtx)
-	if !ok || !strings.HasPrefix(rc.ReplyCtx, "llm-") {
+	if !ok {
 		return nil
 	}
 	a := bp.server.getAdapter(rc.Platform)
@@ -428,7 +428,12 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 	now := time.Now().UTC()
 	// Model thinking rides a dedicated frame so the backend can persist and
 	// gate it independently of tool traces. Content is capped, not summarized.
+	// Thinking flows for both backend tasks (llm-) and studio chat turns
+	// (cmsg-); user-facing visibility is gated by the backend adapter.
 	if event.Type == EventThinking {
+		if !strings.HasPrefix(rc.ReplyCtx, "llm-") && !strings.HasPrefix(rc.ReplyCtx, "cmsg-") {
+			return nil
+		}
 		return bp.server.sendToAdapter(rc.Platform, map[string]any{
 			"type":        "agent_thinking",
 			"session_key": rc.SessionKey,
@@ -437,6 +442,11 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 			"content":     truncateBridgeTrace(event.Content, 65536),
 			"occurred_at": now.Format(time.RFC3339Nano),
 		})
+	}
+	// Redacted tool traces stay task-only; chat turns surface tool activity
+	// through the existing progress card instead.
+	if !strings.HasPrefix(rc.ReplyCtx, "llm-") {
+		return nil
 	}
 	key := rc.ReplyCtx + ":" + event.TraceID
 	var durationMs int64
