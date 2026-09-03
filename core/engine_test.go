@@ -15270,3 +15270,82 @@ func TestAgentSystemPrompt_DocumentsAudioVideoFlags(t *testing.T) {
 		t.Error("AgentSystemPrompt missing the 'Do NOT downgrade' anti-regression line")
 	}
 }
+
+type stubTraceReporterPlatform struct {
+	stubPlatformEngine
+	traces []AgentTraceEvent
+}
+
+func (p *stubTraceReporterPlatform) ReportAgentTrace(_ context.Context, _ any, event AgentTraceEvent) error {
+	p.traces = append(p.traces, event)
+	return nil
+}
+
+func TestProcessInteractiveEvents_ReportsFullThinkingToTraceReporter(t *testing.T) {
+	p := &stubTraceReporterPlatform{stubPlatformEngine: stubPlatformEngine{n: "bridge"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	// Deliberately tiny display truncation: the backend trace channel must not
+	// be affected by messaging-platform display knobs.
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 5, ToolMaxLen: 500, ToolMessages: true})
+
+	sessionKey := "bridge:user-trace"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-trace")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "llm-abc123",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	thinking := "Deliberately long reasoning that must survive untruncated."
+	agentSession.events <- Event{TraceID: "t1", Type: EventThinking, Content: thinking}
+	agentSession.events <- Event{TraceID: "t2", Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"}
+	agentSession.events <- Event{TraceID: "t2", Type: EventToolResult, ToolName: "Bash", ToolStatus: "success"}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-trace", time.Now(), nil, nil, state.replyCtx)
+
+	var sawThinking, sawToolUse, sawToolResult bool
+	for _, tr := range p.traces {
+		switch tr.Type {
+		case EventThinking:
+			sawThinking = true
+			if tr.Content != thinking {
+				t.Fatalf("thinking content = %q, want full text", tr.Content)
+			}
+		case EventToolUse:
+			sawToolUse = true
+		case EventToolResult:
+			sawToolResult = true
+		}
+	}
+	if !sawThinking || !sawToolUse || !sawToolResult {
+		t.Fatalf("missing traces: thinking=%v toolUse=%v toolResult=%v (all=%#v)", sawThinking, sawToolUse, sawToolResult, p.traces)
+	}
+}
+
+func TestProcessInteractiveEvents_SkipsEllipsisThinkingInTraceReporter(t *testing.T) {
+	p := &stubTraceReporterPlatform{stubPlatformEngine: stubPlatformEngine{n: "bridge"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true})
+
+	sessionKey := "bridge:user-trace-ellipsis"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-trace-ellipsis")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "llm-abc123",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventThinking, Content: "..."}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-trace-ellipsis", time.Now(), nil, nil, state.replyCtx)
+
+	for _, tr := range p.traces {
+		if tr.Type == EventThinking {
+			t.Fatalf("ellipsis-only thinking should not reach the reporter, got %#v", tr)
+		}
+	}
+}

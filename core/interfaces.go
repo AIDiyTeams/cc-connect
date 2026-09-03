@@ -15,8 +15,10 @@ type Platform interface {
 	Stop() error
 }
 
-// AgentTraceReporter is an optional internal audit channel for tool actions.
-// Engines report tool use/results only; model thinking is deliberately excluded.
+// AgentTraceReporter is an optional internal channel toward backend adapters.
+// Engines report tool use/results plus model thinking for backend task
+// channels (llm- reply contexts); user-facing visibility of that data is
+// gated downstream by the backend, not here.
 type AgentTraceReporter interface {
 	ReportAgentTrace(ctx context.Context, replyCtx any, event AgentTraceEvent) error
 }
@@ -30,6 +32,9 @@ type AgentTraceEvent struct {
 	Status   string
 	ExitCode *int
 	Success  *bool
+	// Content carries full model thinking text for EventThinking reports;
+	// it stays separate from Input/Output, which remain tool-result fields.
+	Content string
 }
 
 // ErrNotSupported indicates a platform doesn't support a particular operation.

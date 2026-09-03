@@ -1278,3 +1278,130 @@ func TestNormalizeSessionRuntime_WhitelistsModalitiesAndBoundsOpaqueValues(t *te
 		t.Fatalf("modalities = %q, want %q", got, want)
 	}
 }
+
+func TestBridge_ReportAgentTrace_ThinkingEmitsAgentThinkingFrame(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "agent_trace"})
+
+	bp := bs.NewPlatform("test")
+	rc := &bridgeReplyCtx{Platform: "java-backend", SessionKey: "bridge:java-backend:ws-1", ReplyCtx: "llm-abc123"}
+	content := strings.TrimRight(strings.Repeat("step-by-step reasoning. ", 400), " ") // no trailing ws: bridge trims
+	if err := bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{
+		TraceID: "trace-1", Type: EventThinking, Content: content,
+	}); err != nil {
+		t.Fatalf("ReportAgentTrace thinking: %v", err)
+	}
+
+	msg := readMsg(t, conn)
+	if msg["type"] != "agent_thinking" {
+		t.Fatalf("frame type = %v, want agent_thinking", msg["type"])
+	}
+	if msg["reply_ctx"] != "llm-abc123" {
+		t.Fatalf("reply_ctx = %v", msg["reply_ctx"])
+	}
+	got, _ := msg["content"].(string)
+	if got != content {
+		t.Fatalf("thinking content not forwarded in full: %d bytes vs %d", len(got), len(content))
+	}
+	if msg["occurred_at"] == "" {
+		t.Fatalf("occurred_at missing")
+	}
+}
+
+func TestBridge_ReportAgentTrace_ThinkingTruncatesTo64KB(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "agent_trace"})
+
+	bp := bs.NewPlatform("test")
+	rc := &bridgeReplyCtx{Platform: "java-backend", SessionKey: "s", ReplyCtx: "llm-abc123"}
+	huge := strings.Repeat("x", 200_000)
+	if err := bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{
+		TraceID: "trace-1", Type: EventThinking, Content: huge,
+	}); err != nil {
+		t.Fatalf("ReportAgentTrace thinking: %v", err)
+	}
+	msg := readMsg(t, conn)
+	got, _ := msg["content"].(string)
+	if len(got) != 65536 {
+		t.Fatalf("content len = %d, want 65536", len(got))
+	}
+}
+
+func TestBridge_ReportAgentTrace_ThinkingSkippedForNonLlmReplyCtx(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "agent_trace"})
+
+	bp := bs.NewPlatform("test")
+	rc := &bridgeReplyCtx{Platform: "java-backend", SessionKey: "s", ReplyCtx: "cmsg-abc123"}
+	if err := bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{
+		TraceID: "trace-1", Type: EventThinking, Content: "secret thoughts",
+	}); err != nil {
+		t.Fatalf("ReportAgentTrace thinking: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	var m map[string]any
+	if err := conn.ReadJSON(&m); err == nil {
+		t.Fatalf("expected no frame for non-llm reply ctx, got %v", m)
+	}
+}
+
+func TestBridge_ReportAgentTrace_ThinkingRequiresAdapterCapability(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text"}) // no agent_trace
+
+	bp := bs.NewPlatform("test")
+	rc := &bridgeReplyCtx{Platform: "java-backend", SessionKey: "s", ReplyCtx: "llm-abc123"}
+	if err := bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{
+		TraceID: "trace-1", Type: EventThinking, Content: "thoughts",
+	}); err != nil {
+		t.Fatalf("ReportAgentTrace thinking: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	var m map[string]any
+	if err := conn.ReadJSON(&m); err == nil {
+		t.Fatalf("expected no frame without agent_trace capability, got %v", m)
+	}
+}
+
+func TestBridge_ReportAgentTrace_ToolTraceFramesUnchanged(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "agent_trace"})
+
+	bp := bs.NewPlatform("test")
+	rc := &bridgeReplyCtx{Platform: "java-backend", SessionKey: "s", ReplyCtx: "llm-abc123"}
+	if err := bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{
+		TraceID: "trace-2", Type: EventToolUse, ToolName: "shell", Input: "ls",
+	}); err != nil {
+		t.Fatalf("ReportAgentTrace tool use: %v", err)
+	}
+	msg := readMsg(t, conn)
+	if msg["type"] != "agent_trace" {
+		t.Fatalf("frame type = %v, want agent_trace", msg["type"])
+	}
+	if msg["event_type"] != "tool_use" || msg["tool_name"] != "shell" {
+		t.Fatalf("tool_use frame = %v", msg)
+	}
+
+	time.Sleep(2 * time.Millisecond) // ensure duration_ms > 0 so the frame carries it
+	if err := bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{
+		TraceID: "trace-2", Type: EventToolResult, ToolName: "shell", Output: "ok", Status: "success",
+	}); err != nil {
+		t.Fatalf("ReportAgentTrace tool result: %v", err)
+	}
+	msg = readMsg(t, conn)
+	if msg["type"] != "agent_trace" || msg["event_type"] != "tool_result" {
+		t.Fatalf("tool_result frame = %v", msg)
+	}
+	if msg["duration_ms"] == nil {
+		t.Fatalf("tool_result frame missing duration_ms: %v", msg)
+	}
+}

@@ -474,6 +474,46 @@ Response to `ping`.
 }
 ```
 
+#### `agent_thinking`
+
+Full model thinking text for a backend task (`llm-` reply contexts, requires the
+`agent_trace` capability). Emitted once per completed reasoning chunk; content is
+byte-capped at 64KB, never summarized. The adapter is responsible for gating any
+user-facing exposure of this data.
+
+```json
+{
+  "type": "agent_thinking",
+  "session_key": "feishu:ou_123",
+  "reply_ctx": "llm-ab12cd34",
+  "trace_id": "trace-001",
+  "content": "Full reasoning text...",
+  "occurred_at": "2026-09-03T12:00:00.123456789Z"
+}
+```
+
+#### `agent_trace`
+
+Redacted tool trace for a backend task (`llm-` reply contexts, requires the
+`agent_trace` capability). Pairing `tool_use` / `tool_result` frames share a
+`trace_id`; `duration_ms` appears on the `tool_result` frame when the pair is
+matched.
+
+```json
+{
+  "type": "agent_trace",
+  "session_key": "feishu:ou_123",
+  "reply_ctx": "llm-ab12cd34",
+  "trace_id": "trace-001",
+  "event_type": "tool_use",
+  "tool_name": "shell",
+  "input": "truncated tool input (8KB cap)",
+  "output": "truncated tool output (2KB cap)",
+  "status": "success",
+  "occurred_at": "2026-09-03T12:00:00.123456789Z"
+}
+```
+
 #### `error`
 
 Notify the adapter of a server-side error.

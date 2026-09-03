@@ -426,6 +426,18 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 		return nil
 	}
 	now := time.Now().UTC()
+	// Model thinking rides a dedicated frame so the backend can persist and
+	// gate it independently of tool traces. Content is capped, not summarized.
+	if event.Type == EventThinking {
+		return bp.server.sendToAdapter(rc.Platform, map[string]any{
+			"type":        "agent_thinking",
+			"session_key": rc.SessionKey,
+			"reply_ctx":   rc.ReplyCtx,
+			"trace_id":    event.TraceID,
+			"content":     truncateBridgeTrace(event.Content, 65536),
+			"occurred_at": now.Format(time.RFC3339Nano),
+		})
+	}
 	key := rc.ReplyCtx + ":" + event.TraceID
 	var durationMs int64
 	if event.Type == EventToolUse {

@@ -4753,10 +4753,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		buildResolvedRichCard := func(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string {
 			return richCardSupporter.BuildRichCard(status, title, steps, resolveRichCardMarkdown(markdown, !streaming), streaming, statusFooter)
 		}
-		if reporter, ok := p.(AgentTraceReporter); ok && (event.Type == EventToolUse || event.Type == EventToolResult) {
+		// Backend task channels (bridge llm- reply contexts) also receive full
+		// model thinking. This bypasses DisplayCfg on purpose: ThinkingMessages /
+		// ThinkingMaxLen only govern messaging-platform rendering; user-facing
+		// visibility of thinking is gated by the backend adapter downstream.
+		if reporter, ok := p.(AgentTraceReporter); ok && (event.Type == EventToolUse || event.Type == EventToolResult ||
+			(event.Type == EventThinking && !isEllipsisOnly(event.Content))) {
 			trace := AgentTraceEvent{TraceID: event.TraceID, Type: event.Type, ToolName: event.ToolName,
 				Input: event.ToolInput, Output: event.ToolResult, Status: event.ToolStatus,
 				ExitCode: event.ToolExitCode, Success: event.ToolSuccess}
+			if event.Type == EventThinking {
+				trace.Content = event.Content
+			}
 			if trace.Output == "" {
 				trace.Output = event.Content
 			}
