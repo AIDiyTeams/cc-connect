@@ -1083,45 +1083,27 @@ func TestBridge_TokenStreamReplyStream(t *testing.T) {
 	}
 }
 
-func TestBridge_LlmTaskKeepsCoarseUpdateMessage(t *testing.T) {
+func TestBridge_LlmTaskStreamsPublicReplyText(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
 	conn := dialWS(t, wsURL, nil)
 	register(t, conn, "java-backend", []string{"text", "preview", "token_stream", "update_message"})
 
 	bp := bs.NewPlatform("proj")
 	rc := newBridgeReplyCtx(bs.getAdapter("java-backend"), "java-backend:tn:1", "llm-task-1")
-	if rc.tokenStream {
-		t.Fatal("llm- reply_ctx must NOT enable tokenStream (keep coarse LLM Task path)")
+	if !rc.tokenStream {
+		t.Fatal("llm- reply_ctx should enable tokenStream for public task text")
 	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		msg := readMsg(t, conn)
-		if msg["type"] != "preview_start" {
-			errCh <- fmt.Errorf("expected preview_start, got %v", msg["type"])
-			return
-		}
-		refID, _ := msg["ref_id"].(string)
-		if err := conn.WriteJSON(map[string]any{
-			"type":           "preview_ack",
-			"ref_id":         refID,
-			"preview_handle": "ph-llm-1",
-		}); err != nil {
-			errCh <- err
-			return
-		}
-		errCh <- nil
-	}()
 
 	handle, err := bp.SendPreviewStart(context.Background(), rc, "Hi")
 	if err != nil {
 		t.Fatalf("SendPreviewStart: %v", err)
 	}
-	if err := <-errCh; err != nil {
-		t.Fatal(err)
+	msg := readMsg(t, conn)
+	if msg["type"] != "reply_stream" || msg["full_text"] != "Hi" {
+		t.Fatalf("first frame=%v", msg)
 	}
 	h, ok := handle.(*bridgeReplyCtx)
-	if !ok || h.PreviewHandle != "ph-llm-1" {
+	if !ok {
 		t.Fatalf("handle=%#v", handle)
 	}
 	if h.ReplyCtx != "llm-task-1" {
@@ -1135,15 +1117,15 @@ func TestBridge_LlmTaskKeepsCoarseUpdateMessage(t *testing.T) {
 	if err := bp.UpdateMessage(context.Background(), handle, "Hi there"); err != nil {
 		t.Fatalf("UpdateMessage: %v", err)
 	}
-	msg := readMsg(t, conn)
-	if msg["type"] != "update_message" {
-		t.Fatalf("LLM Task update type=%v want update_message (coarse)", msg["type"])
+	msg = readMsg(t, conn)
+	if msg["type"] != "reply_stream" {
+		t.Fatalf("LLM Task update type=%v want reply_stream", msg["type"])
 	}
 	if msg["reply_ctx"] != "llm-task-1" {
 		t.Fatalf("reply_ctx=%v", msg["reply_ctx"])
 	}
-	if msg["content"] != "Hi there" {
-		t.Fatalf("content=%v", msg["content"])
+	if msg["full_text"] != "Hi there" || msg["delta"] != " there" {
+		t.Fatalf("stream frame=%v", msg)
 	}
 
 	if err := bp.CompleteStream(context.Background(), handle, "Hi there"); err != nil {

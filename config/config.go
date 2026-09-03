@@ -1092,10 +1092,10 @@ func EffectiveWorkspaceShare(proj *ProjectConfig) WorkspaceShareConfig {
 }
 
 // EffectiveBridgeTokenStreamPrefixes returns reply_ctx prefixes that enable
-// by-token reply_stream. Empty config → ["cmsg-"] for Tomako Studio compatibility.
+// by-token reply_stream. Empty config → Studio and public LLM task prefixes.
 func EffectiveBridgeTokenStreamPrefixes(cfg *Config) []string {
 	if cfg == nil || len(cfg.Bridge.TokenStreamReplyPrefixes) == 0 {
-		return []string{"cmsg-"}
+		return []string{"cmsg-", "llm-"}
 	}
 	out := make([]string, 0, len(cfg.Bridge.TokenStreamReplyPrefixes))
 	for _, p := range cfg.Bridge.TokenStreamReplyPrefixes {
@@ -1105,7 +1105,7 @@ func EffectiveBridgeTokenStreamPrefixes(cfg *Config) []string {
 		}
 	}
 	if len(out) == 0 {
-		return []string{"cmsg-"}
+		return []string{"cmsg-", "llm-"}
 	}
 	return out
 }

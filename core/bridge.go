@@ -252,14 +252,14 @@ func newBridgeServer(port int, token, path string, corsOrigins []string, insecur
 		path:                     path,
 		corsOrigins:              corsOrigins,
 		insecure:                 insecure,
-		tokenStreamReplyPrefixes: []string{"cmsg-"},
+		tokenStreamReplyPrefixes: []string{"cmsg-", "llm-"},
 		adapters:                 make(map[string]*bridgeAdapter),
 		engines:                  make(map[string]*bridgeEngineRef),
 	}
 }
 
 // SetTokenStreamReplyPrefixes configures which reply_ctx prefixes enable
-// by-token reply_stream. Empty keeps the default ["cmsg-"].
+// by-token reply_stream. Empty keeps the default ["cmsg-", "llm-"].
 func (bs *BridgeServer) SetTokenStreamReplyPrefixes(prefixes []string) {
 	if bs == nil {
 		return
@@ -272,7 +272,7 @@ func (bs *BridgeServer) SetTokenStreamReplyPrefixes(prefixes []string) {
 		}
 	}
 	if len(cleaned) == 0 {
-		cleaned = []string{"cmsg-"}
+		cleaned = []string{"cmsg-", "llm-"}
 	}
 	bs.tokenStreamReplyPrefixes = cleaned
 }
@@ -619,7 +619,7 @@ func newBridgeReplyCtx(a *bridgeAdapter, sessionKey, replyCtx string) *bridgeRep
 	}
 	rc.Platform = a.platform
 	// Token-stream path is selected by configurable reply_ctx prefixes
-	// (default cmsg- for Tomako Studio). Other backends set bridge.token_stream_reply_prefixes
+	// (default cmsg- and llm- for Studio and public LLM task text). Other backends set bridge.token_stream_reply_prefixes
 	// or adapter metadata token_stream_reply_prefixes.
 	rc.tokenStream = a.capabilities["token_stream"] && bridgeReplyCtxMatchesTokenStream(a, replyCtx)
 	rc.progressStyle = bridgeProgressStyleForAdapter(a)
@@ -628,7 +628,7 @@ func newBridgeReplyCtx(a *bridgeAdapter, sessionKey, replyCtx string) *bridgeRep
 }
 
 func bridgeReplyCtxMatchesTokenStream(a *bridgeAdapter, replyCtx string) bool {
-	prefixes := []string{"cmsg-"}
+	prefixes := []string{"cmsg-", "llm-"}
 	if a != nil && a.server != nil && len(a.server.tokenStreamReplyPrefixes) > 0 {
 		prefixes = a.server.tokenStreamReplyPrefixes
 	}
