@@ -3,7 +3,7 @@
 # Tomako delivery gates
 
 - The sole operational delivery policy is the adjacent `tomako-dev-skills/docs/DELIVERY_GOVERNANCE.md`. This repository guide owns Go architecture and tests only.
-- CC Connect currently has no approved automatic test or production deployment path. Code may be committed and pushed only to this repository's `main`; do not push `test`, invoke `tomako-deployer`, use GitHub Actions, expand to a workspace release, connect through SSH, or replace services manually.
+- Delivery follows the workspace `tomako-dev-skills/docs/DELIVERY_GOVERNANCE.md`. cc-connect is a routed controller component (since 2026-09): develop on the contributor's fixed branch, freeze a pushed SHA, and promote to `test` (the controller deploys `cc-connect@test.service` and runs the management-status health gate). Production requires review plus a deliberate `main` push (deploys `cc-connect@prod.service`). Do not bypass the controller via GitHub Actions, SSH, or manual service replacement.
 - If this work also changes `Tomako-portal`, the backend commit must by default be deployed to backend `test`, verified by exact runtime revision and health, and exercised through local frontend against `https://test.tomako.ai` before nontechnical acceptance. Only an explicit development/review-only instruction may defer this gate.
 - Use the parent `docs/architecture/domain-responsibility.md` for ownership questions. Ordinary implementation, testing, diagnosis, and documented delivery may proceed while recording assumptions and validation gaps. Only a genuinely new or conflicting domain boundary needs a product-owner architecture decision.
 
