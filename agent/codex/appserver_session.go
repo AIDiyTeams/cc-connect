@@ -2198,6 +2198,20 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		if strings.TrimSpace(text) == "" {
 			return
 		}
+		if len(s.outputSchema()) > 0 {
+			// Schema-constrained progress may also look like JSON. The native
+			// phase, not its shape, identifies the terminal structured answer.
+			switch item["phase"] {
+			case "commentary":
+				s.emit(core.Event{Type: core.EventThinking, Content: text})
+				return
+			case "final_answer":
+				s.flushPendingAsThinking()
+				s.emit(core.Event{Type: core.EventText, Content: text})
+				return
+			}
+			// Older providers omit phase; retain the tool-boundary fallback.
+		}
 		itemID, _ := item["id"].(string)
 		s.stateMu.Lock()
 		streamed, wasStreamed := "", false
@@ -2537,6 +2551,11 @@ func (s *appServerSession) completeTurn(turnID string, turnErr error) {
 // them nor demotes them to thinking when a tool call follows.
 func (s *appServerSession) handleAgentMessageDelta(itemID, delta string) {
 	if delta == "" {
+		return
+	}
+	// Deltas do not carry the final/commentary phase. Structured tasks wait
+	// for item/completed so progress cannot contaminate the terminal JSON.
+	if len(s.outputSchema()) > 0 {
 		return
 	}
 	prefix := ""
