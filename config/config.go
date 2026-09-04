@@ -153,6 +153,7 @@ type WebhookConfig struct {
 
 // BridgeConfig controls the WebSocket bridge for external platform adapters.
 type BridgeConfig struct {
+	Host        string   `toml:"host,omitempty"`         // empty preserves all-interface binding
 	Enabled     *bool    `toml:"enabled"`                // default false
 	Port        int      `toml:"port,omitempty"`         // listen port; default 9810
 	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required unless insecure=true
@@ -219,6 +220,7 @@ type HookConfig struct {
 
 // ManagementConfig controls the HTTP Management API for external tools.
 type ManagementConfig struct {
+	Host        string   `toml:"host,omitempty"`         // use 127.0.0.1 for local development
 	Enabled     *bool    `toml:"enabled"`                // default false
 	Port        int      `toml:"port,omitempty"`         // listen port; default 9820
 	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required

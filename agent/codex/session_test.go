@@ -71,6 +71,87 @@ func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestCodexSession_NativeSchemaFileLivesUntilProcessExitAndDoesNotLeakToNextTurn(t *testing.T) {
+	workDir := t.TempDir()
+	argsFile := filepath.Join(workDir, "args.txt")
+	copyFile := filepath.Join(workDir, "schema-copy.json")
+	writeFakeCodexScript(t, workDir, `#!/bin/sh
+printf '%s\n' "$@" > "$CODEX_ARGS_FILE"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-schema" ]; then
+    shift
+    cat "$1" > "$CODEX_SCHEMA_COPY"
+  fi
+  shift
+done
+`, `$a = @(fakeCodexArgs)
+[IO.File]::WriteAllLines($env:CODEX_ARGS_FILE, $a)
+for ($i=0; $i -lt $a.Count; $i++) {
+  if ($a[$i] -eq '--output-schema') { [IO.File]::Copy($a[$i+1], $env:CODEX_SCHEMA_COPY, $true) }
+}
+`)
+	bin := filepath.Join(workDir, "codex")
+	if runtime.GOOS == "windows" {
+		bin += ".cmd"
+	}
+	cs, err := newCodexSession(context.Background(), bin, nil, workDir, "default", "low", "suggest", "", "",
+		[]string{"CODEX_ARGS_FILE=" + argsFile, "CODEX_SCHEMA_COPY=" + copyFile}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	schema := json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}`)
+	if err := cs.SetSessionRuntime(core.SessionRuntime{GatewayModel: "tomako/gpt-5.6-sol", ReasoningEffort: "high", WebSearch: "live", OutputSchema: schema}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.Send("stage input", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	cs.wg.Wait()
+	got, err := os.ReadFile(copyFile)
+	if err != nil || string(got) != string(schema) {
+		t.Fatalf("child did not read exact native schema: %s, %v", got, err)
+	}
+	args := waitForArgsFile(t, argsFile)
+	if !containsSequence(args, []string{"-c", `model_reasoning_effort="high"`}) || !containsSequence(args, []string{"-c", `web_search="live"`}) {
+		t.Fatalf("runtime args missing: %v", args)
+	}
+	var schemaPath string
+	for i, arg := range args {
+		if arg == "--output-schema" {
+			schemaPath = args[i+1]
+		}
+	}
+	if schemaPath == "" {
+		t.Fatal("missing --output-schema")
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(schemaPath); os.IsNotExist(err) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := os.Stat(schemaPath); !os.IsNotExist(err) {
+		t.Fatalf("temporary schema leaked: %v", err)
+	}
+	if err := cs.SetSessionRuntime(core.SessionRuntime{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.Send("ordinary task", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	cs.wg.Wait()
+	for _, arg := range waitForArgsFile(t, argsFile) {
+		if arg == "--output-schema" {
+			t.Fatal("schema leaked into next task")
+		}
+	}
+	if err := cs.SetSessionRuntime(core.SessionRuntime{OutputSchema: json.RawMessage(`[]`)}); err == nil {
+		t.Fatal("invalid schema accepted")
+	}
+}
+
 func TestBuildExecArgs_IncludesBaseURL(t *testing.T) {
 	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "o3", "high", "full-auto", "", "https://custom.api.example.com", nil, "")
 	if err != nil {

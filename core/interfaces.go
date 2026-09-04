@@ -516,6 +516,12 @@ type SessionRuntimeConfigurer interface {
 	SetSessionRuntime(runtime SessionRuntime) error
 }
 
+// NativeOutputSchemaSession opts into enforcing Runtime.OutputSchema in the
+// model runtime, rather than treating the schema as instructions in the prompt.
+type NativeOutputSchemaSession interface {
+	SupportsOutputSchema() bool
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"

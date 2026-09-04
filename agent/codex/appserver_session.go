@@ -85,7 +85,15 @@ type itemNotification struct {
 }
 
 type errorNotification struct {
-	Message string `json:"message"`
+	// Current app-server versions nest the message in error. Keep the legacy
+	// top-level message for older transports, but never terminate on a retry.
+	Message   string `json:"message"`
+	ThreadID  string `json:"threadId"`
+	TurnID    string `json:"turnId"`
+	WillRetry bool   `json:"willRetry"`
+	Error     *struct {
+		Message string `json:"message"`
+	} `json:"error"`
 }
 
 type appServerRateLimitsResponse struct {
@@ -441,6 +449,9 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	if searchMode := s.getWebSearch(); searchMode != "" {
 		config["web_search"] = searchMode
 	}
+	if effort := s.GetReasoningEffort(); effort != "" {
+		config["model_reasoning_effort"] = effort
+	}
 	if s.isBrandAnalysisRuntime() {
 		params["dynamicTools"] = brandAnalysisDynamicTools()
 	}
@@ -476,7 +487,11 @@ func (s *appServerSession) applyThreadRuntimeState(workDir, model string, effort
 	if m := strings.TrimSpace(model); m != "" {
 		s.model = m
 	}
-	s.effort = normalizeRuntimeReasoningEffort(stringValue(effort))
+	if forced := strings.TrimSpace(s.runtime.ReasoningEffort); forced != "" {
+		s.effort = normalizeRuntimeReasoningEffort(forced)
+	} else {
+		s.effort = normalizeRuntimeReasoningEffort(stringValue(effort))
+	}
 }
 
 func (s *appServerSession) refreshUsage(ctx context.Context) error {
@@ -574,6 +589,9 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	if effort := s.GetReasoningEffort(); effort != "" {
 		params["effort"] = effort
 	}
+	if schema := s.outputSchema(); len(schema) > 0 {
+		params["outputSchema"] = schema
+	}
 	if metadata := s.responsesAPIClientMetadata(); len(metadata) > 0 {
 		params["responsesapiClientMetadata"] = metadata
 	}
@@ -611,6 +629,10 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	if !s.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
+	if err := core.ValidateOutputSchema(runtime.OutputSchema); err != nil {
+		return err
+	}
+	runtime.OutputSchema = append(json.RawMessage(nil), runtime.OutputSchema...)
 	s.runtimeMu.Lock()
 	previousEnvFile := s.taskRuntimeEnvFile
 	envFile, err := updateTaskRuntimeEnv(s.taskRuntimeEnvFile, runtime)
@@ -619,6 +641,7 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 		return err
 	}
 	s.taskRuntimeEnvFile = envFile
+	searchChanged := s.webSearch != normalizeWebSearch(runtime.WebSearch)
 	s.runtime = runtime
 	if model := strings.TrimSpace(runtime.GatewayModel); model != "" {
 		s.model = model
@@ -655,7 +678,7 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	// brand-analysis tool mode so the model sees exactly the tools for this turn.
 	wantsBrandTools := strings.EqualFold(strings.TrimSpace(runtime.Scene), "brand_analysis")
 	s.threadMu.Lock()
-	if s.CurrentSessionID() != "" && s.threadBrandTools != wantsBrandTools {
+	if s.CurrentSessionID() != "" && (s.threadBrandTools != wantsBrandTools || searchChanged) {
 		s.threadID.Store("")
 		s.resumeID = ""
 	}
@@ -668,6 +691,15 @@ func (s *appServerSession) currentTaskRuntimeEnvFile() string {
 	defer s.runtimeMu.RUnlock()
 	return s.taskRuntimeEnvFile
 }
+
+func (s *appServerSession) SupportsOutputSchema() bool { return true }
+
+func (s *appServerSession) outputSchema() json.RawMessage {
+	s.runtimeMu.RLock()
+	defer s.runtimeMu.RUnlock()
+	return append(json.RawMessage(nil), s.runtime.OutputSchema...)
+}
+
 func (s *appServerSession) getWebSearch() string {
 	s.runtimeMu.RLock()
 	defer s.runtimeMu.RUnlock()
@@ -2019,7 +2051,17 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 	case "turn/completed":
 		var notif turnNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
-			s.completeTurn()
+			if notif.ThreadID != "" && notif.ThreadID != s.CurrentSessionID() {
+				return
+			}
+			var turnErr error
+			switch {
+			case notif.Turn.Error != nil && strings.TrimSpace(notif.Turn.Error.Message) != "":
+				turnErr = fmt.Errorf("codex app-server turn failed: %s", notif.Turn.Error.Message)
+			case notif.Turn.Status == "failed", notif.Turn.Status == "interrupted":
+				turnErr = fmt.Errorf("codex app-server turn %s", notif.Turn.Status)
+			}
+			s.completeTurn(notif.Turn.ID, turnErr)
 		}
 
 	case "turn/plan/updated":
@@ -2057,16 +2099,8 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		}
 
 	case "thread/status/changed":
-		var notif struct {
-			ThreadID string `json:"threadId"`
-			Status   struct {
-				Type string `json:"type"`
-			} `json:"status"`
-		}
-		if err := json.Unmarshal(paramsRaw, &notif); err == nil && notif.Status.Type == "idle" {
-			// In codex 0.125+, thread going idle signals turn completion.
-			s.completeTurn()
-		}
+		// Idle describes thread activity, not success. Only turn/completed
+		// carries the authoritative completed/failed/interrupted outcome.
 
 	case "account/rateLimits/updated":
 		var notif appServerRateLimitsResponse
@@ -2082,8 +2116,26 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 
 	case "error":
 		var notif errorNotification
-		if err := json.Unmarshal(paramsRaw, &notif); err == nil && strings.TrimSpace(notif.Message) != "" {
-			s.emitError(fmt.Errorf("%s", notif.Message))
+		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
+			if notif.ThreadID != "" && notif.ThreadID != s.CurrentSessionID() {
+				return
+			}
+			if notif.WillRetry {
+				slog.Warn("codex app-server retrying after transient error", "turn_id", notif.TurnID)
+				return
+			}
+			message := notif.Message
+			if notif.Error != nil {
+				message = notif.Error.Message
+			}
+			if strings.TrimSpace(message) != "" {
+				failure := fmt.Errorf("codex app-server: %s", message)
+				if notif.TurnID == "" {
+					s.emitError(failure)
+				} else {
+					s.completeTurn(notif.TurnID, failure)
+				}
+			}
 		}
 	}
 }
@@ -2461,14 +2513,21 @@ func rpcIDToInt64(v any) (int64, bool) {
 	return 0, false
 }
 
-func (s *appServerSession) completeTurn() {
+func (s *appServerSession) completeTurn(turnID string, turnErr error) {
 	s.stateMu.Lock()
-	if s.currentTurn == "" {
+	if s.currentTurn == "" || (turnID != "" && turnID != s.currentTurn) {
 		s.stateMu.Unlock()
 		return
 	}
 	s.currentTurn = ""
+	if turnErr != nil {
+		s.pendingMsgs = s.pendingMsgs[:0]
+	}
 	s.stateMu.Unlock()
+	if turnErr != nil {
+		s.emitError(turnErr)
+		return
+	}
 	s.flushPendingAsText()
 	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
 }

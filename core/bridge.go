@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -25,6 +26,7 @@ import (
 // A single instance is created globally; each project engine receives a
 // lightweight BridgePlatform handle that delegates to this server.
 type BridgeServer struct {
+	host        string
 	port        int
 	token       string
 	path        string
@@ -293,6 +295,9 @@ func (bs *BridgeServer) RegisterEngine(projectName string, engine *Engine, bp *B
 	bs.engines[projectName] = &bridgeEngineRef{engine: engine, platform: bp}
 }
 
+// SetHost selects the bind address before Start. Empty preserves the default.
+func (bs *BridgeServer) SetHost(host string) { bs.host = strings.TrimSpace(host) }
+
 // Start launches the HTTP/WebSocket server.
 func (bs *BridgeServer) Start() {
 	mux := http.NewServeMux()
@@ -302,7 +307,7 @@ func (bs *BridgeServer) Start() {
 	mux.HandleFunc("/bridge/sessions", bs.corsHTTP(bs.authHTTP(bs.handleSessions)))
 	mux.HandleFunc("/bridge/sessions/", bs.corsHTTP(bs.authHTTP(bs.handleSessionRoutes)))
 
-	addr := fmt.Sprintf(":%d", bs.port)
+	addr := net.JoinHostPort(bs.host, strconv.Itoa(bs.port))
 	bs.server = &http.Server{Addr: addr, Handler: mux}
 
 	go func() {
@@ -1356,7 +1361,10 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 	bs.adapters[reg.Platform] = adapter
 	bs.mu.Unlock()
 
-	if err := writeJSON(conn, &adapter.writeMu, map[string]any{"type": "register_ack", "ok": true}); err != nil {
+	if err := writeJSON(conn, &adapter.writeMu, map[string]any{
+		"type": "register_ack", "ok": true,
+		"runtime_capabilities": []string{"output_schema_v1", "turn_budget_v1"},
+	}); err != nil {
 		slog.Debug("bridge: write register ack failed", "error", err)
 		return
 	}

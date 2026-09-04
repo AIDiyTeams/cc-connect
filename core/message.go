@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -227,6 +228,11 @@ type SessionRuntime struct {
 	MachineCapabilityToken   string `json:"machine_capability_token,omitempty"`
 	ImageCapabilityToken     string `json:"image_capability_token,omitempty"`
 	TaskAuthorityEnvelopeB64 string `json:"task_authority_envelope_b64,omitempty"`
+	// OutputSchema is supplied by the authenticated control plane, never parsed
+	// from user prose. A session must explicitly support native constrained output.
+	OutputSchema json.RawMessage `json:"output_schema,omitempty"`
+	// Trusted per-turn deadline; 0 keeps the engine default, 1..3600 seconds is bounded.
+	TurnBudgetSeconds int `json:"turn_budget_seconds,omitempty"`
 }
 
 // EventType distinguishes different kinds of agent output.

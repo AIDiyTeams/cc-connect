@@ -64,6 +64,10 @@ func register(t *testing.T, conn *websocket.Conn, platform string, caps []string
 	if ack["ok"] != true {
 		t.Fatalf("register failed: %v", ack["error"])
 	}
+	capsOut, _ := ack["runtime_capabilities"].([]any)
+	if len(capsOut) != 2 || capsOut[0] != "output_schema_v1" || capsOut[1] != "turn_budget_v1" {
+		t.Fatalf("missing constrained output capability: %#v", ack)
+	}
 }
 
 func registerWithMetadata(t *testing.T, conn *websocket.Conn, platform string, caps []string, metadata map[string]any) {
@@ -1132,57 +1136,61 @@ func TestBridge_SessionMissingParams(t *testing.T) {
 }
 
 func TestBridge_TokenStreamReplyStream(t *testing.T) {
-	bs, wsURL := startTestBridge(t, "")
-	conn := dialWS(t, wsURL, nil)
-	register(t, conn, "java-backend", []string{"text", "preview", "token_stream", "update_message"})
+	for _, replyCtx := range []string{"cmsg-abc", "llm-task-1"} {
+		t.Run(replyCtx, func(t *testing.T) {
+			bs, wsURL := startTestBridge(t, "")
+			conn := dialWS(t, wsURL, nil)
+			register(t, conn, "java-backend", []string{"text", "preview", "token_stream", "update_message"})
 
-	bp := bs.NewPlatform("proj")
-	rc := newBridgeReplyCtx(bs.getAdapter("java-backend"), "java-backend:tn:1:project:p1", "cmsg-abc")
-	if !rc.tokenStream {
-		t.Fatal("cmsg- reply_ctx should enable tokenStream when capability present")
-	}
+			bp := bs.NewPlatform("proj")
+			rc := newBridgeReplyCtx(bs.getAdapter("java-backend"), "java-backend:tn:1:project:p1", replyCtx)
+			if !rc.tokenStream {
+				t.Fatal("registered reply_ctx should enable tokenStream when capability present")
+			}
 
-	handle, err := bp.SendPreviewStart(context.Background(), rc, "Hel")
-	if err != nil {
-		t.Fatalf("SendPreviewStart: %v", err)
-	}
-	msg := readMsg(t, conn)
-	if msg["type"] != "reply_stream" {
-		t.Fatalf("first frame type=%v want reply_stream", msg["type"])
-	}
-	if msg["reply_ctx"] != "cmsg-abc" {
-		t.Fatalf("reply_ctx=%v want cmsg-abc (must not be overwritten by preview handle)", msg["reply_ctx"])
-	}
-	if msg["full_text"] != "Hel" {
-		t.Fatalf("full_text=%v", msg["full_text"])
-	}
-	if msg["done"] == true {
-		t.Fatal("first frame should not be done")
-	}
+			handle, err := bp.SendPreviewStart(context.Background(), rc, "Hel")
+			if err != nil {
+				t.Fatalf("SendPreviewStart: %v", err)
+			}
+			msg := readMsg(t, conn)
+			if msg["type"] != "reply_stream" {
+				t.Fatalf("first frame type=%v want reply_stream", msg["type"])
+			}
+			if msg["reply_ctx"] != replyCtx {
+				t.Fatalf("reply_ctx=%v must preserve the original reply_ctx (not preview handle)", msg["reply_ctx"])
+			}
+			if msg["full_text"] != "Hel" {
+				t.Fatalf("full_text=%v", msg["full_text"])
+			}
+			if msg["done"] == true {
+				t.Fatal("first frame should not be done")
+			}
 
-	if err := bp.UpdateMessage(context.Background(), handle, "Hello"); err != nil {
-		t.Fatalf("UpdateMessage: %v", err)
-	}
-	msg = readMsg(t, conn)
-	if msg["type"] != "reply_stream" {
-		t.Fatalf("update frame type=%v", msg["type"])
-	}
-	if msg["delta"] != "lo" {
-		t.Fatalf("delta=%v want lo", msg["delta"])
-	}
-	if msg["full_text"] != "Hello" {
-		t.Fatalf("full_text=%v", msg["full_text"])
-	}
+			if err := bp.UpdateMessage(context.Background(), handle, "Hello"); err != nil {
+				t.Fatalf("UpdateMessage: %v", err)
+			}
+			msg = readMsg(t, conn)
+			if msg["type"] != "reply_stream" {
+				t.Fatalf("update frame type=%v", msg["type"])
+			}
+			if msg["delta"] != "lo" {
+				t.Fatalf("delta=%v want lo", msg["delta"])
+			}
+			if msg["full_text"] != "Hello" {
+				t.Fatalf("full_text=%v", msg["full_text"])
+			}
 
-	if err := bp.CompleteStream(context.Background(), handle, "Hello"); err != nil {
-		t.Fatalf("CompleteStream: %v", err)
-	}
-	msg = readMsg(t, conn)
-	if msg["type"] != "reply_stream" || msg["done"] != true {
-		t.Fatalf("done frame=%v", msg)
-	}
-	if msg["reply_ctx"] != "cmsg-abc" {
-		t.Fatalf("done reply_ctx=%v", msg["reply_ctx"])
+			if err := bp.CompleteStream(context.Background(), handle, "Hello"); err != nil {
+				t.Fatalf("CompleteStream: %v", err)
+			}
+			msg = readMsg(t, conn)
+			if msg["type"] != "reply_stream" || msg["done"] != true {
+				t.Fatalf("done frame=%v", msg)
+			}
+			if msg["reply_ctx"] != replyCtx {
+				t.Fatalf("done reply_ctx=%v", msg["reply_ctx"])
+			}
+		})
 	}
 }
 
@@ -1287,15 +1295,15 @@ func TestBridge_PlatformReportsInteractionResponseStatusWithoutReply(t *testing.
 	}
 }
 
-func TestBridge_LlmTaskKeepsCoarseUpdateMessage(t *testing.T) {
+func TestBridge_LlmTaskWithoutTokenStreamKeepsCoarseUpdateMessage(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
 	conn := dialWS(t, wsURL, nil)
-	register(t, conn, "java-backend", []string{"text", "preview", "token_stream", "update_message"})
+	register(t, conn, "java-backend", []string{"text", "preview", "update_message"})
 
 	bp := bs.NewPlatform("proj")
 	rc := newBridgeReplyCtx(bs.getAdapter("java-backend"), "java-backend:tn:1", "llm-task-1")
 	if rc.tokenStream {
-		t.Fatal("llm- reply_ctx must NOT enable tokenStream (keep coarse LLM Task path)")
+		t.Fatal("llm- reply_ctx must not enable tokenStream when the adapter lacks that capability")
 	}
 
 	errCh := make(chan error, 1)

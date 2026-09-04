@@ -5,6 +5,29 @@
 
 ## Overview
 
+### Native constrained output (optional runtime capability)
+
+Successful `register_ack` responses advertise `runtime_capabilities: ["output_schema_v1", "turn_budget_v1"]`.
+This advertises protocol support; the selected Agent session is checked independently before
+dispatch. Adapters requiring constrained output must refuse an older Bridge without the capability.
+
+An authenticated adapter may include `runtime.output_schema`, a JSON Schema object (root
+`type: "object"`, at most 128 KiB). It is trusted control-plane metadata, never inferred from
+the prompt. Invalid schemas and unsupported Agent sessions fail explicitly; there is no
+prompt-only fallback. Omit it for ordinary turns. Each turn replaces the prior schema.
+
+The Codex app-server backend sends the unchanged object as `turn/start.outputSchema`.
+The exec backend writes a private per-process schema file, passes `--output-schema`, and removes
+the file after process exit or launch failure. Task-scoped `reasoning_effort` is applied by both
+backends; thread creation must not replace it with a model default. Existing permissions profiles
+remain in force, and this capability grants no additional file, network, or publishing permission.
+
+The authenticated adapter can also supply `runtime.turn_budget_seconds` with
+`turn_budget_v1`: 1–3600 seconds selects that turn's bounded wall-clock budget;
+0 or omission keeps the engine default. Invalid budgets fail before Agent.Send.
+It is replaced on every queued or foreground turn and does not alter ordinary
+chat defaults. Adapters requiring this budget must refuse an older Bridge.
+
 The Bridge Protocol allows **external platform adapters** written in any programming language to connect to cc-connect at runtime via WebSocket. This eliminates the requirement to write Go code and recompile the binary for every new platform integration.
 
 ### Architecture
@@ -55,6 +78,7 @@ The port and path are configured in `config.toml`:
 [bridge]
 enabled = true
 port = 9810
+host = "127.0.0.1"        # optional; omit to preserve all-interface binding
 path = "/bridge/ws"       # optional, default "/bridge/ws"
 token = "your-secret"     # required for authentication
 ```

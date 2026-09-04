@@ -1925,7 +1925,7 @@ func TestEffectiveWorkspaceShareFactoryOverride(t *testing.T) {
 }
 
 func TestEffectiveBridgeTokenStreamPrefixes(t *testing.T) {
-	if got := EffectiveBridgeTokenStreamPrefixes(nil); len(got) != 1 || got[0] != "cmsg-" {
+	if got := EffectiveBridgeTokenStreamPrefixes(nil); len(got) != 2 || got[0] != "cmsg-" || got[1] != "llm-" {
 		t.Fatalf("default = %v", got)
 	}
 	cfg := &Config{Bridge: BridgeConfig{TokenStreamReplyPrefixes: []string{"chat-", " job-"}}}

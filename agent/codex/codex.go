@@ -561,6 +561,17 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 		"mode":    a.mode,
 		"backend": a.backend,
 	}
+	if len(a.configEnv) > 0 {
+		// Brand agents need the same callback/Skill configuration. Never copy
+		// sessionEnv here: it can contain another task's authority or overrides.
+		env := make(map[string]string, len(a.configEnv))
+		for _, entry := range a.configEnv {
+			if key, value, ok := strings.Cut(entry, "="); ok {
+				env[key] = value
+			}
+		}
+		opts["env"] = env
+	}
 	if a.model != "" {
 		opts["model"] = a.model
 	}

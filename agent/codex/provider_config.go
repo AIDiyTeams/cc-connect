@@ -62,7 +62,9 @@ func ensureCodexAuth(codexHome, apiKey string) error {
 	if err != nil {
 		return fmt.Errorf("codex: marshal auth.json: %w", err)
 	}
-	if err := os.WriteFile(authPath, append(data, '\n'), 0o600); err != nil {
+	// Inherited auth may be a symlink to the developer's global login. Rename
+	// a private file over the link; never follow it and overwrite that login.
+	if err := writeFileAtomic(authPath, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("codex: write auth.json: %w", err)
 	}
 	slog.Debug("codex: wrote auth.json", "path", authPath)
@@ -239,6 +241,7 @@ func extractTrustOnly(config string) string {
 				strings.HasPrefix(trimmed, "model =") ||
 				strings.HasPrefix(trimmed, "model_reasoning_effort") ||
 				strings.HasPrefix(trimmed, "default_permissions") ||
+				strings.HasPrefix(trimmed, "project_root_markers") ||
 				strings.HasPrefix(trimmed, "approval_policy") ||
 				strings.HasPrefix(trimmed, "sandbox_mode") ||
 				strings.HasPrefix(trimmed, "disable_response_storage") {
@@ -273,6 +276,7 @@ func extractProviderConfig(config string) string {
 				strings.HasPrefix(trimmed, "model =") ||
 				strings.HasPrefix(trimmed, "model_reasoning_effort") ||
 				strings.HasPrefix(trimmed, "default_permissions") ||
+				strings.HasPrefix(trimmed, "project_root_markers") ||
 				strings.HasPrefix(trimmed, "approval_policy") ||
 				strings.HasPrefix(trimmed, "sandbox_mode") ||
 				strings.HasPrefix(trimmed, "disable_response_storage") {

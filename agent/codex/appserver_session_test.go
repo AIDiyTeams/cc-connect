@@ -490,6 +490,10 @@ func TestAppServerSession_FencedTurnKeepsPermissionsProfile(t *testing.T) {
 		pending:            make(map[int64]chan rpcResponseEnvelope),
 	}
 	s.alive.Store(true)
+	schema := json.RawMessage(`{"type":"object","properties":{"decision":{"enum":["KEEP","REJECT"]}},"required":["decision"],"additionalProperties":false}`)
+	if err := s.SetSessionRuntime(core.SessionRuntime{OutputSchema: schema, ReasoningEffort: "high"}); err != nil {
+		t.Fatal(err)
+	}
 	s.threadID.Store("thread-42")
 
 	done := make(chan error, 1)
@@ -509,6 +513,17 @@ func TestAppServerSession_FencedTurnKeepsPermissionsProfile(t *testing.T) {
 	if request.Method != "turn/start" {
 		t.Fatalf("method = %q, want turn/start", request.Method)
 	}
+	actualSchema, err := json.Marshal(request.Params["outputSchema"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wantSchema any
+	_ = json.Unmarshal(schema, &wantSchema)
+	var gotSchema any
+	_ = json.Unmarshal(actualSchema, &gotSchema)
+	if !reflect.DeepEqual(gotSchema, wantSchema) || request.Params["effort"] != "high" {
+		t.Fatalf("native schema/effort lost: %#v", request.Params)
+	}
 	if request.Params["permissions"] != "tomako-brand-fence" || request.Params["approvalPolicy"] != "never" {
 		t.Fatalf("turn permissions = %#v", request.Params)
 	}
@@ -527,6 +542,46 @@ func TestAppServerSession_FencedTurnKeepsPermissionsProfile(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Send() did not complete")
+	}
+}
+
+func TestAppServerSession_RuntimeSchemaIsCopiedClearedAndPreservesTaskEffort(t *testing.T) {
+	s := &appServerSession{}
+	s.alive.Store(true)
+	schema := json.RawMessage(`{"type":"object"}`)
+	defer func() { removeTaskRuntimeEnv(s.currentTaskRuntimeEnvFile()) }()
+	if err := s.SetSessionRuntime(core.SessionRuntime{
+		OutputSchema: schema, WebSearch: "live", ReasoningEffort: "high",
+		TaskID: "schema-authority-test", MachineCapabilityToken: "test-capability",
+		TaskAuthorityEnvelopeB64: "test-authority",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	schema[0] = '!'
+	if string(s.outputSchema()) != `{"type":"object"}` {
+		t.Fatal("caller mutation altered active schema")
+	}
+	low := "low"
+	s.applyThreadRuntimeState("", "", &low)
+	if s.GetReasoningEffort() != "high" {
+		t.Fatal("thread creation replaced the task's high reasoning with a default")
+	}
+	config := s.threadRequestParams()["config"].(map[string]any)
+	if config["web_search"] != "live" || config["model_reasoning_effort"] != "high" {
+		t.Fatalf("thread runtime lost: %#v", config)
+	}
+	if s.currentTaskRuntimeEnvFile() == "" || config["shell_environment_policy.set.TOMAKO_TASK_ENV_FILE"] != s.currentTaskRuntimeEnvFile() || config["features.default_mode_request_user_input"] != true {
+		t.Fatal("native schema runtime replaced the trusted task environment or interaction config")
+	}
+	s.threadID.Store("search-enabled-thread")
+	if err := s.SetSessionRuntime(core.SessionRuntime{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.outputSchema()) != 0 || s.CurrentSessionID() != "" {
+		t.Fatal("previous schema or thread-scoped search leaked into next task")
+	}
+	if err := s.SetSessionRuntime(core.SessionRuntime{OutputSchema: json.RawMessage(`null`)}); err == nil {
+		t.Fatal("invalid schema accepted")
 	}
 }
 

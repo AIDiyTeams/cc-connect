@@ -340,6 +340,7 @@ type queuedMessage struct {
 
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
+	turnBudgetSeconds      int // protected by mu; replaced for every foreground/queued turn
 	agentSession           AgentSession
 	platform               Platform
 	replyCtx               any
@@ -2870,7 +2871,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
-	if !session.TryLock() {
+	if !e.tryLockSessionWithQueueState(session, interactiveKey, p, msg.ReplyCtx) {
 		// /stop removes the interactive state immediately so stale Agent events
 		// cannot reach the user, while the old processing goroutine releases the
 		// Session lock during its short asynchronous unwind. A follow-up arriving
@@ -3088,6 +3089,23 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 func (e *Engine) ensureInteractiveStateForQueueing(key string, p Platform, replyCtx any) {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
+	e.ensureQueueStateLocked(key, p, replyCtx)
+}
+
+// Publish the startup queue atomically with taking the session lock. Otherwise
+// another message can observe a busy session before its queue exists and be lost.
+func (e *Engine) tryLockSessionWithQueueState(session *Session, key string, p Platform, replyCtx any) bool {
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	if !session.TryLock() {
+		return false
+	}
+	e.ensureQueueStateLocked(key, p, replyCtx)
+	return true
+}
+
+// Caller holds interactiveMu.
+func (e *Engine) ensureQueueStateLocked(key string, p Platform, replyCtx any) {
 	if _, ok := e.interactiveStates[key]; !ok {
 		e.interactiveStates[key] = &interactiveState{
 			platform:         p,
@@ -3738,6 +3756,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.platform = p
 	state.replyCtx = msg.ReplyCtx
 	state.currentMessageID = msg.MessageID
+	state.turnBudgetSeconds = msg.Runtime.TurnBudgetSeconds
 	state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
 	state.mu.Unlock()
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
@@ -4721,11 +4740,27 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	// Max turn time: absolute wall-clock cap that does NOT reset on events.
 	// Prevents long-running tool calls from blocking the session forever (#1091).
 	var turnDeadlineCh <-chan time.Time
-	if e.maxTurnTime > 0 {
-		turnDeadlineTimer := time.NewTimer(e.maxTurnTime)
-		defer turnDeadlineTimer.Stop()
-		turnDeadlineCh = turnDeadlineTimer.C
+	var turnDeadlineTimer *time.Timer
+	var turnLimit time.Duration
+	resetTurnDeadline := func(seconds int) {
+		if turnDeadlineTimer != nil {
+			turnDeadlineTimer.Stop()
+		}
+		turnLimit = e.turnTimeLimit(seconds)
+		turnDeadlineCh = nil
+		if turnLimit > 0 {
+			turnDeadlineTimer = time.NewTimer(turnLimit)
+			turnDeadlineCh = turnDeadlineTimer.C
+		}
 	}
+	state.mu.Lock()
+	resetTurnDeadline(state.turnBudgetSeconds)
+	state.mu.Unlock()
+	defer func() {
+		if turnDeadlineTimer != nil {
+			turnDeadlineTimer.Stop()
+		}
+	}()
 
 	events := state.agentSession.Events()
 	stopCh := state.stopSignal()
@@ -4777,14 +4812,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case <-turnDeadlineCh:
 			elapsed := time.Since(turnStart)
 			slog.Warn("agent turn exceeded max_turn_time: sending stop signal, will force-kill if needed",
-				"session_key", sessionKey, "max_turn_time", e.maxTurnTime, "elapsed", elapsed)
+				"session_key", sessionKey, "max_turn_time", turnLimit, "elapsed", elapsed)
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()
 			e.failTurn(p, replyCtx, "AGENT_TURN_TIMEOUT", fmt.Sprintf(e.i18n.T(MsgError),
-				fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", e.maxTurnTime)))
+				fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", turnLimit)))
 
 			// Two-phase shutdown: first try a graceful stop so the agent can
 			// write its final state before dying (preserves --resume ability).
@@ -5864,6 +5899,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.platform = queued.platform
 				state.replyCtx = queued.replyCtx
 				state.currentMessageID = queued.messageID
+				state.turnBudgetSeconds = queued.runtime.TurnBudgetSeconds
 				state.fromVoice = queued.fromVoice
 				state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 				state.mu.Unlock()
@@ -5909,6 +5945,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				segmentStart = 0
 				toolCount = 0
 				turnStart = time.Now()
+				resetTurnDeadline(queued.runtime.TurnBudgetSeconds)
 				firstEventLogged = false
 				waitStart = time.Now()
 				// Snapshot workspace images for the queued turn's harvest.
@@ -6205,6 +6242,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.platform = queued.platform
 		state.replyCtx = queued.replyCtx
 		state.currentMessageID = queued.messageID
+		state.turnBudgetSeconds = queued.runtime.TurnBudgetSeconds
 		state.fromVoice = queued.fromVoice
 		state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 		state.mu.Unlock()
@@ -6237,6 +6275,15 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 	}
 }
 
+// Only authenticated runtime metadata may override the global default. Invalid
+// budgets fail before Send; this defensive bound also prevents duration overflow.
+func (e *Engine) turnTimeLimit(seconds int) time.Duration {
+	if seconds > 0 && seconds <= 3600 {
+		return time.Duration(seconds) * time.Second
+	}
+	return e.maxTurnTime
+}
+
 func sendWithSessionRuntime(
 	session AgentSession,
 	runtime SessionRuntime,
@@ -6244,6 +6291,22 @@ func sendWithSessionRuntime(
 	images []ImageAttachment,
 	files []FileAttachment,
 ) error {
+	if runtime.TurnBudgetSeconds < 0 || runtime.TurnBudgetSeconds > 3600 {
+		return fmt.Errorf("invalid runtime turn budget: must be between 0 and 3600 seconds")
+	}
+
+	if len(runtime.OutputSchema) > 0 {
+		if err := ValidateOutputSchema(runtime.OutputSchema); err != nil {
+			return err
+		}
+		capable, ok := session.(NativeOutputSchemaSession)
+		if !ok || !capable.SupportsOutputSchema() {
+			return fmt.Errorf("agent session does not support native output_schema")
+		}
+		if _, ok := session.(SessionRuntimeConfigurer); !ok {
+			return fmt.Errorf("agent session cannot apply output_schema runtime")
+		}
+	}
 	if configurable, ok := session.(SessionRuntimeConfigurer); ok {
 		if err := configurable.SetSessionRuntime(runtime); err != nil {
 			return fmt.Errorf("configure session runtime: %w", err)

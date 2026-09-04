@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -39,6 +40,38 @@ func (a *stubAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) 
 func (a *stubAgent) Stop() error                                                { return nil }
 
 type stubAgentSession struct{}
+
+func TestSendWithSessionRuntime_RejectsUnsupportedOrInvalidNativeSchema(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"ok":{"type":"boolean"}},"required":["ok"]}`)
+	if err := sendWithSessionRuntime(&stubAgentSession{}, SessionRuntime{OutputSchema: schema}, "task", nil, nil); err == nil {
+		t.Fatal("unsupported agent silently accepted a constrained task")
+	}
+	for _, invalid := range []string{`null`, `[]`, `{"type":"array"}`, `{"type":"object"} trailing`, strings.Repeat("x", 128*1024+1)} {
+		if err := ValidateOutputSchema(json.RawMessage(invalid)); err == nil {
+			t.Fatalf("invalid schema accepted: %.80s", invalid)
+		}
+	}
+	if err := sendWithSessionRuntime(&stubAgentSession{}, SessionRuntime{}, "ordinary task", nil, nil); err != nil {
+		t.Fatalf("unconstrained task regressed: %v", err)
+	}
+}
+
+func TestRuntimeTurnBudgetIsBoundedAndDoesNotChangeOrdinaryTurns(t *testing.T) {
+	e := newTestEngine()
+	defer e.Stop()
+	e.SetMaxTurnTime(15 * time.Minute)
+	if e.turnTimeLimit(1800) != 30*time.Minute || e.turnTimeLimit(720) != 12*time.Minute {
+		t.Fatal("trusted stage deadline was shortened by global chat default")
+	}
+	if e.turnTimeLimit(0) != 15*time.Minute {
+		t.Fatal("ordinary task default changed")
+	}
+	for _, invalid := range []int{-1, 3601} {
+		if sendWithSessionRuntime(&stubAgentSession{}, SessionRuntime{TurnBudgetSeconds: invalid}, "task", nil, nil) == nil {
+			t.Fatal("invalid unbounded deadline accepted")
+		}
+	}
+}
 
 func (s *stubAgentSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error { return nil }
 func (s *stubAgentSession) RespondPermission(_ string, _ PermissionResult) error         { return nil }
@@ -9241,6 +9274,33 @@ func TestQueueMessageOverflow_DropsOldestAndReturnsfalse(t *testing.T) {
 	sent := p.getSent()
 	if len(sent) != defaultMaxQueuedMessages+1 {
 		t.Fatalf("platform replies = %d, want %d (queued + queue-full)", len(sent), defaultMaxQueuedMessages+1)
+	}
+}
+
+// A second message must always find a queue once the first owns the lock.
+func TestStartupSessionLockPublishesQueue(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := newTestEngine()
+	defer e.Stop()
+	key := "test:startup-publication"
+	session := e.sessions.GetOrCreateActive(key)
+	if !e.tryLockSessionWithQueueState(session, key, p, "first") {
+		t.Fatal("first message failed to acquire session")
+	}
+	defer session.Unlock()
+	if e.tryLockSessionWithQueueState(session, key, p, "second") {
+		t.Fatal("busy session acquired twice")
+	}
+	if !e.queueMessageForBusySession(p, &Message{SessionKey: key, Content: "second", ReplyCtx: "second"}, key) {
+		t.Fatal("message lost between session lock and startup queue publication")
+	}
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.pendingMessages) != 1 || state.pendingMessages[0].content != "second" {
+		t.Fatal("startup message not queued exactly once")
 	}
 }
 

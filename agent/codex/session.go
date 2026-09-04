@@ -28,6 +28,7 @@ type codexSession struct {
 	model              string
 	effort             string
 	webSearch          string
+	outputSchema       json.RawMessage
 	mode               string
 	baseURL            string   // provider base URL; passed as -c openai_base_url=<url>
 	modelProvider      string   // Codex model_provider name; passed as -c model_provider=<name>
@@ -112,6 +113,26 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 
 	isResume := cs.CurrentSessionID() != ""
 	args := cs.buildExecArgs(prompt, imagePaths)
+	// The CLI takes a file path, not inline JSON. Keep it private, per process,
+	// and alive until the child exits. Never reuse another turn's schema.
+	cs.runtimeMu.RLock()
+	schema := append(json.RawMessage(nil), cs.outputSchema...)
+	cs.runtimeMu.RUnlock()
+	cleanupSchema := func() {}
+	if len(schema) > 0 {
+		f, err := os.CreateTemp("", "cc-connect-output-schema-*.json")
+		if err != nil {
+			return fmt.Errorf("stage output schema: %w", err)
+		}
+		cleanupSchema = func() { _ = os.Remove(f.Name()) }
+		_, writeErr := f.Write(schema)
+		closeErr := f.Close()
+		if err := errors.Join(writeErr, closeErr); err != nil {
+			cleanupSchema()
+			return fmt.Errorf("write output schema: %w", err)
+		}
+		args = append(args[:len(args)-1], "--output-schema", f.Name(), "-")
+	}
 	if len(cs.cliExtraArgs) > 0 {
 		args = append(append([]string{}, cs.cliExtraArgs...), args...)
 	}
@@ -140,6 +161,7 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		cleanupSchema()
 		return fmt.Errorf("codexSession: stdout pipe: %w", err)
 	}
 
@@ -147,12 +169,16 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
+		cleanupSchema()
 		return fmt.Errorf("codexSession: start: %w", err)
 	}
 	cs.addCmd(cmd)
 
 	cs.wg.Add(1)
-	go cs.readLoop(cmd, stdout, &stderrBuf)
+	go func() {
+		defer cleanupSchema()
+		cs.readLoop(cmd, stdout, &stderrBuf)
+	}()
 
 	return nil
 }
@@ -189,6 +215,7 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 	cs.runtimeMu.RLock()
 	model := cs.model
 	webSearch := cs.webSearch
+	effort := cs.effort
 	cs.runtimeMu.RUnlock()
 	tid := cs.CurrentSessionID()
 	isResume := tid != ""
@@ -248,8 +275,8 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 	if cs.baseURL != "" {
 		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", cs.baseURL))
 	}
-	if cs.effort != "" {
-		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", cs.effort))
+	if effort != "" {
+		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", effort))
 	}
 	if webSearch != "" {
 		args = append(args, "-c", fmt.Sprintf("web_search=%q", webSearch))
@@ -813,6 +840,9 @@ func (cs *codexSession) SetSessionRuntime(runtime core.SessionRuntime) error {
 	if !cs.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
+	if err := core.ValidateOutputSchema(runtime.OutputSchema); err != nil {
+		return err
+	}
 	cs.runtimeMu.Lock()
 	defer cs.runtimeMu.Unlock()
 	envFile, err := updateTaskRuntimeEnv(cs.taskRuntimeEnvFile, runtime)
@@ -824,14 +854,23 @@ func (cs *codexSession) SetSessionRuntime(runtime core.SessionRuntime) error {
 		cs.model = model
 	}
 	cs.webSearch = normalizeWebSearch(runtime.WebSearch)
+	if effort := strings.TrimSpace(runtime.ReasoningEffort); effort != "" {
+		cs.effort = normalizeRuntimeReasoningEffort(effort)
+	}
+	cs.outputSchema = append(json.RawMessage(nil), runtime.OutputSchema...)
 	return nil
 }
 
+func (cs *codexSession) SupportsOutputSchema() bool { return true }
+
 func (cs *codexSession) GetReasoningEffort() string {
-	if effort := strings.TrimSpace(cs.effort); effort != "" {
+	cs.runtimeMu.RLock()
+	effort := strings.TrimSpace(cs.effort)
+	cs.runtimeMu.RUnlock()
+	if effort != "" {
 		return effort
 	}
-	_, effort := cs.runtimeConfig()
+	_, effort = cs.runtimeConfig()
 	return effort
 }
 

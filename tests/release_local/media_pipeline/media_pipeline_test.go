@@ -18,7 +18,9 @@ type sendRecord struct {
 }
 
 type recordingAgent struct {
-	session *recordingSession
+	mu       sync.Mutex
+	session  *recordingSession
+	sessions []*recordingSession
 }
 
 func newRecordingAgent() *recordingAgent {
@@ -28,8 +30,15 @@ func newRecordingAgent() *recordingAgent {
 func (a *recordingAgent) Name() string { return "recording-agent" }
 
 func (a *recordingAgent) StartSession(_ context.Context, sessionID string) (core.AgentSession, error) {
-	a.session.setID(sessionID)
-	return a.session, nil
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	session := a.session
+	if len(a.sessions) > 0 {
+		session = newRecordingSession()
+	}
+	session.setID(sessionID)
+	a.sessions = append(a.sessions, session)
+	return session, nil
 }
 
 func (a *recordingAgent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -37,6 +46,11 @@ func (a *recordingAgent) ListSessions(_ context.Context) ([]core.AgentSessionInf
 }
 
 func (a *recordingAgent) Stop() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, session := range a.sessions {
+		_ = session.Close()
+	}
 	return a.session.Close()
 }
 
@@ -295,6 +309,16 @@ func TestQueuedMessagePreservesFiles(t *testing.T) {
 	if len(records[1].files) != 1 || records[1].files[0].FileName != "queued.txt" || string(records[1].files[0].Data) != "queued-file" {
 		t.Fatalf("queued file not preserved: %#v", records[1].files)
 	}
+	// Await the completed user reply and persistence, not merely Agent.Send.
+	platform.waitTextContaining(t, "media ok")
+	deadline := time.Now().Add(5 * time.Second)
+	for engine.GetSessions().GetOrCreateActive("media:chat-1:user-1").Busy() {
+		if time.Now().After(deadline) {
+			t.Fatal("turn did not finish before fixture cleanup")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 }
 
 func TestSendToSessionWithAttachmentsDeliversTextImagesAndFiles(t *testing.T) {
@@ -389,12 +413,12 @@ func TestSendToSessionWithAttachmentsDoesNotDuplicateEchoedFinalTextWithContextI
 
 func TestSendToSessionWithAttachmentsRespectsDisabledAttachmentSend(t *testing.T) {
 	engine, agent, platform := newMediaEngine(t)
+	engine.SetAttachmentSendEnabled(false)
 	msg := mediaMessage("establish active session")
 	engine.ReceiveMessage(platform, msg)
 	agent.session.waitRecords(t, 1)
 	platform.waitTextContaining(t, "media ok")
 
-	engine.SetAttachmentSendEnabled(false)
 	err := engine.SendToSessionWithAttachments(
 		msg.SessionKey,
 		"should not send",
@@ -411,7 +435,7 @@ func TestSendToSessionWithAttachmentsRespectsDisabledAttachmentSend(t *testing.T
 }
 
 func TestSendToSessionWithAttachmentsRequiresSessionWhenMultipleSessionsHaveAttachments(t *testing.T) {
-	engine, agent, platform := newMediaEngine(t)
+	engine, _, platform := newMediaEngine(t)
 	first := mediaMessage("first")
 	first.SessionKey = "media:chat-1:user-1"
 	second := mediaMessage("second")
@@ -420,8 +444,23 @@ func TestSendToSessionWithAttachmentsRequiresSessionWhenMultipleSessionsHaveAtta
 
 	engine.ReceiveMessage(platform, first)
 	engine.ReceiveMessage(platform, second)
-	agent.session.waitRecords(t, 2)
-	platform.waitTextContaining(t, "media ok")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		texts, _, _, _ := platform.snapshot()
+		completed := 0
+		for _, text := range texts {
+			if strings.Contains(text, "media ok") {
+				completed++
+			}
+		}
+		if completed == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected both independent sessions to reply, got %v", texts)
+		}
+		time.Sleep(time.Millisecond)
+	}
 
 	err := engine.SendToSessionWithAttachments(
 		"",
@@ -435,6 +474,17 @@ func TestSendToSessionWithAttachmentsRequiresSessionWhenMultipleSessionsHaveAtta
 	texts, images, files, _ := platform.snapshot()
 	if containsText(texts, "ambiguous") || len(images) != 0 || len(files) != 0 {
 		t.Fatalf("ambiguous attachment send leaked output: texts=%#v images=%#v files=%#v", texts, images, files)
+	}
+	// A reply is delivered before the engine persists and unlocks the session.
+	// Wait for both turns so TempDir cleanup cannot race either session write.
+	deadline = time.Now().Add(2 * time.Second)
+	for _, key := range []string{first.SessionKey, second.SessionKey} {
+		for engine.GetSessions().GetOrCreateActive(key).Busy() {
+			if time.Now().After(deadline) {
+				t.Fatalf("session %s did not finish", key)
+			}
+			time.Sleep(time.Millisecond)
+		}
 	}
 }
 

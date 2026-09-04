@@ -184,6 +184,30 @@ func TestEnsureCodexAuth_SkipsEmptyKey(t *testing.T) {
 	}
 }
 
+func TestEnsureCodexAuth_DoesNotOverwriteInheritedGlobalAuthSymlink(t *testing.T) {
+	global := filepath.Join(t.TempDir(), "auth.json")
+	original := []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"unit-test-only"}}`)
+	if err := os.WriteFile(global, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	local := filepath.Join(home, "auth.json")
+	if err := os.Symlink(global, local); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCodexAuth(home, "local-provider-test-key"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(global)
+	if err != nil || string(got) != string(original) {
+		t.Fatal("local provider setup modified the inherited global auth file")
+	}
+	info, err := os.Lstat(local)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0600 {
+		t.Fatal("local provider auth must be a private regular file")
+	}
+}
+
 func TestEnsureCodexAuth_OverwritesExisting(t *testing.T) {
 	home := filepath.Join(t.TempDir(), ".codex")
 	if err := os.MkdirAll(home, 0o755); err != nil {
@@ -223,6 +247,7 @@ func TestEnsureCodexHomeInheritedConfigSyncsPermissionProfiles(t *testing.T) {
 
 	globalConfig := `model = "deepseek-v4-flash"
 default_permissions = "tomako-brand-fence"
+project_root_markers = ["AGENTS.md"]
 
 [permissions.tomako-brand-fence]
 description = "Brand workspace fence"
@@ -259,6 +284,7 @@ trust_level = "trusted"
 	content := string(data)
 	for _, want := range []string{
 		`default_permissions = "tomako-brand-fence"`,
+		`project_root_markers = ["AGENTS.md"]`,
 		`[permissions.tomako-brand-fence.filesystem]`,
 		`"/home/ubuntu/Skills-OL" = "read"`,
 		fmt.Sprintf("%q = \"read\"", sharedSkillsDir),
@@ -275,6 +301,9 @@ trust_level = "trusted"
 	}
 	if got := strings.Count(content, fmt.Sprintf("%q = \"read\"", sharedSkillsDir)); got != 1 {
 		t.Fatalf("shared Skills read permission count = %d, want 1:\n%s", got, content)
+	}
+	if strings.Count(content, "project_root_markers") != 1 {
+		t.Fatal("workspace root markers must be inherited exactly once")
 	}
 }
 

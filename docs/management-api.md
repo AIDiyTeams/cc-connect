@@ -57,6 +57,7 @@ Add the following to `config.toml`:
 [management]
 enabled = true
 port = 9820
+host = "127.0.0.1" # optional loopback-only binding; unset keeps all interfaces
 token = "mgmt-secret"
 ```
 
