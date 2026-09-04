@@ -14,6 +14,42 @@ func terminalTestSession() *appServerSession {
 	return s
 }
 
+func TestAppServerSession_StructuredTurnOnlyReturnsNativeFinalAnswer(t *testing.T) {
+	s := terminalTestSession()
+	s.runtime.OutputSchema = json.RawMessage(`{"type":"object"}`)
+	// Progress can itself be valid schema-shaped JSON. Never pick a JSON object
+	// by shape: the native message phase identifies the actual final answer.
+	for _, item := range []struct{ id, phase, text string }{
+		{"progress-1", "commentary", `{"coverageStrategy":"Reading the skill"}`},
+		{"progress-2", "commentary", `{"coverageStrategy":"Preparing the plan"}`},
+		{"answer", "final_answer", `{"coverageStrategy":"Three complementary research routes"}`},
+	} {
+		s.handleAgentMessageDelta(item.id, item.text[:10])
+		s.handleAgentMessageDelta(item.id, item.text[10:])
+		s.handleItemCompleted(map[string]any{"type": "agentMessage", "id": item.id, "phase": item.phase, "text": item.text})
+	}
+	s.completeTurn("turn-1", nil)
+	var output strings.Builder
+	var thinking, results int
+	for len(s.events) > 0 {
+		event := <-s.events
+		switch event.Type {
+		case core.EventText:
+			output.WriteString(event.Content)
+		case core.EventThinking:
+			thinking++
+		case core.EventResult:
+			results++
+		}
+	}
+	if got, want := output.String(), `{"coverageStrategy":"Three complementary research routes"}`; got != want {
+		t.Fatalf("structured terminal output = %q, want %q", got, want)
+	}
+	if thinking != 2 || results != 1 {
+		t.Fatalf("thinking=%d results=%d, want 2 and 1", thinking, results)
+	}
+}
+
 func TestAppServerSession_FailedTurnIsNotAnEmptySuccess(t *testing.T) {
 	for _, tc := range []struct{ status, detail, want string }{
 		{"failed", `,"error":{"message":"connection refused"}`, "connection refused"},
