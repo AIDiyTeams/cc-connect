@@ -83,6 +83,15 @@ type InteractionResponseStatus struct {
 	Code          string
 }
 
+// MachineReplyChannel is implemented by platforms whose reply contexts are
+// backend machine channels (llm- tasks, cmsg- studio chat): adapters parse
+// replies as Agent deliverables, so system lifecycle notices (session auto
+// reset, graceful close) must ride the typed turn_status lane instead of the
+// business reply stream.
+type MachineReplyChannel interface {
+	IsMachineReplyChannel(replyCtx any) bool
+}
+
 // ErrNotSupported indicates a platform doesn't support a particular operation.
 var ErrNotSupported = errors.New("operation not supported by this platform")
 

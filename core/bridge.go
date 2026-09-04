@@ -414,7 +414,20 @@ var (
 	_ TurnDispatchStatusReporter        = (*BridgePlatform)(nil)
 	_ TurnFailureReporter               = (*BridgePlatform)(nil)
 	_ InteractionResponseStatusReporter = (*BridgePlatform)(nil)
+	_ MachineReplyChannel               = (*BridgePlatform)(nil)
 )
+
+// IsMachineReplyChannel reports whether the reply context belongs to a backend
+// machine channel (llm- tasks, cmsg- studio chat). System lifecycle notices on
+// these channels must ride the typed turn_status lane; adapters parse replies
+// as Agent deliverables and would store a reset notice as the turn's output.
+func (bp *BridgePlatform) IsMachineReplyChannel(replyCtx any) bool {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok {
+		return false
+	}
+	return strings.HasPrefix(rc.ReplyCtx, "llm-") || strings.HasPrefix(rc.ReplyCtx, "cmsg-")
+}
 
 func (bp *BridgePlatform) Name() string { return "bridge" }
 
