@@ -1622,6 +1622,28 @@ func TestProcessInteractiveEvents_ToolMessagesDisabledSuppressesToolProgressOnly
 	}
 }
 
+func TestProcessInteractiveEvents_MachineReplyKeepsFinalAnswerWithoutToolNarration(t *testing.T) {
+	p := &stubMachineChannelPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ToolMessages: false})
+	sessionKey := "test:durable-answer"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-1"}
+	e.interactiveStates[sessionKey] = state
+	agentSession.events <- Event{Type: EventText, Content: "I will inspect /private/tool/path.\n\n"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "private command"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "saved"}
+	agentSession.events <- Event{Type: EventText, Content: "Saved Marc's note. Other fields are unchanged."}
+	agentSession.events <- Event{Type: EventResult, Content: "Saved Marc's note. Other fields are unchanged.", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.replies) != 1 || p.replies[0] != "Saved Marc's note. Other fields are unchanged." {
+		t.Fatalf("durable reply = %#v, want only terminal answer", p.replies)
+	}
+}
+
 func TestProcessInteractiveEvents_CompactProgressCoalescesThinkingAndToolUse(t *testing.T) {
 	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -15619,8 +15641,8 @@ func TestProcessInteractiveEvents_SkipsEllipsisThinkingInTraceReporter(t *testin
 
 type stubMachineChannelPlatform struct {
 	stubPlatformEngine
-	replies     []string
-	turnStatus  []TurnDispatchStatus
+	replies      []string
+	turnStatus   []TurnDispatchStatus
 	withReporter bool
 }
 

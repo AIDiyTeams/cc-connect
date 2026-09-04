@@ -4,8 +4,34 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
+
+func TestSkillRegistryResolve_SeesDeployedInstructionsWithoutRestart(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "example", "SKILL.md")
+	writeSkillFile(t, path, "old instructions")
+	r := NewSkillRegistry()
+	r.SetDirs([]string{root})
+	first := r.Resolve("example")
+	if err := os.WriteFile(path, []byte("new instructions"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	second := r.Resolve("example")
+	if first.Prompt != "Prompt body" || second.Prompt != "new instructions" {
+		t.Fatalf("resolved prompts: first=%q, second=%q", first.Prompt, second.Prompt)
+	}
+	if prompt := BuildSkillInvocationPrompt(second, nil); !strings.Contains(prompt, filepath.Dir(path)) {
+		t.Fatalf("invocation is missing the deployed skill directory: %s", prompt)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if r.Resolve("example") != nil {
+		t.Fatal("removed instructions must not run from stale cache")
+	}
+}
 
 func TestSkillRegistryListAll_RecursesIntoGroupedDirectories(t *testing.T) {
 	root := t.TempDir()

@@ -4714,6 +4714,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		return e.renderOutgoingContentForWorkspace(state.platform, content, workspaceDir)
 	}
 	sendWorkspace := func(p Platform, replyCtx any, content string) {
+		// These are intermediate segment/progress fallbacks. On a machine
+		// channel plain Send is terminal; use previews/typed progress there.
+		if machine, ok := p.(MachineReplyChannel); ok && machine.IsMachineReplyChannel(replyCtx) {
+			return
+		}
 		e.sendForWorkspace(p, replyCtx, content, workspaceDir)
 	}
 	sendWorkspaceWithError := func(p Platform, replyCtx any, content string) error {
@@ -5551,10 +5556,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 
 			fullResponse := event.Content
+			machine, machineChannel := p.(MachineReplyChannel)
+			terminalAnswer := machineChannel && machine.IsMachineReplyChannel(replyCtx) && strings.TrimSpace(fullResponse) != ""
 			// When tool progress is hidden, segmentStart stays 0 and textParts
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
-			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
+			// Product consumers already have typed progress. Their durable reply
+			// must keep the terminal answer, not prepend earlier tool narration.
+			if !terminalAnswer && len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
 				fullResponse = strings.Join(textParts, "")
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
@@ -5824,7 +5833,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						return
 					}
 				}
-			} else if toolCount > 0 && segmentStart > 0 {
+			} else if !terminalAnswer && toolCount > 0 && segmentStart > 0 {
 				// When tool calls happened and prior text was already surfaced in segments,
 				// only send the unsent remainder. When tool progress is hidden, tool events don't surface
 				// side-channel messages and segmentStart stays 0, so keep normal finalize flow.
