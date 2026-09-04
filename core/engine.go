@@ -2973,11 +2973,32 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	hasAgent := hasState && state != nil && state.agentSession != nil && state.agentSession.Alive()
 	e.interactiveMu.Unlock()
 
+	// System lifecycle notices must never ride the business reply stream on
+	// backend machine channels: adapters parse replies as Agent deliverables,
+	// so a reset notice would be stored as the turn's output. Report through
+	// the typed turn_status lane instead; human chat platforms keep the
+	// courtesy replies.
+	notifySessionLifecycle := func(text string) {
+		if machine, ok := p.(MachineReplyChannel); ok && machine.IsMachineReplyChannel(msg.ReplyCtx) {
+			if reporter, ok := p.(TurnDispatchStatusReporter); ok {
+				if err := reporter.ReportTurnDispatchStatus(e.ctx, msg.ReplyCtx, TurnDispatchStatus{
+					State: "session_reset", Message: text,
+				}); err == nil {
+					return
+				}
+			}
+			// Machine channel without the typed reporter: stay silent rather
+			// than deliver system prose as a business reply.
+			return
+		}
+		e.reply(p, msg.ReplyCtx, text)
+	}
+
 	if hasAgent {
 		// Notify the user before the potentially long close. The close
 		// returns as soon as the process exits (usually seconds), but
 		// Stop hooks can take up to 120s.
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSessionClosingGraceful))
+		notifySessionLifecycle(e.i18n.T(MsgSessionClosingGraceful))
 	}
 
 	e.cleanupInteractiveState(interactiveKey)
@@ -2989,7 +3010,7 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 		return nil
 	}
 
-	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute)))
+	notifySessionLifecycle(e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute)))
 	return newSession
 }
 

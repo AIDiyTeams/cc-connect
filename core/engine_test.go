@@ -15616,3 +15616,125 @@ func TestProcessInteractiveEvents_SkipsEllipsisThinkingInTraceReporter(t *testin
 		}
 	}
 }
+
+type stubMachineChannelPlatform struct {
+	stubPlatformEngine
+	replies     []string
+	turnStatus  []TurnDispatchStatus
+	withReporter bool
+}
+
+func (p *stubMachineChannelPlatform) IsMachineReplyChannel(replyCtx any) bool {
+	return true
+}
+
+func (p *stubMachineChannelPlatform) Reply(_ context.Context, _ any, content string) error {
+	p.mu.Lock()
+	p.replies = append(p.replies, content)
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *stubMachineChannelPlatform) Send(_ context.Context, _ any, content string) error {
+	return p.Reply(nil, nil, content)
+}
+
+func (p *stubMachineChannelPlatform) ReportTurnDispatchStatus(_ context.Context, _ any, status TurnDispatchStatus) error {
+	if !p.withReporter {
+		return fmt.Errorf("turn_status unsupported")
+	}
+	p.mu.Lock()
+	p.turnStatus = append(p.turnStatus, status)
+	p.mu.Unlock()
+	return nil
+}
+
+func newIdleSessionForReset(t *testing.T, sm *SessionManager, key string) *Session {
+	t.Helper()
+	session := sm.GetOrCreateActive(key)
+	session.AddHistory("user", "hello")
+	session.SetAgentSessionID("agent-id", "claudecode")
+	session.TryLock()
+	session.mu.Lock()
+	session.LastUserActivity = time.Now().Add(-35 * time.Minute)
+	session.mu.Unlock()
+	return session
+}
+
+func TestMaybeAutoResetSessionOnIdle_MachineChannelReportsTypedStatus(t *testing.T) {
+	e := newTestEngine()
+	e.SetResetOnIdle(30 * time.Minute)
+
+	sm := NewSessionManager(t.TempDir())
+	session := newIdleSessionForReset(t, sm, "user:sk-machine")
+
+	p := &stubMachineChannelPlatform{stubPlatformEngine: stubPlatformEngine{n: "bridge"}, withReporter: true}
+	msg := &Message{SessionKey: "sk-machine", ReplyCtx: "llm-task-1"}
+
+	rotated := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:sk-machine", session)
+	if rotated == nil {
+		t.Fatal("expected idle reset to fire for machine channel")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.replies) != 0 {
+		t.Fatalf("machine channel must not receive reset prose replies: %#v", p.replies)
+	}
+	// No interactive state was set up, so the graceful-close notice does not
+	// fire; only the auto-reset notice rides the typed lane.
+	if len(p.turnStatus) != 1 {
+		t.Fatalf("turn_status reports = %d, want 1 (reset notice)", len(p.turnStatus))
+	}
+	if p.turnStatus[0].State != "session_reset" {
+		t.Fatalf("turn_status state = %q, want session_reset", p.turnStatus[0].State)
+	}
+	if p.turnStatus[0].Message == "" {
+		t.Fatal("turn_status message must carry the human-readable notice")
+	}
+}
+
+func TestMaybeAutoResetSessionOnIdle_MachineChannelSilentWithoutReporter(t *testing.T) {
+	e := newTestEngine()
+	e.SetResetOnIdle(30 * time.Minute)
+
+	sm := NewSessionManager(t.TempDir())
+	session := newIdleSessionForReset(t, sm, "user:sk-silent")
+
+	// withReporter=false: the typed lane is unsupported, and the machine
+	// channel must stay silent instead of delivering prose as a reply.
+	p := &stubMachineChannelPlatform{stubPlatformEngine: stubPlatformEngine{n: "bridge"}}
+	msg := &Message{SessionKey: "sk-silent", ReplyCtx: "llm-task-2"}
+
+	rotated := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:sk-silent", session)
+	if rotated == nil {
+		t.Fatal("expected idle reset to fire even without the typed reporter")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.replies) != 0 || len(p.turnStatus) != 0 {
+		t.Fatalf("machine channel without reporter must stay silent: replies=%#v status=%#v", p.replies, p.turnStatus)
+	}
+}
+
+func TestMaybeAutoResetSessionOnIdle_HumanChannelKeepsCourtesyReply(t *testing.T) {
+	e := newTestEngine()
+	e.SetResetOnIdle(30 * time.Minute)
+
+	sm := NewSessionManager(t.TempDir())
+	session := newIdleSessionForReset(t, sm, "user:sk-human")
+
+	p := &stubPlatformEngine{n: "telegram"}
+	msg := &Message{SessionKey: "sk-human", ReplyCtx: "ctx-human"}
+
+	rotated := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:sk-human", session)
+	if rotated == nil {
+		t.Fatal("expected idle reset to fire for human channel")
+	}
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("human channel should keep the courtesy reset reply")
+	}
+	if !strings.Contains(sent[len(sent)-1], "auto-reset") {
+		t.Fatalf("last reply = %#v, want the auto-reset notice", sent)
+	}
+}
