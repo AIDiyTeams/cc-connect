@@ -96,3 +96,34 @@ func TestNew_NoEnvOpts(t *testing.T) {
 		t.Fatalf("expected 0 env vars, got %d: %v", len(agent.configEnv), agent.configEnv)
 	}
 }
+
+func TestWorkspaceAgentOptionsPreservesProjectEnvWithoutSessionSecrets(t *testing.T) {
+	parent, err := New(map[string]any{
+		"cli_path": "go",
+		"env": map[string]string{
+			"SKILL_RESULT_API_URL": "http://127.0.0.1:18080",
+			"SKILLS_OL_DIR":        "/shared/skills",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := parent.(*Agent)
+	agent.SetSessionEnv([]string{"TASK_CAPABILITY=private-task-only"})
+	opts := agent.WorkspaceAgentOptions()
+	child, err := New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := envSliceToMap(child.(*Agent).configEnv)
+	if env["SKILL_RESULT_API_URL"] != "http://127.0.0.1:18080" || env["SKILLS_OL_DIR"] != "/shared/skills" {
+		t.Fatalf("workspace agent lost project environment: %v", env)
+	}
+	if _, exists := env["TASK_CAPABILITY"]; exists {
+		t.Fatal("workspace options must not copy another task's session environment")
+	}
+	opts["env"].(map[string]string)["SKILL_RESULT_API_URL"] = "https://changed.invalid"
+	if envSliceToMap(agent.configEnv)["SKILL_RESULT_API_URL"] != "http://127.0.0.1:18080" {
+		t.Fatal("workspace options must not alias the parent's environment")
+	}
+}

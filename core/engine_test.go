@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -39,6 +40,38 @@ func (a *stubAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) 
 func (a *stubAgent) Stop() error                                                { return nil }
 
 type stubAgentSession struct{}
+
+func TestSendWithSessionRuntime_RejectsUnsupportedOrInvalidNativeSchema(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"ok":{"type":"boolean"}},"required":["ok"]}`)
+	if err := sendWithSessionRuntime(&stubAgentSession{}, SessionRuntime{OutputSchema: schema}, "task", nil, nil); err == nil {
+		t.Fatal("unsupported agent silently accepted a constrained task")
+	}
+	for _, invalid := range []string{`null`, `[]`, `{"type":"array"}`, `{"type":"object"} trailing`, strings.Repeat("x", 128*1024+1)} {
+		if err := ValidateOutputSchema(json.RawMessage(invalid)); err == nil {
+			t.Fatalf("invalid schema accepted: %.80s", invalid)
+		}
+	}
+	if err := sendWithSessionRuntime(&stubAgentSession{}, SessionRuntime{}, "ordinary task", nil, nil); err != nil {
+		t.Fatalf("unconstrained task regressed: %v", err)
+	}
+}
+
+func TestRuntimeTurnBudgetIsBoundedAndDoesNotChangeOrdinaryTurns(t *testing.T) {
+	e := newTestEngine()
+	defer e.Stop()
+	e.SetMaxTurnTime(15 * time.Minute)
+	if e.turnTimeLimit(1800) != 30*time.Minute || e.turnTimeLimit(720) != 12*time.Minute {
+		t.Fatal("trusted stage deadline was shortened by global chat default")
+	}
+	if e.turnTimeLimit(0) != 15*time.Minute {
+		t.Fatal("ordinary task default changed")
+	}
+	for _, invalid := range []int{-1, 3601} {
+		if sendWithSessionRuntime(&stubAgentSession{}, SessionRuntime{TurnBudgetSeconds: invalid}, "task", nil, nil) == nil {
+			t.Fatal("invalid unbounded deadline accepted")
+		}
+	}
+}
 
 func (s *stubAgentSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error { return nil }
 func (s *stubAgentSession) RespondPermission(_ string, _ PermissionResult) error         { return nil }
@@ -4388,6 +4421,45 @@ func TestExecuteCardActionStop_RemovesInteractiveState(t *testing.T) {
 	}
 }
 
+// The Tomako Bridge can route a task to an explicit brand-scoped runtime
+// workspace while the channel's persisted binding still points at the older
+// per-user workspace. Card actions do not carry the runtime workspace again,
+// so /stop must fall back to the one live state matching the raw session key
+// when the current binding resolves to a key with no running state.
+func TestExecuteCardActionStop_FallsBackToBrandScopedLiveState(t *testing.T) {
+	e := newTestEngine()
+	baseDir := t.TempDir()
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	rawKey := "java-backend-test:tomako:4:brand:gp-1:task:llm-1"
+	boundWorkspace := filepath.Join(baseDir, "user-4")
+	liveWorkspace := filepath.Join(baseDir, "workspace-tomako", "brand-gp-1")
+	if err := os.MkdirAll(boundWorkspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.workspaceBindings.Bind(
+		"project:test",
+		"java-backend-test:tomako",
+		"user-4",
+		boundWorkspace,
+	)
+
+	liveKey := normalizeWorkspacePath(liveWorkspace) + ":" + rawKey
+	e.interactiveMu.Lock()
+	e.interactiveStates[liveKey] = &interactiveState{}
+	e.interactiveMu.Unlock()
+
+	e.executeCardAction("/stop", "", rawKey)
+
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[liveKey]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Fatal("expected /stop to remove the brand-scoped live state when the persisted binding is stale")
+	}
+}
+
 func TestCmdLang_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "inline-only"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -6662,6 +6734,103 @@ func TestRespondInteractionUsesStableQuestionAndOptionIDs(t *testing.T) {
 	answers, ok := rec.lastResult.UpdatedInput["answers"].(map[string]any)
 	if !ok || answers["database"] != "PostgreSQL" {
 		t.Fatalf("answers = %#v, want database=PostgreSQL", rec.lastResult.UpdatedInput["answers"])
+	}
+}
+
+func TestRespondInteractionMapsAnExplicitSkipForTheNativeAgent(t *testing.T) {
+	e := newTestEngine()
+	rec := &recordingAgentSession{}
+	state := &interactiveState{
+		agentSession: rec,
+		pending: &pendingPermission{
+			RequestID:     "native-request",
+			InteractionID: "interaction-skip",
+			ToolName:      "AskUserQuestion",
+			ToolInput:     map[string]any{"questions": []any{}},
+			Questions: []UserQuestion{{
+				ID:       "database",
+				Question: "Which database?",
+				Options:  []UserQuestionOption{{ID: "postgres", Label: "PostgreSQL"}},
+			}},
+			Resolved: make(chan struct{}),
+		},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates["test:chat:user1"] = state
+	e.interactiveMu.Unlock()
+
+	if err := e.RespondInteraction("test:chat:user1", "interaction-skip", "", map[string][]string{
+		"database": {interactionSkippedAnswer},
+	}); err != nil {
+		t.Fatalf("RespondInteraction() error = %v", err)
+	}
+	answers, ok := rec.lastResult.UpdatedInput["answers"].(map[string]any)
+	if !ok || answers["database"] != "Skipped by user" {
+		t.Fatalf("answers = %#v, want database=Skipped by user", rec.lastResult.UpdatedInput["answers"])
+	}
+}
+
+func TestRespondInteractionRejectsSkipCombinedWithAnOption(t *testing.T) {
+	e := newTestEngine()
+	rec := &recordingAgentSession{}
+	e.interactiveMu.Lock()
+	e.interactiveStates["test:chat:user1"] = &interactiveState{
+		agentSession: rec,
+		pending: &pendingPermission{
+			RequestID:     "native-request",
+			InteractionID: "interaction-mixed-skip",
+			ToolName:      "AskUserQuestion",
+			ToolInput:     map[string]any{"questions": []any{}},
+			Questions: []UserQuestion{{
+				ID: "database", Question: "Which database?",
+				Options: []UserQuestionOption{{ID: "postgres", Label: "PostgreSQL"}},
+			}},
+			Resolved: make(chan struct{}),
+		},
+	}
+	e.interactiveMu.Unlock()
+
+	err := e.RespondInteraction("test:chat:user1", "interaction-mixed-skip", "", map[string][]string{
+		"database": {interactionSkippedAnswer, "postgres"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("RespondInteraction() error = %v, want mixed skip rejection", err)
+	}
+	if rec.lastID != "" {
+		t.Fatalf("native request was answered after invalid mixed skip")
+	}
+}
+
+func TestRespondInteractionFindsWorkspacePendingBehindRawPlaceholder(t *testing.T) {
+	e := newTestEngine()
+	rec := &recordingAgentSession{}
+	sessionKey := "bridge:room-1:user-1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[sessionKey] = &interactiveState{}
+	e.interactiveStates["workspace-a:"+sessionKey] = &interactiveState{
+		agentSession: rec,
+		pending: &pendingPermission{
+			RequestID:     "native-request",
+			InteractionID: "interaction-workspace",
+			ToolName:      "AskUserQuestion",
+			ToolInput:     map[string]any{"questions": []any{}},
+			Questions: []UserQuestion{{
+				ID:       "mode",
+				Question: "Which mode?",
+				Options:  []UserQuestionOption{{ID: "advice", Label: "Advice only"}},
+			}},
+			Resolved: make(chan struct{}),
+		},
+	}
+	e.interactiveMu.Unlock()
+
+	if err := e.RespondInteraction(sessionKey, "interaction-workspace", "", map[string][]string{
+		"mode": {"advice"},
+	}); err != nil {
+		t.Fatalf("RespondInteraction() error = %v", err)
+	}
+	if rec.lastID != "native-request" {
+		t.Fatalf("native request id = %q, want native-request", rec.lastID)
 	}
 }
 
@@ -9108,6 +9277,33 @@ func TestQueueMessageOverflow_DropsOldestAndReturnsfalse(t *testing.T) {
 	}
 }
 
+// A second message must always find a queue once the first owns the lock.
+func TestStartupSessionLockPublishesQueue(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := newTestEngine()
+	defer e.Stop()
+	key := "test:startup-publication"
+	session := e.sessions.GetOrCreateActive(key)
+	if !e.tryLockSessionWithQueueState(session, key, p, "first") {
+		t.Fatal("first message failed to acquire session")
+	}
+	defer session.Unlock()
+	if e.tryLockSessionWithQueueState(session, key, p, "second") {
+		t.Fatal("busy session acquired twice")
+	}
+	if !e.queueMessageForBusySession(p, &Message{SessionKey: key, Content: "second", ReplyCtx: "second"}, key) {
+		t.Fatal("message lost between session lock and startup queue publication")
+	}
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.pendingMessages) != 1 || state.pendingMessages[0].content != "second" {
+		t.Fatal("startup message not queued exactly once")
+	}
+}
+
 func TestQueueMessage_NoState_ReturnsFalse(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := newTestEngine()
@@ -9808,6 +10004,77 @@ func TestExecuteCardAction_StopClearsInteractiveState(t *testing.T) {
 
 	if exists || state != nil {
 		t.Fatal("expected interactive state to be removed after /stop")
+	}
+}
+
+// TestHandleMessage_AfterStopWaitsForPriorTurnLockRelease reproduces the
+// product race where /stop has already removed the interactive state, but the
+// stopped turn's goroutine has not released the Session lock yet. A follow-up
+// sent in that window must start a new turn instead of surfacing the internal
+// "Previous request still processing" hint.
+func TestHandleMessage_AfterStopWaitsForPriorTurnLockRelease(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	next := newQueuingSession("after-stop")
+	e := NewEngine("test", &controllableAgent{nextSession: next}, []Platform{p}, "", LangEnglish)
+	key := "test:user1"
+
+	// This is the exact state immediately after stopInteractiveSession: the
+	// live state has been removed, while the old processor still owns the lock.
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected prior turn lock setup to succeed")
+	}
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		session.Unlock()
+	}()
+
+	e.ReceiveMessage(p, &Message{
+		SessionKey: key,
+		Platform:   "test",
+		MessageID:  "follow-up-after-stop",
+		UserID:     "user1",
+		UserName:   "user1",
+		Content:    "continue with the corrected recipient",
+		ReplyCtx:   "ctx-follow-up",
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		next.sendMu.Lock()
+		sentToAgent := len(next.sendCalls) > 0
+		next.sendMu.Unlock()
+		if sentToAgent {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("follow-up was not delivered to agent; user-visible replies: %v", p.getSent())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	next.events <- Event{Type: EventResult, Content: "follow-up accepted", Done: true}
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		sent := p.getSent()
+		followUpReturned := false
+		for _, got := range sent {
+			if got == "follow-up accepted" {
+				followUpReturned = true
+			}
+		}
+		if followUpReturned {
+			for _, got := range sent {
+				if strings.Contains(got, e.i18n.T(MsgPreviousProcessing)) {
+					t.Fatalf("internal busy hint leaked after stop: %v", sent)
+				}
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("follow-up result was not returned; replies: %v", sent)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

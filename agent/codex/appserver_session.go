@@ -2,12 +2,15 @@ package codex
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -82,7 +85,15 @@ type itemNotification struct {
 }
 
 type errorNotification struct {
-	Message string `json:"message"`
+	// Current app-server versions nest the message in error. Keep the legacy
+	// top-level message for older transports, but never terminate on a retry.
+	Message   string `json:"message"`
+	ThreadID  string `json:"threadId"`
+	TurnID    string `json:"turnId"`
+	WillRetry bool   `json:"willRetry"`
+	Error     *struct {
+		Message string `json:"message"`
+	} `json:"error"`
 }
 
 type appServerRateLimitsResponse struct {
@@ -145,6 +156,7 @@ type appServerSession struct {
 	workDir            string
 	model              string
 	effort             string
+	webSearch          string
 	mode               string
 	permissionsProfile string
 	baseURL            string
@@ -166,12 +178,19 @@ type appServerSession struct {
 
 	pendingMu sync.Mutex
 	pending   map[int64]chan rpcResponseEnvelope
+	threadMu  sync.Mutex
+	resumeID  string
 
 	approvalsMu      sync.Mutex
 	pendingApprovals map[string]chan core.PermissionResult
 
 	threadID atomic.Value
 	alive    atomic.Bool
+	// threadBrandTools records whether the current app-server thread was
+	// created with the brand-analysis dynamic tool set. Dynamic tools are a
+	// thread-start capability, so a reused thread must be replaced when a turn
+	// crosses the brand-analysis boundary.
+	threadBrandTools bool
 
 	closeOnce sync.Once
 	wg        sync.WaitGroup
@@ -185,10 +204,26 @@ type appServerSession struct {
 	streamedItems    map[string]string
 	lastStreamedItem string
 
-	runtimeMu sync.RWMutex
-	usage     *core.UsageReport
-	context   *core.ContextUsage
-	runtime   core.SessionRuntime
+	runtimeMu          sync.RWMutex
+	usage              *core.UsageReport
+	context            *core.ContextUsage
+	runtime            core.SessionRuntime
+	taskRuntimeEnvFile string
+
+	brandFlowMu sync.Mutex
+	brandFlow   brandAnalysisFlow
+}
+
+type brandAnalysisFlow struct {
+	evidenceRunning       bool
+	evidenceReady         bool
+	corePublishing        bool
+	corePublished         bool
+	searchTraceID         string
+	searchAttempts        int
+	searchCompleted       bool
+	competitorsPublishing bool
+	competitorsPublished  bool
 }
 
 const (
@@ -197,6 +232,7 @@ const (
 )
 
 func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, permissionsProfile, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string) (*appServerSession, error) {
+	sessionStartedAt := time.Now()
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
 		url:                url,
@@ -214,25 +250,37 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 		cancel:             cancel,
 		pending:            make(map[int64]chan rpcResponseEnvelope),
 		pendingApprovals:   make(map[string]chan core.PermissionResult),
+		resumeID:           resumeID,
 	}
 	s.alive.Store(true)
 
+	connectStartedAt := time.Now()
 	if err := s.connect(); err != nil {
 		cancel()
 		return nil, err
 	}
+	s.emitLifecycle("app_server_process_started", time.Since(connectStartedAt))
 
+	initializeStartedAt := time.Now()
 	if err := s.initialize(); err != nil {
 		_ = s.Close()
 		return nil, err
 	}
+	s.emitLifecycle("app_server_initialized", time.Since(initializeStartedAt))
+	s.emitLifecycle("agent_session_started", time.Since(sessionStartedAt))
 
-	if err := s.ensureThread(resumeID); err != nil {
-		_ = s.Close()
-		return nil, err
-	}
-	if err := s.refreshUsage(context.Background()); err != nil {
-		slog.Debug("codex app-server: initial rate limit fetch failed", "error", err)
+	// Existing sessions must be resumed eagerly so a stale thread ID can still
+	// trigger the engine's normal fresh-session fallback. New threads are
+	// created on first Send, after the trusted per-task runtime has arrived.
+	if resumeID != "" && resumeID != core.ContinueSession {
+		if err := s.ensureThread(resumeID); err != nil {
+			_ = s.Close()
+			return nil, err
+		}
+		s.resumeID = ""
+		if err := s.refreshUsage(context.Background()); err != nil {
+			slog.Debug("codex app-server: initial rate limit fetch failed", "error", err)
+		}
 	}
 
 	return s, nil
@@ -294,7 +342,6 @@ func (s *appServerSession) connect() error {
 	go s.waitLoop()
 	return nil
 }
-
 func (s *appServerSession) initialize() error {
 	params := map[string]any{
 		"clientInfo": map[string]any{
@@ -328,6 +375,7 @@ func (s *appServerSession) initialize() error {
 }
 
 func (s *appServerSession) ensureThread(resumeID string) error {
+	startedAt := time.Now()
 	if resumeID != "" && resumeID != core.ContinueSession {
 		params := s.threadRequestParams()
 		params["threadId"] = resumeID
@@ -342,7 +390,9 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 		}
 		s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 		s.threadID.Store(resp.Thread.ID)
+		s.threadBrandTools = s.isBrandAnalysisRuntime()
 		slog.Info("codex app-server thread resumed", "thread_id", resp.Thread.ID)
+		s.emitLifecycle("agent_thread_ready", time.Since(startedAt))
 		return nil
 	}
 
@@ -355,18 +405,55 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 	}
 	s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 	s.threadID.Store(resp.Thread.ID)
+	s.threadBrandTools = s.isBrandAnalysisRuntime()
 	slog.Info("codex app-server thread started", "thread_id", resp.Thread.ID)
+	s.emitLifecycle("agent_thread_ready", time.Since(startedAt))
+	return nil
+}
+
+func (s *appServerSession) ensureThreadForSend() error {
+	if s.CurrentSessionID() != "" {
+		return nil
+	}
+	s.threadMu.Lock()
+	defer s.threadMu.Unlock()
+	if s.CurrentSessionID() != "" {
+		return nil
+	}
+	if err := s.ensureThread(s.resumeID); err != nil {
+		return fmt.Errorf("codex app-server initialize thread: %w", err)
+	}
+	s.resumeID = ""
+	if err := s.refreshUsage(context.Background()); err != nil {
+		slog.Debug("codex app-server: initial rate limit fetch failed", "error", err)
+	}
 	return nil
 }
 
 func (s *appServerSession) threadRequestParams() map[string]any {
+	config := map[string]any{
+		"features.default_mode_request_user_input": true,
+	}
+	if envFile := s.currentTaskRuntimeEnvFile(); envFile != "" {
+		config["shell_environment_policy.set.TOMAKO_TASK_ENV_FILE"] = envFile
+	}
 	params := map[string]any{
 		"experimentalRawEvents":  false,
 		"persistExtendedHistory": false,
 		"cwd":                    s.workDir,
+		"config":                 config,
 	}
 	if model := s.GetModel(); model != "" {
 		params["model"] = model
+	}
+	if searchMode := s.getWebSearch(); searchMode != "" {
+		config["web_search"] = searchMode
+	}
+	if effort := s.GetReasoningEffort(); effort != "" {
+		config["model_reasoning_effort"] = effort
+	}
+	if s.isBrandAnalysisRuntime() {
+		params["dynamicTools"] = brandAnalysisDynamicTools()
 	}
 	if profile := strings.TrimSpace(s.permissionsProfile); profile != "" {
 		params["permissions"] = profile
@@ -400,7 +487,11 @@ func (s *appServerSession) applyThreadRuntimeState(workDir, model string, effort
 	if m := strings.TrimSpace(model); m != "" {
 		s.model = m
 	}
-	s.effort = normalizeRuntimeReasoningEffort(stringValue(effort))
+	if forced := strings.TrimSpace(s.runtime.ReasoningEffort); forced != "" {
+		s.effort = normalizeRuntimeReasoningEffort(forced)
+	} else {
+		s.effort = normalizeRuntimeReasoningEffort(stringValue(effort))
+	}
 }
 
 func (s *appServerSession) refreshUsage(ctx context.Context) error {
@@ -465,6 +556,9 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	if err != nil {
 		return err
 	}
+	if err := s.ensureThreadForSend(); err != nil {
+		return err
+	}
 
 	threadID := s.CurrentSessionID()
 	if threadID == "" {
@@ -495,6 +589,9 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	if effort := s.GetReasoningEffort(); effort != "" {
 		params["effort"] = effort
 	}
+	if schema := s.outputSchema(); len(schema) > 0 {
+		params["outputSchema"] = schema
+	}
 	if metadata := s.responsesAPIClientMetadata(); len(metadata) > 0 {
 		params["responsesapiClientMetadata"] = metadata
 	}
@@ -505,6 +602,7 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 		params["approvalPolicy"] = approval
 	}
 
+	turnStartedAt := time.Now()
 	var resp turnStartResponse
 	if err := s.request("turn/start", params, &resp); err != nil {
 		return fmt.Errorf("codex app-server turn/start: %w", err)
@@ -512,6 +610,7 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	if resp.Turn.ID == "" {
 		return fmt.Errorf("codex app-server turn/start returned empty turn id")
 	}
+	s.emitLifecycle("agent_turn_started", time.Since(turnStartedAt))
 
 	s.stateMu.Lock()
 	s.currentTurn = resp.Turn.ID
@@ -530,13 +629,81 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	if !s.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
+	if err := core.ValidateOutputSchema(runtime.OutputSchema); err != nil {
+		return err
+	}
+	runtime.OutputSchema = append(json.RawMessage(nil), runtime.OutputSchema...)
 	s.runtimeMu.Lock()
-	defer s.runtimeMu.Unlock()
+	previousEnvFile := s.taskRuntimeEnvFile
+	envFile, err := updateTaskRuntimeEnv(s.taskRuntimeEnvFile, runtime)
+	if err != nil {
+		s.runtimeMu.Unlock()
+		return err
+	}
+	s.taskRuntimeEnvFile = envFile
+	searchChanged := s.webSearch != normalizeWebSearch(runtime.WebSearch)
 	s.runtime = runtime
 	if model := strings.TrimSpace(runtime.GatewayModel); model != "" {
 		s.model = model
 	}
+	if effort := strings.TrimSpace(runtime.ReasoningEffort); effort != "" {
+		s.effort = normalizeRuntimeReasoningEffort(effort)
+	}
+	s.webSearch = normalizeWebSearch(runtime.WebSearch)
+	s.runtimeMu.Unlock()
+
+	// Resumed app-server threads were created before this turn's trusted
+	// runtime arrived. Resume the same thread once more with the task env-file
+	// path in its shell policy; subsequent turns keep the stable path while the
+	// file contents rotate atomically.
+	if previousEnvFile == "" && envFile != "" {
+		if currentID := s.CurrentSessionID(); currentID != "" {
+			s.threadMu.Lock()
+			if s.CurrentSessionID() == currentID {
+				s.resumeID = currentID
+				s.threadID.Store("")
+			}
+			s.threadMu.Unlock()
+		}
+	}
+	// Each bridge task is a new Agent turn. Do not leak evidence/search guards
+	// from an earlier brand-analysis task that happened to share the same
+	// workspace session.
+	s.brandFlowMu.Lock()
+	s.brandFlow = brandAnalysisFlow{}
+	s.brandFlowMu.Unlock()
+
+	// App-server dynamic tools are fixed at thread/start (or thread/resume), not
+	// turn/start. Replace a reused thread when entering or leaving the dedicated
+	// brand-analysis tool mode so the model sees exactly the tools for this turn.
+	wantsBrandTools := strings.EqualFold(strings.TrimSpace(runtime.Scene), "brand_analysis")
+	s.threadMu.Lock()
+	if s.CurrentSessionID() != "" && (s.threadBrandTools != wantsBrandTools || searchChanged) {
+		s.threadID.Store("")
+		s.resumeID = ""
+	}
+	s.threadMu.Unlock()
 	return nil
+}
+
+func (s *appServerSession) currentTaskRuntimeEnvFile() string {
+	s.runtimeMu.RLock()
+	defer s.runtimeMu.RUnlock()
+	return s.taskRuntimeEnvFile
+}
+
+func (s *appServerSession) SupportsOutputSchema() bool { return true }
+
+func (s *appServerSession) outputSchema() json.RawMessage {
+	s.runtimeMu.RLock()
+	defer s.runtimeMu.RUnlock()
+	return append(json.RawMessage(nil), s.runtime.OutputSchema...)
+}
+
+func (s *appServerSession) getWebSearch() string {
+	s.runtimeMu.RLock()
+	defer s.runtimeMu.RUnlock()
+	return strings.TrimSpace(s.webSearch)
 }
 
 func (s *appServerSession) responsesAPIClientMetadata() map[string]string {
@@ -814,12 +981,684 @@ func (s *appServerSession) handleRequestUserInput(rawID json.RawMessage, paramsR
 }
 
 func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRaw json.RawMessage) {
+	var params struct {
+		CallID    string         `json:"callId"`
+		Tool      string         `json:"tool"`
+		Arguments map[string]any `json:"arguments"`
+	}
+	if err := json.Unmarshal(paramsRaw, &params); err != nil {
+		s.writeDynamicToolResponse(rawID, false, "invalid tool arguments")
+		return
+	}
+	if !s.isBrandAnalysisRuntime() {
+		s.writeDynamicToolResponse(rawID, false, "tool not available for this task")
+		return
+	}
+	go func() {
+		switch params.Tool {
+		case "collect_brand_evidence":
+			if err := s.beginBrandEvidenceCollection(); err != nil {
+				s.writeDynamicToolResponse(rawID, false, err.Error())
+				return
+			}
+			result, err := s.collectBrandEvidence(params.Arguments)
+			if err != nil {
+				s.finishBrandEvidenceCollection(false)
+				s.writeDynamicToolResponse(rawID, false, err.Error())
+				return
+			}
+			if err := s.publishStructuredResult("evidence", result); err != nil {
+				s.finishBrandEvidenceCollection(false)
+				s.writeDynamicToolResponse(rawID, false, err.Error())
+				return
+			}
+			s.finishBrandEvidenceCollection(true)
+			encoded, _ := json.Marshal(brandEvidenceForModel(result))
+			s.writeDynamicToolResponse(rawID, true, string(encoded))
+		case "publish_brand_analysis_stage":
+			stage, result, err := validateBrandAnalysisStage(params.Arguments)
+			if err != nil {
+				s.writeDynamicToolResponse(rawID, false, err.Error())
+				return
+			}
+			if err := s.beginBrandAnalysisStagePublication(stage, result); err != nil {
+				s.writeDynamicToolResponse(rawID, false, err.Error())
+				return
+			}
+			if err := s.publishStructuredResult(stage, result); err != nil {
+				s.finishBrandAnalysisStagePublication(stage, false)
+				s.writeDynamicToolResponse(rawID, false, err.Error())
+				return
+			}
+			s.finishBrandAnalysisStagePublication(stage, true)
+			s.writeDynamicToolResponse(rawID, true, "stage accepted for persistence")
+		default:
+			s.writeDynamicToolResponse(rawID, false, "unknown dynamic tool")
+		}
+	}()
+}
+
+func (s *appServerSession) publishStructuredResult(stage string, result map[string]any) error {
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	deliveryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	ack := make(chan error, 1)
+	event := core.Event{
+		Type:        core.EventStructuredResult,
+		Metadata:    map[string]any{"stage": stage, "result": result},
+		DeliveryAck: ack,
+	}
+	select {
+	case s.events <- event:
+	case <-deliveryCtx.Done():
+		return fmt.Errorf("structured result delivery unavailable: %w", deliveryCtx.Err())
+	}
+	select {
+	case err := <-ack:
+		if err != nil {
+			return fmt.Errorf("structured result delivery failed: %w", err)
+		}
+		return nil
+	case <-deliveryCtx.Done():
+		return fmt.Errorf("structured result delivery not acknowledged: %w", deliveryCtx.Err())
+	}
+}
+
+func (s *appServerSession) beginBrandEvidenceCollection() error {
+	s.brandFlowMu.Lock()
+	defer s.brandFlowMu.Unlock()
+	if s.brandFlow.evidenceReady {
+		return fmt.Errorf("brand evidence has already been collected")
+	}
+	if s.brandFlow.evidenceRunning {
+		return fmt.Errorf("brand evidence collection is already running")
+	}
+	if s.brandFlow.corePublished || s.brandFlow.competitorsPublished {
+		return fmt.Errorf("brand evidence cannot be collected after analysis publication")
+	}
+	s.brandFlow.evidenceRunning = true
+	return nil
+}
+
+func (s *appServerSession) finishBrandEvidenceCollection(success bool) {
+	s.brandFlowMu.Lock()
+	defer s.brandFlowMu.Unlock()
+	s.brandFlow.evidenceRunning = false
+	if success {
+		s.brandFlow.evidenceReady = true
+	}
+}
+
+func (s *appServerSession) beginBrandAnalysisStagePublication(stage string, result map[string]any) error {
+	s.brandFlowMu.Lock()
+	defer s.brandFlowMu.Unlock()
+	switch stage {
+	case "core":
+		if !s.brandFlow.evidenceReady {
+			return fmt.Errorf("core cannot be published before brand evidence is ready")
+		}
+		if s.brandFlow.searchAttempts > 0 {
+			return fmt.Errorf("core cannot be published after native web search has started")
+		}
+		if s.brandFlow.corePublished || s.brandFlow.corePublishing {
+			return fmt.Errorf("core has already been published")
+		}
+		s.brandFlow.corePublishing = true
+	case "competitors":
+		if !s.brandFlow.corePublished {
+			return fmt.Errorf("competitors cannot be published before core")
+		}
+		if s.brandFlow.competitorsPublished || s.brandFlow.competitorsPublishing {
+			return fmt.Errorf("competitors have already been published")
+		}
+		if s.brandFlow.searchAttempts > 1 {
+			return fmt.Errorf("competitors cannot be published after more than one native web search attempt")
+		}
+		status, _ := result["status"].(string)
+		if status != "unavailable" && !s.brandFlow.searchCompleted {
+			return fmt.Errorf("ready competitors require one completed native web search")
+		}
+		if status == "unavailable" && s.brandFlow.searchTraceID != "" && !s.brandFlow.searchCompleted {
+			return fmt.Errorf("competitors cannot be closed while native web search is running")
+		}
+		s.brandFlow.competitorsPublishing = true
+	default:
+		return fmt.Errorf("unsupported brand analysis stage")
+	}
+	return nil
+}
+
+func (s *appServerSession) finishBrandAnalysisStagePublication(stage string, success bool) {
+	s.brandFlowMu.Lock()
+	defer s.brandFlowMu.Unlock()
+	switch stage {
+	case "core":
+		s.brandFlow.corePublishing = false
+		if success {
+			s.brandFlow.corePublished = true
+		}
+	case "competitors":
+		s.brandFlow.competitorsPublishing = false
+		if success {
+			s.brandFlow.competitorsPublished = true
+		}
+	}
+}
+
+func (s *appServerSession) advanceBrandAnalysisStage(stage string, result map[string]any) error {
+	if err := s.beginBrandAnalysisStagePublication(stage, result); err != nil {
+		return err
+	}
+	s.finishBrandAnalysisStagePublication(stage, true)
+	return nil
+}
+
+func (s *appServerSession) noteBrandWebSearchStarted(traceID string) {
+	if !s.isBrandAnalysisRuntime() {
+		return
+	}
+	s.brandFlowMu.Lock()
+	defer s.brandFlowMu.Unlock()
+	s.brandFlow.searchAttempts++
+	if !s.brandFlow.corePublished {
+		slog.Warn("brand analysis native web search started before core", "trace_id", traceID)
+		return
+	}
+	if s.brandFlow.competitorsPublished {
+		slog.Warn("brand analysis native web search started after competitors", "trace_id", traceID)
+		return
+	}
+	if s.brandFlow.searchTraceID != "" {
+		slog.Warn("brand analysis attempted more than one native web search",
+			"trace_id", traceID, "attempt", s.brandFlow.searchAttempts)
+		return
+	}
+	s.brandFlow.searchTraceID = traceID
+}
+
+func (s *appServerSession) noteBrandWebSearchCompleted(traceID string) {
+	if !s.isBrandAnalysisRuntime() {
+		return
+	}
+	s.brandFlowMu.Lock()
+	defer s.brandFlowMu.Unlock()
+	if traceID != "" && traceID == s.brandFlow.searchTraceID {
+		s.brandFlow.searchCompleted = true
+	}
+}
+
+func brandEvidenceForModel(result map[string]any) map[string]any {
+	compact := make(map[string]any, 16)
+	for _, key := range []string{
+		"brandName", "productName", "canonicalUrl", "oneLiner", "description",
+		"productType", "audience",
+	} {
+		if value, ok := result[key]; ok && value != nil {
+			if text := boundedText(value, 1200); text != "" {
+				compact[key] = text
+			}
+		}
+	}
+	for _, key := range []string{"categories", "targetMarkets", "keyFeatures", "slogans", "headings"} {
+		if values := normalizedStringList(result[key], 12, 320); len(values) > 0 {
+			compact[key] = stringsToAny(values)
+		}
+	}
+	if meta, ok := result["meta"].(map[string]any); ok {
+		compact["meta"] = boundedEvidenceObject(meta, 2)
+	}
+	if jsonLD := compactJSONLDEvidence(result["jsonLd"]); len(jsonLD) > 0 {
+		compact["jsonLd"] = jsonLD
+	}
+	if pages := compactBrandEvidencePages(result["evidencePages"]); len(pages) > 0 {
+		compact["evidencePages"] = pages
+	}
+	return compact
+}
+
+func compactBrandEvidencePages(raw any) []any {
+	items, _ := raw.([]any)
+	pages := make([]any, 0, min(len(items), 6))
+	for _, item := range items {
+		page, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		compact := map[string]any{}
+		for _, key := range []string{"url", "role", "title", "description"} {
+			if value := boundedText(page[key], map[string]int{
+				"url": 2048, "role": 32, "title": 240, "description": 500,
+			}[key]); value != "" {
+				compact[key] = value
+			}
+		}
+		if values := normalizedStringList(page["headings"], 8, 240); len(values) > 0 {
+			compact["headings"] = stringsToAny(values)
+		}
+		if values := normalizedStringList(page["snippets"], 8, 360); len(values) > 0 {
+			compact["snippets"] = stringsToAny(values)
+		}
+		if len(compact) > 0 {
+			pages = append(pages, compact)
+		}
+		if len(pages) == 6 {
+			break
+		}
+	}
+	return pages
+}
+
+func compactJSONLDEvidence(raw any) []any {
+	items, _ := raw.([]any)
+	compact := make([]any, 0, min(len(items), 5))
+	for _, item := range items {
+		object, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		selected := map[string]any{}
+		for _, key := range []string{
+			"@type", "name", "description", "brand", "applicationCategory",
+			"operatingSystem", "audience", "offers",
+		} {
+			if value, exists := object[key]; exists {
+				selected[key] = boundedEvidenceValue(value, 2)
+			}
+		}
+		if len(selected) > 0 {
+			compact = append(compact, selected)
+		}
+		if len(compact) == 5 {
+			break
+		}
+	}
+	return compact
+}
+
+func boundedEvidenceObject(raw map[string]any, depth int) map[string]any {
+	compact := make(map[string]any, min(len(raw), 16))
+	count := 0
+	for key, value := range raw {
+		if count == 16 {
+			break
+		}
+		compact[boundedText(key, 80)] = boundedEvidenceValue(value, depth)
+		count++
+	}
+	return compact
+}
+
+func boundedEvidenceValue(raw any, depth int) any {
+	if depth <= 0 {
+		return boundedText(fmt.Sprint(raw), 400)
+	}
+	switch value := raw.(type) {
+	case string:
+		return boundedText(value, 500)
+	case float64, int, int64, bool:
+		return value
+	case map[string]any:
+		return boundedEvidenceObject(value, depth-1)
+	case []any:
+		items := make([]any, 0, min(len(value), 6))
+		for _, item := range value {
+			items = append(items, boundedEvidenceValue(item, depth-1))
+			if len(items) == 6 {
+				break
+			}
+		}
+		return items
+	default:
+		return boundedText(fmt.Sprint(value), 400)
+	}
+}
+
+func (s *appServerSession) writeDynamicToolResponse(rawID json.RawMessage, success bool, message string) {
 	_ = s.writeJSON(map[string]any{
 		"jsonrpc": "2.0", "id": rawID,
 		"result": map[string]any{
-			"success":      false,
-			"contentItems": []map[string]any{{"type": "inputText", "text": "tool not available on this client"}},
+			"success":      success,
+			"contentItems": []map[string]any{{"type": "inputText", "text": message}},
 		},
+	})
+}
+
+func (s *appServerSession) isBrandAnalysisRuntime() bool {
+	s.runtimeMu.RLock()
+	defer s.runtimeMu.RUnlock()
+	return strings.EqualFold(strings.TrimSpace(s.runtime.Scene), "brand_analysis")
+}
+
+func brandAnalysisDynamicTools() []map[string]any {
+	return []map[string]any{
+		{
+			"type":        "function",
+			"name":        "collect_brand_evidence",
+			"description": "Fetch the submitted official website once and return deterministic first-party brand evidence. Call this before semantic analysis.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"url": map[string]any{"type": "string", "format": "uri"},
+				},
+				"required":             []string{"url"},
+				"additionalProperties": false,
+			},
+			"deferLoading": false,
+		},
+		{
+			"type":        "function",
+			"name":        "publish_brand_analysis_stage",
+			"description": "Persist one validated brand-analysis stage. Publish core before competitor search; publish competitors after the single native web search finishes or becomes unavailable.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"stage":  map[string]any{"type": "string", "enum": []string{"core", "competitors"}},
+					"result": map[string]any{"type": "object"},
+				},
+				"required":             []string{"stage", "result"},
+				"additionalProperties": false,
+			},
+			"deferLoading": false,
+		},
+	}
+}
+
+func (s *appServerSession) collectBrandEvidence(arguments map[string]any) (map[string]any, error) {
+	rawURL, _ := arguments["url"].(string)
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil, fmt.Errorf("url must be an absolute public http/https URL")
+	}
+	if !isPublicHostname(parsed.Hostname()) {
+		return nil, fmt.Errorf("url host must be public")
+	}
+	script := strings.TrimSpace(os.Getenv("TOMAKO_BRAND_CRAWL_SCRIPT"))
+	if script == "" {
+		script = "/home/ubuntu/Skills-OL/brand-crawl.mjs"
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, 35*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "node", script, parsed.String(),
+		"--onboarding-fast", "--max-screenshots=0", "--emit-platform-result")
+	cmd.Dir = s.workDir
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("brand evidence collection timed out")
+		}
+		message := strings.TrimSpace(stderr.String())
+		if len(message) > 600 {
+			message = message[:600]
+		}
+		return nil, fmt.Errorf("brand evidence collection failed: %s", message)
+	}
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		var event struct {
+			Type   string         `json:"type"`
+			Result map[string]any `json:"result"`
+		}
+		if json.Unmarshal([]byte(line), &event) == nil && event.Type == "platform_result" && event.Result != nil {
+			return event.Result, nil
+		}
+	}
+	return nil, fmt.Errorf("brand evidence collector returned no structured result")
+}
+
+func validateBrandAnalysisStage(arguments map[string]any) (string, map[string]any, error) {
+	stage, _ := arguments["stage"].(string)
+	result, _ := arguments["result"].(map[string]any)
+	if result == nil {
+		return "", nil, fmt.Errorf("result must be an object")
+	}
+	allowed := map[string]struct{}{}
+	switch stage {
+	case "core":
+		clean, err := normalizeCoreBrandAnalysis(result)
+		if err != nil {
+			return "", nil, err
+		}
+		return stage, clean, nil
+	case "competitors":
+		allowed["competitors"] = struct{}{}
+		allowed["status"] = struct{}{}
+	default:
+		return "", nil, fmt.Errorf("unsupported brand analysis stage")
+	}
+	clean := make(map[string]any, len(result))
+	for key, value := range result {
+		if _, ok := allowed[key]; ok {
+			clean[key] = value
+		}
+	}
+	if stage == "competitors" {
+		clean["competitors"] = normalizeCompetitorCandidates(result["competitors"])
+		if len(clean["competitors"].([]any)) == 0 {
+			clean["status"] = "unavailable"
+		} else {
+			clean["status"] = "complete"
+		}
+	}
+	return stage, clean, nil
+}
+
+func normalizeCoreBrandAnalysis(result map[string]any) (map[string]any, error) {
+	clean := make(map[string]any, 11)
+	for _, key := range []string{"productName", "brandName", "oneLiner", "description", "audience"} {
+		if value := boundedText(result[key], 1200); value != "" {
+			clean[key] = value
+		}
+	}
+	productType := boundedText(result["productType"], 48)
+	if _, ok := stringSet(
+		"SaaS", "Software", "Hardware", "Service", "E-commerce", "Marketplace",
+		"Media / Content", "Game", "API / Developer Tool", "Agency", "Other",
+	)[productType]; !ok {
+		return nil, fmt.Errorf("core.productType is invalid")
+	}
+	clean["productType"] = productType
+	platforms := normalizedStringList(result["platforms"], 9, 48)
+	allowedPlatforms := stringSet(
+		"Web", "iOS", "Android", "WeChat Mini Program", "Desktop", "API",
+		"Browser Extension", "Physical / Offline", "Other",
+	)
+	for _, platform := range platforms {
+		if _, ok := allowedPlatforms[platform]; !ok {
+			return nil, fmt.Errorf("core.platforms contains an invalid value")
+		}
+	}
+	if len(platforms) == 0 {
+		return nil, fmt.Errorf("core.platforms is required")
+	}
+	clean["platforms"] = stringsToAny(platforms)
+	features := normalizedStringList(result["keyFeatures"], 8, 240)
+	if len(features) < 3 {
+		return nil, fmt.Errorf("core.keyFeatures requires at least 3 items")
+	}
+	clean["keyFeatures"] = stringsToAny(features)
+	if categories := normalizedStringList(result["categories"], 4, 80); len(categories) > 0 {
+		clean["categories"] = stringsToAny(categories)
+	}
+	if markets := normalizedStringList(result["targetMarkets"], 8, 80); len(markets) > 0 {
+		clean["targetMarkets"] = stringsToAny(markets)
+	}
+	segments := normalizeAudienceSegments(result["audienceSegments"])
+	if len(segments) > 0 {
+		clean["audienceSegments"] = segments
+	}
+	if _, hasAudience := clean["audience"]; !hasAudience && len(segments) == 0 {
+		return nil, fmt.Errorf("core audience evidence is required")
+	}
+	return clean, nil
+}
+
+func normalizeAudienceSegments(raw any) []any {
+	items, _ := raw.([]any)
+	clean := make([]any, 0, 4)
+	seen := make(map[string]struct{})
+	for _, item := range items {
+		segment, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		name := boundedText(segment["name"], 100)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		clean = append(clean, map[string]any{
+			"name":        name,
+			"description": boundedText(segment["description"], 400),
+		})
+		if len(clean) == 4 {
+			break
+		}
+	}
+	return clean
+}
+
+func normalizeCompetitorCandidates(raw any) []any {
+	items, _ := raw.([]any)
+	clean := make([]any, 0, len(items))
+	seenNames := map[string]struct{}{}
+	seenHosts := map[string]struct{}{}
+	for _, item := range items {
+		candidate, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		name := strings.TrimSpace(stringFromAny(candidate["name"]))
+		parsed, err := url.Parse(strings.TrimSpace(stringFromAny(candidate["websiteUrl"])))
+		host := strings.ToLower(parsed.Hostname())
+		if err != nil || name == "" || parsed.User != nil || host == "" || !strings.Contains(host, ".") {
+			continue
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			continue
+		}
+		if parsed.Port() != "" && parsed.Port() != "80" && parsed.Port() != "443" {
+			continue
+		}
+		if !isPublicHostname(host) {
+			continue
+		}
+		nameKey := strings.ToLower(name)
+		if _, duplicate := seenNames[nameKey]; duplicate {
+			continue
+		}
+		if _, duplicate := seenHosts[host]; duplicate {
+			continue
+		}
+		seenNames[nameKey] = struct{}{}
+		seenHosts[host] = struct{}{}
+		relationship := stringFromAny(candidate["relationship"])
+		if relationship != "direct" && relationship != "adjacent" && relationship != "alternative" {
+			relationship = "adjacent"
+		}
+		confidence := stringFromAny(candidate["confidence"])
+		if confidence != "medium" {
+			confidence = "low"
+		}
+		clean = append(clean, map[string]any{
+			"name":         boundedText(name, 120),
+			"websiteUrl":   "https://" + host + "/",
+			"businessLine": boundedText(candidate["businessLine"], 200),
+			"angle":        boundedText(candidate["angle"], 400),
+			"relationship": relationship,
+			"confidence":   confidence,
+		})
+		if len(clean) == 5 {
+			break
+		}
+	}
+	return clean
+}
+
+func stringFromAny(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func nonEmptyAnySlice(value any) bool {
+	items, ok := value.([]any)
+	return ok && len(items) > 0
+}
+func boundedText(value any, max int) string {
+	text := strings.TrimSpace(stringFromAny(value))
+	if len(text) > max {
+		return text[:max]
+	}
+	return text
+}
+
+func normalizedStringList(raw any, limit, maxLength int) []string {
+	items, _ := raw.([]any)
+	clean := make([]string, 0, min(len(items), limit))
+	seen := make(map[string]struct{})
+	for _, item := range items {
+		value := boundedText(item, maxLength)
+		key := strings.ToLower(value)
+		if value == "" {
+			continue
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		clean = append(clean, value)
+		if len(clean) == limit {
+			break
+		}
+	}
+	return clean
+}
+
+func stringsToAny(values []string) []any {
+	items := make([]any, 0, len(values))
+	for _, value := range values {
+		items = append(items, value)
+	}
+	return items
+}
+
+func stringSet(values ...string) map[string]struct{} {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		set[value] = struct{}{}
+	}
+	return set
+}
+
+func isPublicHostname(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	if host == "" || host == "localhost" || strings.HasSuffix(host, ".localhost") ||
+		strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
+		return false
+	}
+	if address, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
+		return address.IsGlobalUnicast() && !address.IsPrivate() && !address.IsLoopback() &&
+			!address.IsLinkLocalUnicast() && !address.IsUnspecified()
+	}
+	return strings.Contains(host, ".")
+}
+
+func (s *appServerSession) emitLifecycle(stage string, duration time.Duration) {
+	s.emit(core.Event{
+		Type:       core.EventLifecycle,
+		TraceID:    fmt.Sprintf("lifecycle-%s-%d", stage, time.Now().UnixNano()),
+		ToolName:   "AgentLifecycle",
+		ToolInput:  stage,
+		ToolStatus: "completed",
+		Metadata:   map[string]any{"duration_ms": duration.Milliseconds()},
 	})
 }
 
@@ -899,7 +1738,15 @@ func appServerRequestUserInputResponseFromResult(questions []appServerRequestUse
 		if id == "" || text == "" {
 			continue
 		}
-		values := appServerRequestUserInputAnswerValues(answersRaw[text])
+		// Bridge-native interactions answer by the stable question ID. Older
+		// adapters used the rendered question text, so retain that only as a
+		// compatibility fallback. Looking up text alone silently converted a
+		// valid multi-select response into {"answers":{}} for Codex.
+		answer := answersRaw[id]
+		if answer == nil {
+			answer = answersRaw[text]
+		}
+		values := appServerRequestUserInputAnswerValues(answer)
 		if len(values) == 0 {
 			continue
 		}
@@ -1002,6 +1849,10 @@ func (s *appServerSession) Alive() bool {
 
 func (s *appServerSession) Close() error {
 	s.alive.Store(false)
+	s.runtimeMu.Lock()
+	removeTaskRuntimeEnv(s.taskRuntimeEnvFile)
+	s.taskRuntimeEnvFile = ""
+	s.runtimeMu.Unlock()
 	s.cancel()
 
 	s.procMu.Lock()
@@ -1200,7 +2051,17 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 	case "turn/completed":
 		var notif turnNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
-			s.completeTurn()
+			if notif.ThreadID != "" && notif.ThreadID != s.CurrentSessionID() {
+				return
+			}
+			var turnErr error
+			switch {
+			case notif.Turn.Error != nil && strings.TrimSpace(notif.Turn.Error.Message) != "":
+				turnErr = fmt.Errorf("codex app-server turn failed: %s", notif.Turn.Error.Message)
+			case notif.Turn.Status == "failed", notif.Turn.Status == "interrupted":
+				turnErr = fmt.Errorf("codex app-server turn %s", notif.Turn.Status)
+			}
+			s.completeTurn(notif.Turn.ID, turnErr)
 		}
 
 	case "turn/plan/updated":
@@ -1238,16 +2099,8 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		}
 
 	case "thread/status/changed":
-		var notif struct {
-			ThreadID string `json:"threadId"`
-			Status   struct {
-				Type string `json:"type"`
-			} `json:"status"`
-		}
-		if err := json.Unmarshal(paramsRaw, &notif); err == nil && notif.Status.Type == "idle" {
-			// In codex 0.125+, thread going idle signals turn completion.
-			s.completeTurn()
-		}
+		// Idle describes thread activity, not success. Only turn/completed
+		// carries the authoritative completed/failed/interrupted outcome.
 
 	case "account/rateLimits/updated":
 		var notif appServerRateLimitsResponse
@@ -1263,8 +2116,26 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 
 	case "error":
 		var notif errorNotification
-		if err := json.Unmarshal(paramsRaw, &notif); err == nil && strings.TrimSpace(notif.Message) != "" {
-			s.emitError(fmt.Errorf("%s", notif.Message))
+		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
+			if notif.ThreadID != "" && notif.ThreadID != s.CurrentSessionID() {
+				return
+			}
+			if notif.WillRetry {
+				slog.Warn("codex app-server retrying after transient error", "turn_id", notif.TurnID)
+				return
+			}
+			message := notif.Message
+			if notif.Error != nil {
+				message = notif.Error.Message
+			}
+			if strings.TrimSpace(message) != "" {
+				failure := fmt.Errorf("codex app-server: %s", message)
+				if notif.TurnID == "" {
+					s.emitError(failure)
+				} else {
+					s.completeTurn(notif.TurnID, failure)
+				}
+			}
 		}
 	}
 }
@@ -1296,6 +2167,7 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 
 	case "webSearch":
 		query, _ := item["query"].(string)
+		s.noteBrandWebSearchStarted(itemID)
 		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "WebSearch", ToolInput: query})
 
 	case "dynamicToolCall":
@@ -1387,6 +2259,7 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 
 	case "webSearch":
 		query, _ := item["query"].(string)
+		s.noteBrandWebSearchCompleted(itemID)
 		s.emit(core.Event{
 			Type:       core.EventToolResult,
 			TraceID:    itemID,
@@ -1640,14 +2513,21 @@ func rpcIDToInt64(v any) (int64, bool) {
 	return 0, false
 }
 
-func (s *appServerSession) completeTurn() {
+func (s *appServerSession) completeTurn(turnID string, turnErr error) {
 	s.stateMu.Lock()
-	if s.currentTurn == "" {
+	if s.currentTurn == "" || (turnID != "" && turnID != s.currentTurn) {
 		s.stateMu.Unlock()
 		return
 	}
 	s.currentTurn = ""
+	if turnErr != nil {
+		s.pendingMsgs = s.pendingMsgs[:0]
+	}
 	s.stateMu.Unlock()
+	if turnErr != nil {
+		s.emitError(turnErr)
+		return
+	}
 	s.flushPendingAsText()
 	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
 }

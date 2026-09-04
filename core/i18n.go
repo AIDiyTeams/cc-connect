@@ -185,6 +185,7 @@ const (
 	MsgFailedToStartAgentSession MsgKey = "failed_to_start_agent_session"
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
 	MsgEmptyResponse             MsgKey = "empty_response"
+	MsgAgentEmptyResponse        MsgKey = "agent_empty_response"
 	MsgPermissionPrompt          MsgKey = "permission_prompt"
 	MsgPermissionAllowed         MsgKey = "permission_allowed"
 	MsgPermissionApproveAll      MsgKey = "permission_approve_all"
@@ -834,6 +835,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "(空回應)",
 		LangJapanese:           "（空のレスポンス）",
 		LangSpanish:            "(respuesta vacía)",
+	},
+	MsgAgentEmptyResponse: {
+		LangEnglish:            "❌ The Agent returned no usable result. Please retry; if the problem continues, check the configured model provider.",
+		LangChinese:            "❌ Agent 未返回可用结果。请重试；如果问题持续，请检查当前模型供应方。",
+		LangTraditionalChinese: "❌ Agent 未返回可用結果。請重試；如果問題持續，請檢查目前模型供應方。",
+		LangJapanese:           "❌ Agent から利用可能な結果が返されませんでした。再試行し、問題が続く場合は設定中のモデルプロバイダーを確認してください。",
+		LangSpanish:            "❌ El Agent no devolvió un resultado utilizable. Vuelve a intentarlo; si el problema continúa, revisa el proveedor de modelo configurado.",
 	},
 	MsgPermissionPrompt: {
 		LangEnglish:            "⚠️ **Permission Request**\n\nAgent wants to use **%s**:\n\n```\n%s\n```\n\nReply **allow** / **deny** / **allow all** (skip all future prompts this session).",

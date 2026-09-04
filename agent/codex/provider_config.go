@@ -62,7 +62,9 @@ func ensureCodexAuth(codexHome, apiKey string) error {
 	if err != nil {
 		return fmt.Errorf("codex: marshal auth.json: %w", err)
 	}
-	if err := os.WriteFile(authPath, append(data, '\n'), 0o600); err != nil {
+	// Inherited auth may be a symlink to the developer's global login. Rename
+	// a private file over the link; never follow it and overwrite that login.
+	if err := writeFileAtomic(authPath, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("codex: write auth.json: %w", err)
 	}
 	slog.Debug("codex: wrote auth.json", "path", authPath)
@@ -100,7 +102,7 @@ func resolveCodexHomeForConfig(explicit string) (string, error) {
 //
 // Later ensureCodexProviderConfig / ensureCodexAuth calls can still upsert
 // per-session overrides on top of the inherited baseline.
-func ensureCodexHomeInheritedConfig(codexHome string) error {
+func ensureCodexHomeInheritedConfig(codexHome, permissionsProfile, sharedSkillsDir string) error {
 	home := strings.TrimSpace(codexHome)
 	if home == "" {
 		return nil
@@ -122,6 +124,7 @@ func ensureCodexHomeInheritedConfig(codexHome string) error {
 	globalConfig := filepath.Join(globalHome, "config.toml")
 	if globalData, err := os.ReadFile(globalConfig); err == nil {
 		providerCfg := extractProviderConfig(string(globalData))
+		providerCfg = addPermissionReadPath(providerCfg, permissionsProfile, sharedSkillsDir)
 		if strings.TrimSpace(providerCfg) != "" {
 			perUserData, perr := os.ReadFile(perUserConfig)
 			switch {
@@ -167,6 +170,51 @@ func ensureCodexHomeInheritedConfig(codexHome string) error {
 	return nil
 }
 
+// addPermissionReadPath grants the active fenced profile read-only access to the
+// environment-specific shared Skills directory. The host's global Codex config
+// may point at a production symlink, while cc-connect test intentionally selects
+// a different Skills root through SKILLS_OL_DIR. Without adding that exact root
+// to the inherited profile, Codex can discover the Skill but sandboxed tool calls
+// cannot read or execute its companion scripts.
+func addPermissionReadPath(config, permissionsProfile, sharedSkillsDir string) string {
+	profile := strings.TrimSpace(permissionsProfile)
+	dir := filepath.Clean(strings.TrimSpace(sharedSkillsDir))
+	if profile == "" || dir == "." || !filepath.IsAbs(dir) {
+		return config
+	}
+
+	header := fmt.Sprintf("[permissions.%s.filesystem]", profile)
+	permission := fmt.Sprintf("%q = %q", dir, "read")
+	lines := strings.Split(config, "\n")
+	inTargetSection := false
+	insertAt := -1
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") {
+			if inTargetSection {
+				insertAt = i
+				break
+			}
+			inTargetSection = trimmed == header
+			continue
+		}
+		if inTargetSection && strings.HasPrefix(trimmed, fmt.Sprintf("%q", dir)) {
+			return config
+		}
+	}
+	if inTargetSection && insertAt == -1 {
+		insertAt = len(lines)
+	}
+	if insertAt == -1 {
+		return config
+	}
+
+	lines = append(lines, "")
+	copy(lines[insertAt+1:], lines[insertAt:])
+	lines[insertAt] = permission
+	return strings.Join(lines, "\n")
+}
+
 // extractTrustOnly returns the per-user-specific parts of a codex config.toml
 // ([projects.*] trust sections and any non-shared top-level keys), stripping
 // provider routing and permissions config that is re-synced from the global
@@ -193,6 +241,7 @@ func extractTrustOnly(config string) string {
 				strings.HasPrefix(trimmed, "model =") ||
 				strings.HasPrefix(trimmed, "model_reasoning_effort") ||
 				strings.HasPrefix(trimmed, "default_permissions") ||
+				strings.HasPrefix(trimmed, "project_root_markers") ||
 				strings.HasPrefix(trimmed, "approval_policy") ||
 				strings.HasPrefix(trimmed, "sandbox_mode") ||
 				strings.HasPrefix(trimmed, "disable_response_storage") {
@@ -227,6 +276,7 @@ func extractProviderConfig(config string) string {
 				strings.HasPrefix(trimmed, "model =") ||
 				strings.HasPrefix(trimmed, "model_reasoning_effort") ||
 				strings.HasPrefix(trimmed, "default_permissions") ||
+				strings.HasPrefix(trimmed, "project_root_markers") ||
 				strings.HasPrefix(trimmed, "approval_policy") ||
 				strings.HasPrefix(trimmed, "sandbox_mode") ||
 				strings.HasPrefix(trimmed, "disable_response_storage") {

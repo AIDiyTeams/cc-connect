@@ -64,6 +64,10 @@ func register(t *testing.T, conn *websocket.Conn, platform string, caps []string
 	if ack["ok"] != true {
 		t.Fatalf("register failed: %v", ack["error"])
 	}
+	capsOut, _ := ack["runtime_capabilities"].([]any)
+	if len(capsOut) != 2 || capsOut[0] != "output_schema_v1" || capsOut[1] != "turn_budget_v1" {
+		t.Fatalf("missing constrained output capability: %#v", ack)
+	}
 }
 
 func registerWithMetadata(t *testing.T, conn *websocket.Conn, platform string, caps []string, metadata map[string]any) {
@@ -307,6 +311,57 @@ func TestBridge_MessageRouting(t *testing.T) {
 	}
 }
 
+func TestBridge_MessageWithoutEngineReturnsTypedRejection(t *testing.T) {
+	_, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "turn_status"})
+
+	mustWriteJSON(t, conn, map[string]any{
+		"type":        "message",
+		"msg_id":      "m-no-engine",
+		"session_key": "java-backend:tn:1:project:missing",
+		"user_id":     "1",
+		"content":     "hello",
+		"reply_ctx":   "cmsg-no-engine",
+	})
+
+	msg := readMsg(t, conn)
+	if msg["type"] != "turn_status" || msg["state"] != "rejected" {
+		t.Fatalf("unexpected rejection frame: %v", msg)
+	}
+	if msg["reply_ctx"] != "cmsg-no-engine" || msg["code"] != "ENGINE_UNAVAILABLE" {
+		t.Fatalf("unexpected rejection identity: %v", msg)
+	}
+}
+
+func TestBridge_MessageWithoutHandlerReturnsTypedRejection(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	bp := bs.NewPlatform("test-proj")
+	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
+	bs.RegisterEngine("test-proj", e, bp)
+	bp.handler = nil
+
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "turn_status"})
+	mustWriteJSON(t, conn, map[string]any{
+		"type":        "message",
+		"msg_id":      "m-no-handler",
+		"session_key": "java-backend:tn:1:project:test-proj",
+		"user_id":     "1",
+		"content":     "hello",
+		"reply_ctx":   "cmsg-no-handler",
+		"project":     "test-proj",
+	})
+
+	msg := readMsg(t, conn)
+	if msg["type"] != "turn_status" || msg["state"] != "rejected" {
+		t.Fatalf("unexpected rejection frame: %v", msg)
+	}
+	if msg["reply_ctx"] != "cmsg-no-handler" || msg["code"] != "ENGINE_NOT_READY" {
+		t.Fatalf("unexpected rejection identity: %v", msg)
+	}
+}
+
 type bridgeInteractionResponse struct {
 	requestID string
 	result    PermissionResult
@@ -413,6 +468,58 @@ func TestBridge_CodexQuestionInteractionRoundTrip(t *testing.T) {
 
 	close(sess.unblock)
 	sess.events <- Event{Type: EventResult, Content: "done", Done: true}
+}
+
+func TestBridge_InteractionResponseRoutesPendingAcrossEnginesWithoutProject(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	targetPlatform := bs.NewPlatform("target-proj")
+	targetSession := newBridgeInteractionAgentSession("target-session")
+	targetEngine := NewEngine("target-proj", &controllableAgent{nextSession: targetSession}, []Platform{targetPlatform}, "", LangEnglish)
+	bs.RegisterEngine("target-proj", targetEngine, targetPlatform)
+
+	otherPlatform := bs.NewPlatform("other-proj")
+	otherEngine := NewEngine("other-proj", &stubAgent{}, []Platform{otherPlatform}, "", LangEnglish)
+	bs.RegisterEngine("other-proj", otherEngine, otherPlatform)
+
+	sessionKey := "bridge:room-multi:user-1"
+	targetEngine.interactiveMu.Lock()
+	targetEngine.interactiveStates["workspace-a:"+sessionKey] = &interactiveState{
+		agentSession: targetSession,
+		pending: &pendingPermission{
+			RequestID:     `"rui-multi-1"`,
+			InteractionID: "interaction-multi-1",
+			ToolName:      "AskUserQuestion",
+			ToolInput:     map[string]any{"questions": []any{}},
+			Questions: []UserQuestion{{
+				ID:       "mode",
+				Question: "Which mode?",
+				Options:  []UserQuestionOption{{ID: "advice", Label: "Advice only"}},
+			}},
+			Resolved: make(chan struct{}),
+		},
+	}
+	targetEngine.interactiveMu.Unlock()
+
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "bridge", []string{"text", "interactions"})
+	mustWriteJSON(t, conn, map[string]any{
+		"type":           "respond_interaction",
+		"session_key":    sessionKey,
+		"reply_ctx":      "llm-multi-1",
+		"interaction_id": "interaction-multi-1",
+		"answers": map[string][]string{
+			"mode": {"advice"},
+		},
+	})
+
+	select {
+	case response := <-targetSession.responses:
+		if response.requestID != `"rui-multi-1"` {
+			t.Fatalf("native request id = %q, want raw Codex JSON-RPC id", response.requestID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("respond_interaction without project did not reach the pending engine")
+	}
 }
 
 func TestBridge_MessageReplyCtxCarriesProgressHints(t *testing.T) {
@@ -1029,81 +1136,204 @@ func TestBridge_SessionMissingParams(t *testing.T) {
 }
 
 func TestBridge_TokenStreamReplyStream(t *testing.T) {
-	bs, wsURL := startTestBridge(t, "")
-	conn := dialWS(t, wsURL, nil)
-	register(t, conn, "java-backend", []string{"text", "preview", "token_stream", "update_message"})
+	for _, replyCtx := range []string{"cmsg-abc", "llm-task-1"} {
+		t.Run(replyCtx, func(t *testing.T) {
+			bs, wsURL := startTestBridge(t, "")
+			conn := dialWS(t, wsURL, nil)
+			register(t, conn, "java-backend", []string{"text", "preview", "token_stream", "update_message"})
 
-	bp := bs.NewPlatform("proj")
-	rc := newBridgeReplyCtx(bs.getAdapter("java-backend"), "java-backend:tn:1:project:p1", "cmsg-abc")
-	if !rc.tokenStream {
-		t.Fatal("cmsg- reply_ctx should enable tokenStream when capability present")
-	}
+			bp := bs.NewPlatform("proj")
+			rc := newBridgeReplyCtx(bs.getAdapter("java-backend"), "java-backend:tn:1:project:p1", replyCtx)
+			if !rc.tokenStream {
+				t.Fatal("registered reply_ctx should enable tokenStream when capability present")
+			}
 
-	handle, err := bp.SendPreviewStart(context.Background(), rc, "Hel")
-	if err != nil {
-		t.Fatalf("SendPreviewStart: %v", err)
-	}
-	msg := readMsg(t, conn)
-	if msg["type"] != "reply_stream" {
-		t.Fatalf("first frame type=%v want reply_stream", msg["type"])
-	}
-	if msg["reply_ctx"] != "cmsg-abc" {
-		t.Fatalf("reply_ctx=%v want cmsg-abc (must not be overwritten by preview handle)", msg["reply_ctx"])
-	}
-	if msg["full_text"] != "Hel" {
-		t.Fatalf("full_text=%v", msg["full_text"])
-	}
-	if msg["done"] == true {
-		t.Fatal("first frame should not be done")
-	}
+			handle, err := bp.SendPreviewStart(context.Background(), rc, "Hel")
+			if err != nil {
+				t.Fatalf("SendPreviewStart: %v", err)
+			}
+			msg := readMsg(t, conn)
+			if msg["type"] != "reply_stream" {
+				t.Fatalf("first frame type=%v want reply_stream", msg["type"])
+			}
+			if msg["reply_ctx"] != replyCtx {
+				t.Fatalf("reply_ctx=%v must preserve the original reply_ctx (not preview handle)", msg["reply_ctx"])
+			}
+			if msg["full_text"] != "Hel" {
+				t.Fatalf("full_text=%v", msg["full_text"])
+			}
+			if msg["done"] == true {
+				t.Fatal("first frame should not be done")
+			}
 
-	if err := bp.UpdateMessage(context.Background(), handle, "Hello"); err != nil {
-		t.Fatalf("UpdateMessage: %v", err)
-	}
-	msg = readMsg(t, conn)
-	if msg["type"] != "reply_stream" {
-		t.Fatalf("update frame type=%v", msg["type"])
-	}
-	if msg["delta"] != "lo" {
-		t.Fatalf("delta=%v want lo", msg["delta"])
-	}
-	if msg["full_text"] != "Hello" {
-		t.Fatalf("full_text=%v", msg["full_text"])
-	}
+			if err := bp.UpdateMessage(context.Background(), handle, "Hello"); err != nil {
+				t.Fatalf("UpdateMessage: %v", err)
+			}
+			msg = readMsg(t, conn)
+			if msg["type"] != "reply_stream" {
+				t.Fatalf("update frame type=%v", msg["type"])
+			}
+			if msg["delta"] != "lo" {
+				t.Fatalf("delta=%v want lo", msg["delta"])
+			}
+			if msg["full_text"] != "Hello" {
+				t.Fatalf("full_text=%v", msg["full_text"])
+			}
 
-	if err := bp.CompleteStream(context.Background(), handle, "Hello"); err != nil {
-		t.Fatalf("CompleteStream: %v", err)
-	}
-	msg = readMsg(t, conn)
-	if msg["type"] != "reply_stream" || msg["done"] != true {
-		t.Fatalf("done frame=%v", msg)
-	}
-	if msg["reply_ctx"] != "cmsg-abc" {
-		t.Fatalf("done reply_ctx=%v", msg["reply_ctx"])
+			if err := bp.CompleteStream(context.Background(), handle, "Hello"); err != nil {
+				t.Fatalf("CompleteStream: %v", err)
+			}
+			msg = readMsg(t, conn)
+			if msg["type"] != "reply_stream" || msg["done"] != true {
+				t.Fatalf("done frame=%v", msg)
+			}
+			if msg["reply_ctx"] != replyCtx {
+				t.Fatalf("done reply_ctx=%v", msg["reply_ctx"])
+			}
+		})
 	}
 }
 
-func TestBridge_LlmTaskStreamsPublicReplyText(t *testing.T) {
+func TestBridge_TurnDispatchStatusIsNotAReply(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
 	conn := dialWS(t, wsURL, nil)
-	register(t, conn, "java-backend", []string{"text", "preview", "token_stream", "update_message"})
+	register(t, conn, "java-backend", []string{"text", "turn_status"})
+
+	bp := bs.NewPlatform("proj")
+	rc := newBridgeReplyCtx(
+		bs.getAdapter("java-backend"),
+		"java-backend:tn:1:project:p1",
+		"cmsg-queued",
+	)
+	if err := bp.ReportTurnDispatchStatus(context.Background(), rc, TurnDispatchStatus{
+		State: "queued", QueueDepth: 2, Message: "queued",
+	}); err != nil {
+		t.Fatalf("ReportTurnDispatchStatus: %v", err)
+	}
+	msg := readMsg(t, conn)
+	if msg["type"] != "turn_status" {
+		t.Fatalf("type=%v want turn_status", msg["type"])
+	}
+	if msg["state"] != "queued" || msg["queue_depth"] != float64(2) {
+		t.Fatalf("unexpected turn status: %v", msg)
+	}
+	if msg["reply_ctx"] != "cmsg-queued" {
+		t.Fatalf("reply_ctx=%v", msg["reply_ctx"])
+	}
+}
+
+func TestBridge_TurnFailureUsesTypedErrorEvent(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text"})
+
+	bp := bs.NewPlatform("proj")
+	rc := newBridgeReplyCtx(
+		bs.getAdapter("java-backend"),
+		"java-backend:tn:1:project:p1",
+		"cmsg-runtime-error",
+	)
+	if err := bp.ReportTurnFailure(context.Background(), rc, TurnFailure{
+		Code: "AGENT_RUNTIME_ERROR", Message: "agent failed",
+	}); err != nil {
+		t.Fatalf("ReportTurnFailure: %v", err)
+	}
+	msg := readMsg(t, conn)
+	if msg["type"] != "error" || msg["reply_ctx"] != "cmsg-runtime-error" {
+		t.Fatalf("unexpected failure frame: %v", msg)
+	}
+	if msg["code"] != "AGENT_RUNTIME_ERROR" || msg["error"] != "agent failed" {
+		t.Fatalf("unexpected failure details: %v", msg)
+	}
+}
+
+func TestBridge_InteractionResponseStatusUsesTypedEvent(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "interaction_status"})
+
+	adapter := bs.getAdapter("java-backend")
+	adapter.sendInteractionResponseStatus(bridgeRespondInteraction{
+		SessionKey:    "java-backend:tn:1:project:p1",
+		ReplyCtx:      "cmsg-interaction",
+		InteractionID: "interaction-1",
+	}, "rejected", "INTERACTION_NOT_PENDING")
+
+	msg := readMsg(t, conn)
+	if msg["type"] != "interaction_response_status" || msg["state"] != "rejected" {
+		t.Fatalf("unexpected interaction status: %v", msg)
+	}
+	if msg["code"] != "INTERACTION_NOT_PENDING" {
+		t.Fatalf("code=%v", msg["code"])
+	}
+}
+
+func TestBridge_PlatformReportsInteractionResponseStatusWithoutReply(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "interaction_status"})
+
+	bp := bs.NewPlatform("proj")
+	rc := newBridgeReplyCtx(
+		bs.getAdapter("java-backend"),
+		"java-backend:tn:1:project:p1",
+		"cmsg-interaction-platform",
+	)
+	if err := bp.ReportInteractionResponseStatus(context.Background(), rc, InteractionResponseStatus{
+		InteractionID: "interaction-platform-1",
+		State:         "accepted",
+	}); err != nil {
+		t.Fatalf("ReportInteractionResponseStatus: %v", err)
+	}
+
+	msg := readMsg(t, conn)
+	if msg["type"] != "interaction_response_status" || msg["state"] != "accepted" {
+		t.Fatalf("unexpected interaction status: %v", msg)
+	}
+	if msg["interaction_id"] != "interaction-platform-1" {
+		t.Fatalf("interaction_id=%v", msg["interaction_id"])
+	}
+}
+
+func TestBridge_LlmTaskWithoutTokenStreamKeepsCoarseUpdateMessage(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "preview", "update_message"})
 
 	bp := bs.NewPlatform("proj")
 	rc := newBridgeReplyCtx(bs.getAdapter("java-backend"), "java-backend:tn:1", "llm-task-1")
-	if !rc.tokenStream {
-		t.Fatal("llm- reply_ctx should enable tokenStream for public task text")
+	if rc.tokenStream {
+		t.Fatal("llm- reply_ctx must not enable tokenStream when the adapter lacks that capability")
 	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		msg := readMsg(t, conn)
+		if msg["type"] != "preview_start" {
+			errCh <- fmt.Errorf("expected preview_start, got %v", msg["type"])
+			return
+		}
+		refID, _ := msg["ref_id"].(string)
+		if err := conn.WriteJSON(map[string]any{
+			"type":           "preview_ack",
+			"ref_id":         refID,
+			"preview_handle": "ph-llm-1",
+		}); err != nil {
+			errCh <- err
+			return
+		}
+		errCh <- nil
+	}()
 
 	handle, err := bp.SendPreviewStart(context.Background(), rc, "Hi")
 	if err != nil {
 		t.Fatalf("SendPreviewStart: %v", err)
 	}
-	msg := readMsg(t, conn)
-	if msg["type"] != "reply_stream" || msg["full_text"] != "Hi" {
-		t.Fatalf("first frame=%v", msg)
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
 	}
 	h, ok := handle.(*bridgeReplyCtx)
-	if !ok {
+	if !ok || h.PreviewHandle != "ph-llm-1" {
 		t.Fatalf("handle=%#v", handle)
 	}
 	if h.ReplyCtx != "llm-task-1" {
@@ -1117,15 +1347,15 @@ func TestBridge_LlmTaskStreamsPublicReplyText(t *testing.T) {
 	if err := bp.UpdateMessage(context.Background(), handle, "Hi there"); err != nil {
 		t.Fatalf("UpdateMessage: %v", err)
 	}
-	msg = readMsg(t, conn)
-	if msg["type"] != "reply_stream" {
-		t.Fatalf("LLM Task update type=%v want reply_stream", msg["type"])
+	msg := readMsg(t, conn)
+	if msg["type"] != "update_message" {
+		t.Fatalf("LLM Task update type=%v want update_message (coarse)", msg["type"])
 	}
 	if msg["reply_ctx"] != "llm-task-1" {
 		t.Fatalf("reply_ctx=%v", msg["reply_ctx"])
 	}
-	if msg["full_text"] != "Hi there" || msg["delta"] != " there" {
-		t.Fatalf("stream frame=%v", msg)
+	if msg["content"] != "Hi there" {
+		t.Fatalf("content=%v", msg["content"])
 	}
 
 	if err := bp.CompleteStream(context.Background(), handle, "Hi there"); err != nil {
@@ -1256,20 +1486,62 @@ func TestBridge_SessionNameInStatus(t *testing.T) {
 	}
 }
 
+func TestBridge_ReportAgentStructuredResultRequiresCapabilityAndDelivers(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	withoutCapability := dialWS(t, wsURL, nil)
+	register(t, withoutCapability, "plain-backend", []string{"text"})
+	bp := bs.NewPlatform("proj")
+	plainCtx := newBridgeReplyCtx(
+		bs.getAdapter("plain-backend"),
+		"plain-backend:workspace:user",
+		"llm-brand-plain",
+	)
+	if err := bp.ReportAgentStructuredResult(context.Background(), plainCtx, "core", map[string]any{"productType": "SaaS"}); err == nil {
+		t.Fatal("structured result succeeded without the agent_trace capability")
+	}
+
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "agent_trace"})
+	rc := newBridgeReplyCtx(
+		bs.getAdapter("java-backend"),
+		"java-backend:workspace:user",
+		"llm-brand-capable",
+	)
+	if err := bp.ReportAgentStructuredResult(context.Background(), rc, "core", map[string]any{"productType": "SaaS"}); err != nil {
+		t.Fatalf("ReportAgentStructuredResult: %v", err)
+	}
+	msg := readMsg(t, conn)
+	if msg["type"] != "agent_structured_result" || msg["stage"] != "core" {
+		t.Fatalf("structured result payload = %#v", msg)
+	}
+}
+
 func TestNormalizeSessionRuntime_WhitelistsModalitiesAndBoundsOpaqueValues(t *testing.T) {
 	runtime := normalizeSessionRuntime(SessionRuntime{
-		LogicalModel:       strings.Repeat("x", 80),
-		GatewayModel:       "  tomako/vision-balanced-v1  ",
-		RoutePolicyVersion: -1,
-		TurnNo:             -2,
-		RequiredModalities: []string{"text", " IMAGE ", "unknown"},
+		Scene:                    strings.Repeat("s", 80),
+		LogicalModel:             strings.Repeat("x", 80),
+		GatewayModel:             "  tomako/vision-balanced-v1  ",
+		WebSearch:                " LIVE ",
+		RoutePolicyVersion:       -1,
+		TurnNo:                   -2,
+		RequiredModalities:       []string{"text", " IMAGE ", "unknown"},
+		ReasoningEffort:          " LOW ",
+		MachineCapabilityToken:   " machine-token ",
+		ImageCapabilityToken:     " image-token ",
+		TaskAuthorityEnvelopeB64: " envelope ",
 	})
 
 	if len(runtime.LogicalModel) != 64 {
 		t.Fatalf("logical model length = %d, want 64", len(runtime.LogicalModel))
 	}
+	if len(runtime.Scene) != 64 || runtime.ReasoningEffort != "low" {
+		t.Fatalf("scene/effort normalization failed: %#v", runtime)
+	}
 	if runtime.GatewayModel != "tomako/vision-balanced-v1" {
 		t.Fatalf("gateway model = %q", runtime.GatewayModel)
+	}
+	if runtime.WebSearch != "live" {
+		t.Fatalf("web search = %q", runtime.WebSearch)
 	}
 	if runtime.RoutePolicyVersion != 0 || runtime.TurnNo != 0 {
 		t.Fatalf("negative numbers were not normalized: %#v", runtime)
@@ -1277,170 +1549,15 @@ func TestNormalizeSessionRuntime_WhitelistsModalitiesAndBoundsOpaqueValues(t *te
 	if got, want := strings.Join(runtime.RequiredModalities, ","), "TEXT,IMAGE"; got != want {
 		t.Fatalf("modalities = %q, want %q", got, want)
 	}
-}
-
-func TestBridge_ReportAgentTrace_ThinkingEmitsAgentThinkingFrame(t *testing.T) {
-	bs, wsURL := startTestBridge(t, "")
-	conn := dialWS(t, wsURL, nil)
-	register(t, conn, "java-backend", []string{"text", "agent_trace"})
-
-	bp := bs.NewPlatform("test")
-	rc := &bridgeReplyCtx{Platform: "java-backend", SessionKey: "bridge:java-backend:ws-1", ReplyCtx: "llm-abc123"}
-	content := strings.TrimRight(strings.Repeat("step-by-step reasoning. ", 400), " ") // no trailing ws: bridge trims
-	if err := bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{
-		TraceID: "trace-1", Type: EventThinking, Content: content,
-	}); err != nil {
-		t.Fatalf("ReportAgentTrace thinking: %v", err)
+	if runtime.MachineCapabilityToken != "machine-token" ||
+		runtime.ImageCapabilityToken != "image-token" ||
+		runtime.TaskAuthorityEnvelopeB64 != "envelope" {
+		t.Fatalf("machine authority normalization failed: %#v", runtime)
 	}
-
-	msg := readMsg(t, conn)
-	if msg["type"] != "agent_thinking" {
-		t.Fatalf("frame type = %v, want agent_thinking", msg["type"])
-	}
-	if msg["reply_ctx"] != "llm-abc123" {
-		t.Fatalf("reply_ctx = %v", msg["reply_ctx"])
-	}
-	got, _ := msg["content"].(string)
-	if got != content {
-		t.Fatalf("thinking content not forwarded in full: %d bytes vs %d", len(got), len(content))
-	}
-	if msg["occurred_at"] == "" {
-		t.Fatalf("occurred_at missing")
-	}
-}
-
-func TestBridge_ReportAgentTrace_ThinkingTruncatesTo64KB(t *testing.T) {
-	bs, wsURL := startTestBridge(t, "")
-	conn := dialWS(t, wsURL, nil)
-	register(t, conn, "java-backend", []string{"text", "agent_trace"})
-
-	bp := bs.NewPlatform("test")
-	rc := &bridgeReplyCtx{Platform: "java-backend", SessionKey: "s", ReplyCtx: "llm-abc123"}
-	huge := strings.Repeat("x", 200_000)
-	if err := bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{
-		TraceID: "trace-1", Type: EventThinking, Content: huge,
-	}); err != nil {
-		t.Fatalf("ReportAgentTrace thinking: %v", err)
-	}
-	msg := readMsg(t, conn)
-	got, _ := msg["content"].(string)
-	if len(got) != 65536 {
-		t.Fatalf("content len = %d, want 65536", len(got))
-	}
-}
-
-func TestBridge_ReportAgentTrace_ThinkingForwardedForChatReplyCtx(t *testing.T) {
-	bs, wsURL := startTestBridge(t, "")
-	conn := dialWS(t, wsURL, nil)
-	register(t, conn, "java-backend", []string{"text", "agent_trace"})
-
-	bp := bs.NewPlatform("test")
-	rc := &bridgeReplyCtx{Platform: "java-backend", SessionKey: "s", ReplyCtx: "cmsg-abc123"}
-	if err := bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{
-		TraceID: "trace-1", Type: EventThinking, Content: "chat thoughts",
-	}); err != nil {
-		t.Fatalf("ReportAgentTrace thinking: %v", err)
-	}
-	msg := readMsg(t, conn)
-	if msg["type"] != "agent_thinking" || msg["reply_ctx"] != "cmsg-abc123" {
-		t.Fatalf("chat thinking frame = %v", msg)
-	}
-}
-
-func TestBridge_ReportAgentTrace_ThinkingSkippedForOtherReplyCtx(t *testing.T) {
-	bs, wsURL := startTestBridge(t, "")
-	conn := dialWS(t, wsURL, nil)
-	register(t, conn, "java-backend", []string{"text", "agent_trace"})
-
-	bp := bs.NewPlatform("test")
-	rc := &bridgeReplyCtx{Platform: "java-backend", SessionKey: "s", ReplyCtx: "tg-chat-123"}
-	if err := bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{
-		TraceID: "trace-1", Type: EventThinking, Content: "secret thoughts",
-	}); err != nil {
-		t.Fatalf("ReportAgentTrace thinking: %v", err)
-	}
-	if err := conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
-		t.Fatalf("set read deadline: %v", err)
-	}
-	var m map[string]any
-	if err := conn.ReadJSON(&m); err == nil {
-		t.Fatalf("expected no frame for non-bridge reply ctx, got %v", m)
-	}
-}
-
-func TestBridge_ReportAgentTrace_ToolTraceStillTaskOnly(t *testing.T) {
-	bs, wsURL := startTestBridge(t, "")
-	conn := dialWS(t, wsURL, nil)
-	register(t, conn, "java-backend", []string{"text", "agent_trace"})
-
-	bp := bs.NewPlatform("test")
-	rc := &bridgeReplyCtx{Platform: "java-backend", SessionKey: "s", ReplyCtx: "cmsg-abc123"}
-	if err := bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{
-		TraceID: "trace-9", Type: EventToolUse, ToolName: "shell", Input: "ls",
-	}); err != nil {
-		t.Fatalf("ReportAgentTrace tool use: %v", err)
-	}
-	if err := conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
-		t.Fatalf("set read deadline: %v", err)
-	}
-	var m map[string]any
-	if err := conn.ReadJSON(&m); err == nil {
-		t.Fatalf("expected no tool trace frame for chat reply ctx, got %v", m)
-	}
-}
-
-func TestBridge_ReportAgentTrace_ThinkingRequiresAdapterCapability(t *testing.T) {
-	bs, wsURL := startTestBridge(t, "")
-	conn := dialWS(t, wsURL, nil)
-	register(t, conn, "java-backend", []string{"text"}) // no agent_trace
-
-	bp := bs.NewPlatform("test")
-	rc := &bridgeReplyCtx{Platform: "java-backend", SessionKey: "s", ReplyCtx: "llm-abc123"}
-	if err := bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{
-		TraceID: "trace-1", Type: EventThinking, Content: "thoughts",
-	}); err != nil {
-		t.Fatalf("ReportAgentTrace thinking: %v", err)
-	}
-	if err := conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
-		t.Fatalf("set read deadline: %v", err)
-	}
-	var m map[string]any
-	if err := conn.ReadJSON(&m); err == nil {
-		t.Fatalf("expected no frame without agent_trace capability, got %v", m)
-	}
-}
-
-func TestBridge_ReportAgentTrace_ToolTraceFramesUnchanged(t *testing.T) {
-	bs, wsURL := startTestBridge(t, "")
-	conn := dialWS(t, wsURL, nil)
-	register(t, conn, "java-backend", []string{"text", "agent_trace"})
-
-	bp := bs.NewPlatform("test")
-	rc := &bridgeReplyCtx{Platform: "java-backend", SessionKey: "s", ReplyCtx: "llm-abc123"}
-	if err := bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{
-		TraceID: "trace-2", Type: EventToolUse, ToolName: "shell", Input: "ls",
-	}); err != nil {
-		t.Fatalf("ReportAgentTrace tool use: %v", err)
-	}
-	msg := readMsg(t, conn)
-	if msg["type"] != "agent_trace" {
-		t.Fatalf("frame type = %v, want agent_trace", msg["type"])
-	}
-	if msg["event_type"] != "tool_use" || msg["tool_name"] != "shell" {
-		t.Fatalf("tool_use frame = %v", msg)
-	}
-
-	time.Sleep(2 * time.Millisecond) // ensure duration_ms > 0 so the frame carries it
-	if err := bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{
-		TraceID: "trace-2", Type: EventToolResult, ToolName: "shell", Output: "ok", Status: "success",
-	}); err != nil {
-		t.Fatalf("ReportAgentTrace tool result: %v", err)
-	}
-	msg = readMsg(t, conn)
-	if msg["type"] != "agent_trace" || msg["event_type"] != "tool_result" {
-		t.Fatalf("tool_result frame = %v", msg)
-	}
-	if msg["duration_ms"] == nil {
-		t.Fatalf("tool_result frame missing duration_ms: %v", msg)
+	invalid := normalizeSessionRuntime(SessionRuntime{
+		MachineCapabilityToken: "secret\nleak",
+	})
+	if invalid.MachineCapabilityToken != "" {
+		t.Fatalf("control-character secret was retained: %#v", invalid)
 	}
 }

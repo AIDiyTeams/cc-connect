@@ -24,17 +24,63 @@ type AgentTraceReporter interface {
 }
 
 type AgentTraceEvent struct {
-	TraceID  string
-	Type     EventType
-	ToolName string
-	Input    string
-	Output   string
-	Status   string
-	ExitCode *int
-	Success  *bool
+	TraceID    string
+	Type       EventType
+	ToolName   string
+	Input      string
+	Output     string
+	Status     string
+	ExitCode   *int
+	Success    *bool
+	DurationMs int64
 	// Content carries full model thinking text for EventThinking reports;
 	// it stays separate from Input/Output, which remain tool-result fields.
 	Content string
+}
+
+// AgentStructuredResultReporter transports a validated dynamic-tool result to
+// the trusted control plane. It is intentionally separate from visible chat
+// output and from the redacted tool-audit stream.
+type AgentStructuredResultReporter interface {
+	ReportAgentStructuredResult(ctx context.Context, replyCtx any, stage string, result map[string]any) error
+}
+
+// TurnDispatchStatusReporter is an optional machine-readable transport for
+// admission-control outcomes. A queued or rejected turn is operational state,
+// not an Agent answer, so adapters must never receive it through Reply.
+type TurnDispatchStatusReporter interface {
+	ReportTurnDispatchStatus(ctx context.Context, replyCtx any, status TurnDispatchStatus) error
+}
+
+type TurnDispatchStatus struct {
+	State      string
+	QueueDepth int
+	Message    string
+}
+
+// TurnFailureReporter carries terminal runtime failures on a typed transport
+// event. A failure is operational state, not an Agent-authored reply; control
+// planes must be able to mark the durable turn FAILED without parsing prose.
+type TurnFailureReporter interface {
+	ReportTurnFailure(ctx context.Context, replyCtx any, failure TurnFailure) error
+}
+
+type TurnFailure struct {
+	Code    string
+	Message string
+}
+
+// InteractionResponseStatusReporter is an optional machine-readable transport
+// for AskUserQuestion/approval acknowledgements. These acknowledgements are
+// runtime state, not Agent-authored conversation content.
+type InteractionResponseStatusReporter interface {
+	ReportInteractionResponseStatus(ctx context.Context, replyCtx any, status InteractionResponseStatus) error
+}
+
+type InteractionResponseStatus struct {
+	InteractionID string
+	State         string
+	Code          string
 }
 
 // ErrNotSupported indicates a platform doesn't support a particular operation.
@@ -473,6 +519,12 @@ type AgentSession interface {
 // agent configuration or another concurrent session.
 type SessionRuntimeConfigurer interface {
 	SetSessionRuntime(runtime SessionRuntime) error
+}
+
+// NativeOutputSchemaSession opts into enforcing Runtime.OutputSchema in the
+// model runtime, rather than treating the schema as instructions in the prompt.
+type NativeOutputSchemaSession interface {
+	SupportsOutputSchema() bool
 }
 
 // PermissionResult represents the user's decision on a permission request.

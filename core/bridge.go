@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -25,6 +26,7 @@ import (
 // A single instance is created globally; each project engine receives a
 // lightweight BridgePlatform handle that delegates to this server.
 type BridgeServer struct {
+	host        string
 	port        int
 	token       string
 	path        string
@@ -293,6 +295,9 @@ func (bs *BridgeServer) RegisterEngine(projectName string, engine *Engine, bp *B
 	bs.engines[projectName] = &bridgeEngineRef{engine: engine, platform: bp}
 }
 
+// SetHost selects the bind address before Start. Empty preserves the default.
+func (bs *BridgeServer) SetHost(host string) { bs.host = strings.TrimSpace(host) }
+
 // Start launches the HTTP/WebSocket server.
 func (bs *BridgeServer) Start() {
 	mux := http.NewServeMux()
@@ -302,7 +307,7 @@ func (bs *BridgeServer) Start() {
 	mux.HandleFunc("/bridge/sessions", bs.corsHTTP(bs.authHTTP(bs.handleSessions)))
 	mux.HandleFunc("/bridge/sessions/", bs.corsHTTP(bs.authHTTP(bs.handleSessionRoutes)))
 
-	addr := fmt.Sprintf(":%d", bs.port)
+	addr := net.JoinHostPort(bs.host, strconv.Itoa(bs.port))
 	bs.server = &http.Server{Addr: addr, Handler: mux}
 
 	go func() {
@@ -387,24 +392,28 @@ type BridgePlatform struct {
 
 // Compile-time interface checks.
 var (
-	_ Platform                  = (*BridgePlatform)(nil)
-	_ CardSender                = (*BridgePlatform)(nil)
-	_ InlineButtonSender        = (*BridgePlatform)(nil)
-	_ MessageUpdater            = (*BridgePlatform)(nil)
-	_ StatusFooterSender        = (*BridgePlatform)(nil)
-	_ StatusFooterUpdater       = (*BridgePlatform)(nil)
-	_ StreamCompleter           = (*BridgePlatform)(nil)
-	_ PreviewStarter            = (*BridgePlatform)(nil)
-	_ PreviewCleaner            = (*BridgePlatform)(nil)
-	_ PreviewFinishPreference   = (*BridgePlatform)(nil)
-	_ TypingIndicator           = (*BridgePlatform)(nil)
-	_ AudioSender               = (*BridgePlatform)(nil)
-	_ VideoSender               = (*BridgePlatform)(nil)
-	_ ImageSender               = (*BridgePlatform)(nil)
-	_ FileSender                = (*BridgePlatform)(nil)
-	_ CardNavigable             = (*BridgePlatform)(nil)
-	_ ReplyContextReconstructor = (*BridgePlatform)(nil)
-	_ AgentTraceReporter        = (*BridgePlatform)(nil)
+	_ Platform                          = (*BridgePlatform)(nil)
+	_ CardSender                        = (*BridgePlatform)(nil)
+	_ InlineButtonSender                = (*BridgePlatform)(nil)
+	_ MessageUpdater                    = (*BridgePlatform)(nil)
+	_ StatusFooterSender                = (*BridgePlatform)(nil)
+	_ StatusFooterUpdater               = (*BridgePlatform)(nil)
+	_ StreamCompleter                   = (*BridgePlatform)(nil)
+	_ PreviewStarter                    = (*BridgePlatform)(nil)
+	_ PreviewCleaner                    = (*BridgePlatform)(nil)
+	_ PreviewFinishPreference           = (*BridgePlatform)(nil)
+	_ TypingIndicator                   = (*BridgePlatform)(nil)
+	_ AudioSender                       = (*BridgePlatform)(nil)
+	_ VideoSender                       = (*BridgePlatform)(nil)
+	_ ImageSender                       = (*BridgePlatform)(nil)
+	_ FileSender                        = (*BridgePlatform)(nil)
+	_ CardNavigable                     = (*BridgePlatform)(nil)
+	_ ReplyContextReconstructor         = (*BridgePlatform)(nil)
+	_ AgentTraceReporter                = (*BridgePlatform)(nil)
+	_ AgentStructuredResultReporter     = (*BridgePlatform)(nil)
+	_ TurnDispatchStatusReporter        = (*BridgePlatform)(nil)
+	_ TurnFailureReporter               = (*BridgePlatform)(nil)
+	_ InteractionResponseStatusReporter = (*BridgePlatform)(nil)
 )
 
 func (bp *BridgePlatform) Name() string { return "bridge" }
@@ -415,6 +424,77 @@ func (bp *BridgePlatform) Start(handler MessageHandler) error {
 }
 
 func (bp *BridgePlatform) Stop() error { return nil }
+
+func (bp *BridgePlatform) ReportTurnDispatchStatus(
+	ctx context.Context,
+	replyCtx any,
+	status TurnDispatchStatus,
+) error {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok {
+		return fmt.Errorf("bridge: invalid reply context type %T", replyCtx)
+	}
+	a := bp.server.getAdapter(rc.Platform)
+	if a == nil || !a.capabilities["turn_status"] {
+		return ErrNotSupported
+	}
+	payload := map[string]any{
+		"type":        "turn_status",
+		"session_key": rc.SessionKey,
+		"reply_ctx":   rc.ReplyCtx,
+		"state":       strings.TrimSpace(status.State),
+		"queue_depth": status.QueueDepth,
+	}
+	if message := strings.TrimSpace(status.Message); message != "" {
+		payload["message"] = message
+	}
+	return bp.server.sendToAdapter(rc.Platform, payload)
+}
+
+func (bp *BridgePlatform) ReportTurnFailure(
+	ctx context.Context,
+	replyCtx any,
+	failure TurnFailure,
+) error {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok {
+		return fmt.Errorf("bridge: invalid reply context type %T", replyCtx)
+	}
+	payload := map[string]any{
+		"type":        "error",
+		"session_key": rc.SessionKey,
+		"reply_ctx":   rc.ReplyCtx,
+		"code":        strings.TrimSpace(failure.Code),
+		"error":       strings.TrimSpace(failure.Message),
+	}
+	return bp.server.sendToAdapter(rc.Platform, payload)
+}
+
+func (bp *BridgePlatform) ReportInteractionResponseStatus(
+	ctx context.Context,
+	replyCtx any,
+	status InteractionResponseStatus,
+) error {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok {
+		return fmt.Errorf("bridge: invalid reply context type %T", replyCtx)
+	}
+	a := bp.server.getAdapter(rc.Platform)
+	if a == nil || !a.capabilities["interaction_status"] {
+		return ErrNotSupported
+	}
+	payload := map[string]any{
+		"type":           "interaction_response_status",
+		"session_key":    rc.SessionKey,
+		"reply_ctx":      rc.ReplyCtx,
+		"interaction_id": strings.TrimSpace(status.InteractionID),
+		"state":          strings.TrimSpace(status.State),
+	}
+	if code := strings.TrimSpace(status.Code); code != "" {
+		payload["code"] = code
+	}
+	return bp.server.sendToAdapter(rc.Platform, payload)
+}
 
 func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, event AgentTraceEvent) error {
 	rc, ok := replyCtx.(*bridgeReplyCtx)
@@ -449,7 +529,7 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 		return nil
 	}
 	key := rc.ReplyCtx + ":" + event.TraceID
-	var durationMs int64
+	durationMs := event.DurationMs
 	if event.Type == EventToolUse {
 		bp.traceStarted.Store(key, now)
 	} else if started, found := bp.traceStarted.LoadAndDelete(key); found {
@@ -475,6 +555,34 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 	}
 	if event.Success != nil {
 		payload["success"] = *event.Success
+	}
+	return bp.server.sendToAdapter(rc.Platform, payload)
+}
+
+func (bp *BridgePlatform) ReportAgentStructuredResult(
+	ctx context.Context,
+	replyCtx any,
+	stage string,
+	result map[string]any,
+) error {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok || !strings.HasPrefix(rc.ReplyCtx, "llm-") {
+		return fmt.Errorf("bridge: structured result requires an llm task reply context")
+	}
+	a := bp.server.getAdapter(rc.Platform)
+	if a == nil {
+		return fmt.Errorf("bridge: adapter %q not connected", rc.Platform)
+	}
+	if !a.capabilities["agent_trace"] {
+		return fmt.Errorf("bridge: adapter %q does not support agent structured results", rc.Platform)
+	}
+	payload := map[string]any{
+		"type":        "agent_structured_result",
+		"session_key": rc.SessionKey,
+		"reply_ctx":   rc.ReplyCtx,
+		"stage":       boundedOpaqueValue(stage, 32),
+		"result":      result,
+		"occurred_at": time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	return bp.server.sendToAdapter(rc.Platform, payload)
 }
@@ -1275,7 +1383,10 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 	bs.adapters[reg.Platform] = adapter
 	bs.mu.Unlock()
 
-	if err := writeJSON(conn, &adapter.writeMu, map[string]any{"type": "register_ack", "ok": true}); err != nil {
+	if err := writeJSON(conn, &adapter.writeMu, map[string]any{
+		"type": "register_ack", "ok": true,
+		"runtime_capabilities": []string{"output_schema_v1", "turn_budget_v1"},
+	}); err != nil {
 		slog.Debug("bridge: write register ack failed", "error", err)
 		return
 	}
@@ -1343,13 +1454,68 @@ func (a *bridgeAdapter) handleRespondInteraction(raw json.RawMessage) {
 		slog.Debug("bridge: invalid respond_interaction payload", "error", err)
 		return
 	}
-	ref := a.server.resolveEngine(response.SessionKey, response.Project)
+	ref := a.server.resolveInteractionEngine(response.SessionKey, response.Project, response.InteractionID)
 	if ref == nil {
+		slog.Warn("bridge: no engine for interaction response",
+			"interaction_id", response.InteractionID,
+			"session_key", response.SessionKey,
+			"project", response.Project)
+		a.sendInteractionResponseStatus(response, "rejected", "INTERACTION_NOT_PENDING")
 		return
 	}
 	if err := ref.engine.RespondInteraction(response.SessionKey, response.InteractionID, response.Decision, response.Answers); err != nil {
 		slog.Warn("bridge: interaction response rejected", "interaction_id", response.InteractionID, "error", err)
+		a.sendInteractionResponseStatus(response, "rejected", "INTERACTION_RUNTIME_REJECTED")
+		return
 	}
+	a.sendInteractionResponseStatus(response, "accepted", "")
+}
+
+func (a *bridgeAdapter) sendInteractionResponseStatus(
+	response bridgeRespondInteraction,
+	state string,
+	code string,
+) {
+	if a == nil || !a.capabilities["interaction_status"] || strings.TrimSpace(response.ReplyCtx) == "" {
+		return
+	}
+	payload := map[string]any{
+		"type":           "interaction_response_status",
+		"session_key":    response.SessionKey,
+		"reply_ctx":      response.ReplyCtx,
+		"interaction_id": response.InteractionID,
+		"state":          state,
+	}
+	if code != "" {
+		payload["code"] = code
+	}
+	if err := a.server.sendToAdapter(a.platform, payload); err != nil {
+		slog.Warn("bridge: interaction response status delivery failed",
+			"interaction_id", response.InteractionID, "state", state, "error", err)
+	}
+}
+
+// resolveInteractionEngine routes a structured answer by its exact pending
+// interaction. Portal responses may omit project, and session ownership alone
+// is insufficient when engines use workspace-scoped session managers.
+func (bs *BridgeServer) resolveInteractionEngine(sessionKey, project, interactionID string) *bridgeEngineRef {
+	if ref := bs.resolveEngine(sessionKey, project); ref != nil &&
+		ref.engine.hasPendingInteraction(sessionKey, interactionID) {
+		return ref
+	}
+
+	bs.enginesMu.RLock()
+	refs := make([]*bridgeEngineRef, 0, len(bs.engines))
+	for _, ref := range bs.engines {
+		refs = append(refs, ref)
+	}
+	bs.enginesMu.RUnlock()
+	for _, ref := range refs {
+		if ref.engine.hasPendingInteraction(sessionKey, interactionID) {
+			return ref
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1371,6 +1537,7 @@ func (a *bridgeAdapter) handleMessage(raw json.RawMessage) {
 	ref := a.server.resolveEngine(m.SessionKey, m.Project)
 	if ref == nil {
 		slog.Warn("bridge: no engine for session", "platform", a.platform, "session_key", m.SessionKey, "project", m.Project)
+		a.sendTurnDispatchRejection(m, "ENGINE_UNAVAILABLE", "no engine is available for this session")
 		return
 	}
 
@@ -1421,14 +1588,51 @@ func (a *bridgeAdapter) handleMessage(raw json.RawMessage) {
 		"user", m.UserID, "content_len", len(m.Content),
 	)
 
-	if ref.platform.handler != nil {
-		ref.platform.handler(ref.platform, msg)
+	if ref.platform.handler == nil {
+		slog.Warn("bridge: engine platform has no message handler", "platform", a.platform, "session_key", m.SessionKey, "project", m.Project)
+		a.sendTurnDispatchRejection(m, "ENGINE_NOT_READY", "engine message handler is not ready")
+		return
+	}
+	ref.platform.handler(ref.platform, msg)
+}
+
+// A successfully written WebSocket frame is not proof that a turn entered an
+// engine. Report pre-admission failures on the existing typed turn-status lane
+// so the control plane can fail the durable assistant message instead of
+// leaving it PENDING forever. Older adapters simply omit this capability.
+func (a *bridgeAdapter) sendTurnDispatchRejection(m bridgeMessage, code, message string) {
+	if a == nil || !a.capabilities["turn_status"] || strings.TrimSpace(m.ReplyCtx) == "" {
+		return
+	}
+	payload := map[string]any{
+		"type":        "turn_status",
+		"session_key": m.SessionKey,
+		"reply_ctx":   m.ReplyCtx,
+		"state":       "rejected",
+		"queue_depth": 0,
+		"code":        strings.TrimSpace(code),
+		"message":     strings.TrimSpace(message),
+	}
+	if err := a.server.sendToAdapter(a.platform, payload); err != nil {
+		slog.Warn("bridge: turn rejection delivery failed",
+			"reply_ctx", m.ReplyCtx, "code", code, "error", err)
 	}
 }
 
 func normalizeSessionRuntime(runtime SessionRuntime) SessionRuntime {
+	runtime.Scene = boundedOpaqueValue(runtime.Scene, 64)
 	runtime.LogicalModel = boundedOpaqueValue(runtime.LogicalModel, 64)
 	runtime.GatewayModel = boundedOpaqueValue(runtime.GatewayModel, 128)
+	switch strings.ToLower(strings.TrimSpace(runtime.WebSearch)) {
+	case "live":
+		runtime.WebSearch = "live"
+	case "cached":
+		runtime.WebSearch = "cached"
+	case "disabled":
+		runtime.WebSearch = "disabled"
+	default:
+		runtime.WebSearch = ""
+	}
 	runtime.RoutePolicyID = boundedOpaqueValue(runtime.RoutePolicyID, 64)
 	runtime.InferenceRequestID = boundedOpaqueValue(runtime.InferenceRequestID, 96)
 	runtime.WorkspaceID = boundedOpaqueValue(runtime.WorkspaceID, 64)
@@ -1436,6 +1640,15 @@ func normalizeSessionRuntime(runtime SessionRuntime) SessionRuntime {
 	runtime.UserID = boundedOpaqueValue(runtime.UserID, 32)
 	runtime.ChatSessionID = boundedOpaqueValue(runtime.ChatSessionID, 64)
 	runtime.TaskID = boundedOpaqueValue(runtime.TaskID, 96)
+	runtime.MachineCapabilityToken = boundedSecretValue(runtime.MachineCapabilityToken, 16*1024)
+	runtime.ImageCapabilityToken = boundedSecretValue(runtime.ImageCapabilityToken, 16*1024)
+	runtime.TaskAuthorityEnvelopeB64 = boundedSecretValue(runtime.TaskAuthorityEnvelopeB64, 192*1024)
+	switch strings.ToLower(strings.TrimSpace(runtime.ReasoningEffort)) {
+	case "low", "medium", "high", "xhigh":
+		runtime.ReasoningEffort = strings.ToLower(strings.TrimSpace(runtime.ReasoningEffort))
+	default:
+		runtime.ReasoningEffort = ""
+	}
 	if runtime.RoutePolicyVersion < 0 {
 		runtime.RoutePolicyVersion = 0
 	}
@@ -1463,6 +1676,14 @@ func boundedOpaqueValue(value string, max int) string {
 	value = strings.TrimSpace(value)
 	if len(value) > max {
 		return value[:max]
+	}
+	return value
+}
+
+func boundedSecretValue(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if len(value) > max || strings.ContainsAny(value, "\r\n\x00") {
+		return ""
 	}
 	return value
 }

@@ -248,6 +248,52 @@ func TestHandleResultNoUsage(t *testing.T) {
 	}
 }
 
+func TestToolUseAndResultEmitPairedTraceEvents(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{
+		events: make(chan core.Event, 4),
+		ctx:    ctx,
+	}
+	cs.handleAssistant(map[string]any{
+		"message": map[string]any{
+			"content": []any{map[string]any{
+				"type": "tool_use",
+				"id":   "tool-123",
+				"name": "WebSearch",
+				"input": map[string]any{
+					"query": "brand competitors",
+				},
+			}},
+		},
+	})
+	use := <-cs.events
+	if use.Type != core.EventToolUse || use.TraceID != "tool-123" || use.ToolName != "WebSearch" {
+		t.Fatalf("unexpected tool use event: %#v", use)
+	}
+
+	cs.handleUser(map[string]any{
+		"message": map[string]any{
+			"content": []any{map[string]any{
+				"type":        "tool_result",
+				"tool_use_id": "tool-123",
+				"content":     []any{map[string]any{"type": "text", "text": "2 results"}},
+			}},
+		},
+	})
+	result := <-cs.events
+	if result.Type != core.EventToolResult || result.TraceID != "tool-123" {
+		t.Fatalf("unexpected tool result event: %#v", result)
+	}
+	if result.ToolName != "WebSearch" || result.ToolInput != use.ToolInput {
+		t.Fatalf("tool trace was not paired: %#v", result)
+	}
+	if result.ToolResult != "2 results" || result.ToolSuccess == nil || !*result.ToolSuccess {
+		t.Fatalf("unexpected tool result details: %#v", result)
+	}
+}
+
 func TestReadLoop_ChildHoldsStdoutPipe(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

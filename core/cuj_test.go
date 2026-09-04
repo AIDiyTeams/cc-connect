@@ -51,6 +51,9 @@ type cujAgent struct {
 	mu       sync.Mutex
 	sessions []*cujAgentSession
 	nextID   int
+	// nextDelayMs configures only the next created session. It lets CUJ tests
+	// keep a turn genuinely in flight while exercising stop/cancel behavior.
+	nextDelayMs int
 
 	// failStartCount lets tests simulate "agent process won't start" — the
 	// next N StartSession calls return failStartErr. Set both > 0 to use.
@@ -75,6 +78,8 @@ func (a *cujAgent) StartSession(_ context.Context, _ string) (AgentSession, erro
 	}
 	a.nextID++
 	s := newCUJAgentSession()
+	s.delayMs = a.nextDelayMs
+	a.nextDelayMs = 0
 	a.sessions = append(a.sessions, s)
 	return s, nil
 }
@@ -83,6 +88,23 @@ func (a *cujAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
 	return nil, nil
 }
 func (a *cujAgent) Stop() error { return nil }
+
+func (a *cujAgent) delayNextSession(delay time.Duration) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.nextDelayMs = int(delay / time.Millisecond)
+}
+
+func (a *cujAgent) firstSessionAcceptedPrompt() bool {
+	a.mu.Lock()
+	if len(a.sessions) == 0 {
+		a.mu.Unlock()
+		return false
+	}
+	s := a.sessions[0]
+	a.mu.Unlock()
+	return len(s.getSentPrompts()) > 0
+}
 
 // cujAgentSession is an AgentSession whose reply is controllable per-Send.
 // Tests can set reply (and optionally toolEvent) before each Send to drive
@@ -105,6 +127,7 @@ type cujAgentSession struct {
 
 	// observed
 	sentPrompts []string
+	sentFiles   [][]FileAttachment
 	closeCount  int
 }
 
@@ -125,9 +148,10 @@ func newCUJAgentSession() *cujAgentSession {
 	}
 }
 
-func (s *cujAgentSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+func (s *cujAgentSession) Send(prompt string, _ []ImageAttachment, files []FileAttachment) error {
 	s.mu.Lock()
 	s.sentPrompts = append(s.sentPrompts, prompt)
+	s.sentFiles = append(s.sentFiles, append([]FileAttachment(nil), files...))
 	reply := s.reply
 	delay := s.delayMs
 	override := s.nextEventOverride
@@ -628,6 +652,58 @@ func TestCUJ_G1_LLMFailureSurfacesErrorToUser(t *testing.T) {
 	}
 }
 
+// Long research gets its own budget; the next ordinary turn keeps the default.
+func TestCUJ_G1_TurnBudgetAppliesToOneTurnOnly(t *testing.T) {
+	env := newCUJEnv(t)
+	defer env.engine.Stop()
+	key := env.userSends("budget", "first turn")
+	env.waitFor("first reply", 5*time.Second, func() bool { return len(env.plat.getSent()) > 0 && !env.activeSession(key).Busy() })
+	env.agent.mu.Lock()
+	sess := env.agent.sessions[0]
+	env.agent.mu.Unlock()
+	sess.mu.Lock()
+	sess.delayMs = 200
+	sess.mu.Unlock()
+	env.engine.SetMaxTurnTime(50 * time.Millisecond)
+	env.plat.clearSent()
+	env.engine.ReceiveMessage(env.plat, &Message{SessionKey: key, Platform: "test", UserID: "budget", UserName: "budget", MessageID: "research", Content: "research", ReplyCtx: "ctx", Runtime: SessionRuntime{TurnBudgetSeconds: 1}})
+	env.waitFor("research reply", 5*time.Second, func() bool { return len(env.plat.getSent()) > 0 && !env.activeSession(key).Busy() })
+	if strings.Contains(strings.Join(env.plat.getSent(), " "), "maximum time") {
+		t.Fatal("research cut short by ordinary limit")
+	}
+	env.plat.clearSent()
+	env.userSends("budget", "ordinary turn")
+	env.waitFor("ordinary timeout", 5*time.Second, func() bool {
+		return strings.Contains(strings.Join(env.plat.getSent(), " "), "maximum time") && !env.activeSession(key).Busy()
+	})
+}
+
+func TestCUJ_G1_NativeSchemaFailureIsVisibleAndOrdinaryChatStillWorks(t *testing.T) {
+	env := newCUJEnv(t)
+	defer env.engine.Stop()
+	env.userSends("schema-user", "ordinary before")
+	env.waitFor("first ordinary reply", 3*time.Second, func() bool { return env.sentContains("ok") })
+
+	env.engine.ReceiveMessage(env.plat, &Message{
+		SessionKey: "test:schema-user", Platform: "test", MessageID: "schema-request",
+		UserID: "schema-user", UserName: "schema-user", Content: "structured research",
+		ReplyCtx: "ctx-schema-user", Runtime: SessionRuntime{OutputSchema: []byte(`{"type":"object"}`)},
+	})
+	env.waitFor("unsupported capability surfaced to user", 3*time.Second, func() bool {
+		return env.sentContains("does not support native output_schema")
+	})
+	before := len(env.plat.getSent())
+	env.userSends("schema-user", "ordinary after")
+	env.waitFor("ordinary chat recovers", 3*time.Second, func() bool {
+		for _, message := range env.plat.getSent()[before:] {
+			if strings.Contains(message, "ok") {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 // ===========================================================================
 // CUJ-E2 · A cron job created (programmatically by the agent or directly
 // via the store) shows up in /cron output for the same SessionKey.
@@ -1090,8 +1166,8 @@ func TestCUJ_A3_ImageReachesAgent(t *testing.T) {
 	msg := &Message{
 		SessionKey: "test:img", Platform: "test", MessageID: "img1",
 		UserID: "img", UserName: "img",
-		Content: "what is in this image",
-		Images:  []ImageAttachment{{MimeType: "image/png", Data: []byte("\x89PNG fake"), FileName: "chart.png"}},
+		Content:  "what is in this image",
+		Images:   []ImageAttachment{{MimeType: "image/png", Data: []byte("\x89PNG fake"), FileName: "chart.png"}},
 		ReplyCtx: "ctx",
 	}
 	e.ReceiveMessage(plat, msg)
@@ -1151,30 +1227,36 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 	dir := t.TempDir()
 	e := NewEngine("test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
 
-	msg := &Message{
-		SessionKey: "test:file", Platform: "test", MessageID: "f1",
-		UserID: "file", UserName: "file",
-		Content: "read this file",
-		Files:   []FileAttachment{{MimeType: "text/plain", Data: []byte("hello world"), FileName: "note.txt"}},
-		ReplyCtx: "ctx",
-	}
-	e.ReceiveMessage(plat, msg)
-
-	deadline := time.After(2 * time.Second)
-	for {
+	defer e.Stop()
+	for i := 0; i < 3; i++ {
+		name := fmt.Sprintf("note-%d.txt", i)
+		msg := &Message{
+			SessionKey: "test:file", Platform: "test", MessageID: name,
+			UserID: "file", UserName: "file", Content: "read this file",
+			Files:    []FileAttachment{{MimeType: "text/plain", Data: []byte("hello world"), FileName: name}},
+			ReplyCtx: "ctx",
+		}
+		e.ReceiveMessage(plat, msg)
+		deadline := time.After(5 * time.Second)
+		for len(plat.getSent()) < i+1 || e.sessions.GetOrCreateActive("test:file").Busy() {
+			select {
+			case <-deadline:
+				t.Fatal("file turn did not complete with a user-facing reply")
+			default:
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
 		agent.mu.Lock()
-		n := len(agent.sessions)
+		sess := agent.sessions[0]
 		agent.mu.Unlock()
-		if n > 0 {
-			return
-		}
-		select {
-		case <-deadline:
-			t.Fatal("agent never received the message with file attachment")
-		default:
-			time.Sleep(10 * time.Millisecond)
+		sess.mu.Lock()
+		files := sess.sentFiles[i]
+		sess.mu.Unlock()
+		if len(files) != 1 || files[0].FileName != name || string(files[0].Data) != "hello world" {
+			t.Fatalf("file content did not reach the agent: %+v", files)
 		}
 	}
+
 }
 
 // CUJ-A6 / A7 are intentionally covered at the platform layer
@@ -1392,8 +1474,9 @@ func TestCUJ_C2_PlanModeRequiresApproval(t *testing.T) {
 func TestCUJ_C5_StopKeepsSameSession(t *testing.T) {
 	env := newCUJEnv(t)
 	key := "test:c5"
+	env.agent.delayNextSession(2 * time.Second)
 	env.userSends("c5", "hello")
-	env.waitFor("turn1", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 1 })
+	env.waitFor("turn1 is running", 2*time.Second, env.agent.firstSessionAcceptedPrompt)
 	oldID := env.activeSession(key).ID
 
 	env.plat.clearSent()
@@ -1402,6 +1485,21 @@ func TestCUJ_C5_StopKeepsSameSession(t *testing.T) {
 
 	if env.activeSession(key).ID != oldID {
 		t.Fatalf("/stop changed active session %s → %s; should stay on same session", oldID, env.activeSession(key).ID)
+	}
+
+	// The next instruction may arrive immediately after the UI renders the
+	// stop acknowledgement. It must resume the same conversation as a new turn
+	// and must never expose cc-connect's internal /ps busy hint.
+	env.plat.clearSent()
+	env.userSends("c5", "continue with the correction")
+	env.waitFor("follow-up reply after stop", 2*time.Second, func() bool {
+		return len(env.plat.getSent()) >= 1
+	})
+	if env.sentContains("Previous request still processing") || env.sentContains("/ps <message>") {
+		t.Fatalf("follow-up after stop leaked internal busy hint: %v", env.plat.getSent())
+	}
+	if env.activeSession(key).ID != oldID {
+		t.Fatalf("follow-up after /stop changed active session %s → %s", oldID, env.activeSession(key).ID)
 	}
 }
 
@@ -1972,7 +2070,7 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 				userB++
 			}
 		}
-		if userA >= 5 && userB >= 5 {
+		if userA >= 5 && userB >= 5 && !e.sessions.GetOrCreateActive("platA:userA").Busy() && !e.sessions.GetOrCreateActive("platB:userB").Busy() {
 			break
 		}
 		select {

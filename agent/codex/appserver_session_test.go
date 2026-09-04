@@ -14,6 +14,378 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+func TestThreadParamsIncludeTaskScopedNativeWebSearch(t *testing.T) {
+	s := &appServerSession{
+		workDir:   "/srv/tomako/workspaces/brand-42",
+		model:     "tomako/deepseek-v4-flash-search",
+		webSearch: "live",
+	}
+
+	params := s.threadRequestParams()
+	config, ok := params["config"].(map[string]any)
+	if !ok || config["web_search"] != "live" {
+		t.Fatalf("thread params missing task-scoped native web search: %#v", params)
+	}
+	if config["features.default_mode_request_user_input"] != true {
+		t.Fatalf("thread params missing Default mode request_user_input feature: %#v", params)
+	}
+}
+
+func TestThreadParamsEnableDefaultModeRequestUserInputWithoutWebSearch(t *testing.T) {
+	s := &appServerSession{workDir: "/srv/tomako"}
+
+	params := s.threadRequestParams()
+	config, ok := params["config"].(map[string]any)
+	if !ok || config["features.default_mode_request_user_input"] != true {
+		t.Fatalf("thread params missing Default mode request_user_input feature: %#v", params)
+	}
+	if _, ok := config["web_search"]; ok {
+		t.Fatalf("thread params unexpectedly enabled web search: %#v", params)
+	}
+}
+
+func TestBrandAnalysisRuntimeRegistersOnlyDedicatedDynamicTools(t *testing.T) {
+	s := &appServerSession{workDir: "/srv/tomako"}
+	s.runtime = core.SessionRuntime{Scene: "brand_analysis"}
+
+	params := s.threadRequestParams()
+	tools, ok := params["dynamicTools"].([]map[string]any)
+	if !ok || len(tools) != 2 {
+		t.Fatalf("dynamic tools = %#v", params["dynamicTools"])
+	}
+	if tools[0]["name"] != "collect_brand_evidence" || tools[1]["name"] != "publish_brand_analysis_stage" {
+		t.Fatalf("unexpected brand tools: %#v", tools)
+	}
+}
+
+func TestBrandAnalysisRuntimeIsAppliedBeforeDeferredThreadCreation(t *testing.T) {
+	s := &appServerSession{workDir: "/srv/tomako"}
+	s.alive.Store(true)
+	if err := s.SetSessionRuntime(core.SessionRuntime{
+		Scene:           "brand_analysis",
+		GatewayModel:    "tomako/deepseek-v4-flash",
+		WebSearch:       "live",
+		ReasoningEffort: "low",
+	}); err != nil {
+		t.Fatalf("SetSessionRuntime: %v", err)
+	}
+
+	params := s.threadRequestParams()
+	if params["model"] != "tomako/deepseek-v4-flash" {
+		t.Fatalf("thread model = %#v", params["model"])
+	}
+	config, _ := params["config"].(map[string]any)
+	if config["web_search"] != "live" {
+		t.Fatalf("thread config = %#v", params["config"])
+	}
+	tools, _ := params["dynamicTools"].([]map[string]any)
+	if len(tools) != 2 {
+		t.Fatalf("dynamic tools = %#v", params["dynamicTools"])
+	}
+}
+
+func TestSessionRuntimeReplacesThreadAcrossBrandToolBoundary(t *testing.T) {
+	s := &appServerSession{}
+	s.alive.Store(true)
+	s.threadID.Store("thread-without-brand-tools")
+
+	if err := s.SetSessionRuntime(core.SessionRuntime{Scene: "brand_analysis"}); err != nil {
+		t.Fatalf("enter brand runtime: %v", err)
+	}
+	if got := s.CurrentSessionID(); got != "" {
+		t.Fatalf("thread without brand tools was reused: %q", got)
+	}
+
+	s.threadID.Store("thread-with-brand-tools")
+	s.threadBrandTools = true
+	if err := s.SetSessionRuntime(core.SessionRuntime{Scene: "studio_chat"}); err != nil {
+		t.Fatalf("leave brand runtime: %v", err)
+	}
+	if got := s.CurrentSessionID(); got != "" {
+		t.Fatalf("brand-tool thread leaked into a non-brand turn: %q", got)
+	}
+}
+
+func TestBrandAnalysisRuntimeResetsPerTaskFlowOnReusedBrandThread(t *testing.T) {
+	s := &appServerSession{}
+	s.alive.Store(true)
+	s.runtime = core.SessionRuntime{Scene: "brand_analysis"}
+	s.threadID.Store("warm-brand-thread")
+	s.threadBrandTools = true
+	s.brandFlow = brandAnalysisFlow{
+		evidenceReady:        true,
+		corePublished:        true,
+		searchAttempts:       1,
+		searchCompleted:      true,
+		competitorsPublished: true,
+	}
+
+	if err := s.SetSessionRuntime(core.SessionRuntime{Scene: "brand_analysis"}); err != nil {
+		t.Fatalf("reuse brand runtime: %v", err)
+	}
+	if got := s.CurrentSessionID(); got != "warm-brand-thread" {
+		t.Fatalf("warm brand thread should be reused, got %q", got)
+	}
+	if s.brandFlow != (brandAnalysisFlow{}) {
+		t.Fatalf("brand flow leaked from previous task: %#v", s.brandFlow)
+	}
+}
+
+func TestBrandAnalysisFlowEnforcesEvidenceCoreSearchCompetitorOrder(t *testing.T) {
+	s := &appServerSession{}
+	s.runtime = core.SessionRuntime{Scene: "brand_analysis"}
+
+	if err := s.advanceBrandAnalysisStage("core", map[string]any{}); err == nil {
+		t.Fatal("core published before evidence")
+	}
+	if err := s.beginBrandEvidenceCollection(); err != nil {
+		t.Fatalf("begin evidence: %v", err)
+	}
+	if err := s.beginBrandEvidenceCollection(); err == nil {
+		t.Fatal("duplicate evidence collection accepted")
+	}
+	s.finishBrandEvidenceCollection(true)
+	if err := s.beginBrandEvidenceCollection(); err == nil {
+		t.Fatal("second successful evidence collection accepted")
+	}
+	if err := s.advanceBrandAnalysisStage("core", map[string]any{}); err != nil {
+		t.Fatalf("publish core: %v", err)
+	}
+	if err := s.advanceBrandAnalysisStage("core", map[string]any{}); err == nil {
+		t.Fatal("duplicate core publication accepted")
+	}
+	readyCompetitors := map[string]any{"status": "complete", "competitors": []any{map[string]any{"name": "Canva"}}}
+	if err := s.advanceBrandAnalysisStage("competitors", readyCompetitors); err == nil {
+		t.Fatal("ready competitors published before native web search")
+	}
+	s.noteBrandWebSearchStarted("search-1")
+	if err := s.advanceBrandAnalysisStage("competitors", readyCompetitors); err == nil {
+		t.Fatal("ready competitors published while native web search was running")
+	}
+	s.noteBrandWebSearchCompleted("search-1")
+	if err := s.advanceBrandAnalysisStage("competitors", readyCompetitors); err != nil {
+		t.Fatalf("publish competitors: %v", err)
+	}
+	if err := s.advanceBrandAnalysisStage("competitors", readyCompetitors); err == nil {
+		t.Fatal("duplicate competitor publication accepted")
+	}
+}
+
+func TestBrandAnalysisFlowCanCloseUnavailableSearchAfterCore(t *testing.T) {
+	s := &appServerSession{}
+	s.runtime = core.SessionRuntime{Scene: "brand_analysis"}
+	if err := s.beginBrandEvidenceCollection(); err != nil {
+		t.Fatalf("begin evidence: %v", err)
+	}
+	s.finishBrandEvidenceCollection(true)
+	if err := s.advanceBrandAnalysisStage("core", map[string]any{}); err != nil {
+		t.Fatalf("publish core: %v", err)
+	}
+	if err := s.advanceBrandAnalysisStage("competitors", map[string]any{
+		"status": "unavailable", "competitors": []any{},
+	}); err != nil {
+		t.Fatalf("close unavailable competitors: %v", err)
+	}
+}
+
+func TestBrandAnalysisFlowRejectsMultipleNativeSearchAttempts(t *testing.T) {
+	s := &appServerSession{}
+	s.runtime = core.SessionRuntime{Scene: "brand_analysis"}
+	if err := s.beginBrandEvidenceCollection(); err != nil {
+		t.Fatalf("begin evidence: %v", err)
+	}
+	s.finishBrandEvidenceCollection(true)
+	if err := s.advanceBrandAnalysisStage("core", map[string]any{}); err != nil {
+		t.Fatalf("publish core: %v", err)
+	}
+	s.noteBrandWebSearchStarted("search-1")
+	s.noteBrandWebSearchCompleted("search-1")
+	s.noteBrandWebSearchStarted("search-2")
+	if err := s.advanceBrandAnalysisStage("competitors", map[string]any{
+		"status": "complete", "competitors": []any{map[string]any{"name": "Canva"}},
+	}); err == nil {
+		t.Fatal("competitors published after multiple search attempts")
+	}
+}
+
+func TestBrandAnalysisFlowRejectsCoreAfterEarlyNativeSearch(t *testing.T) {
+	s := &appServerSession{}
+	s.runtime = core.SessionRuntime{Scene: "brand_analysis"}
+	if err := s.beginBrandEvidenceCollection(); err != nil {
+		t.Fatalf("begin evidence: %v", err)
+	}
+	s.finishBrandEvidenceCollection(true)
+	s.noteBrandWebSearchStarted("search-too-early")
+	if err := s.advanceBrandAnalysisStage("core", map[string]any{}); err == nil {
+		t.Fatal("core published after an early native web search")
+	}
+}
+
+func TestBrandStructuredResultWaitsForQueueCapacityAndDeliveryAck(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &appServerSession{ctx: ctx, events: make(chan core.Event, 1)}
+	s.events <- core.Event{Type: core.EventThinking}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.publishStructuredResult("core", map[string]any{"productType": "SaaS"})
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("publish returned before queue capacity was available: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	<-s.events
+	var event core.Event
+	select {
+	case event = <-s.events:
+	case <-time.After(time.Second):
+		t.Fatal("structured result was not enqueued after capacity became available")
+	}
+	if event.Type != core.EventStructuredResult || event.DeliveryAck == nil {
+		t.Fatalf("structured event = %#v", event)
+	}
+	event.DeliveryAck <- nil
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("publish structured result: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("publish did not finish after delivery acknowledgement")
+	}
+}
+
+func TestBrandStructuredResultReturnsDeliveryFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &appServerSession{ctx: ctx, events: make(chan core.Event, 1)}
+	done := make(chan error, 1)
+	go func() {
+		done <- s.publishStructuredResult("core", map[string]any{"productType": "SaaS"})
+	}()
+	event := <-s.events
+	event.DeliveryAck <- io.ErrClosedPipe
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "delivery failed") {
+		t.Fatalf("publish error = %v, want delivery failure", err)
+	}
+}
+
+func TestBrandStageCanRetryAfterDeliveryFailure(t *testing.T) {
+	s := &appServerSession{}
+	s.runtime = core.SessionRuntime{Scene: "brand_analysis"}
+	if err := s.beginBrandEvidenceCollection(); err != nil {
+		t.Fatalf("begin evidence: %v", err)
+	}
+	s.finishBrandEvidenceCollection(true)
+	if err := s.beginBrandAnalysisStagePublication("core", map[string]any{}); err != nil {
+		t.Fatalf("begin core publication: %v", err)
+	}
+	s.finishBrandAnalysisStagePublication("core", false)
+	if err := s.beginBrandAnalysisStagePublication("core", map[string]any{}); err != nil {
+		t.Fatalf("retry core publication: %v", err)
+	}
+	s.finishBrandAnalysisStagePublication("core", true)
+	if err := s.beginBrandAnalysisStagePublication("core", map[string]any{}); err == nil {
+		t.Fatal("published core accepted another retry")
+	}
+}
+
+func TestBrandEvidenceForModelIsBoundedAndExcludesVisualAssets(t *testing.T) {
+	long := strings.Repeat("product evidence ", 200)
+	pages := make([]any, 0, 12)
+	for index := 0; index < 12; index++ {
+		pages = append(pages, map[string]any{
+			"url":      "https://example.com/product",
+			"title":    long,
+			"headings": []any{long, long, long, long, long, long, long, long, long},
+			"snippets": []any{long, long, long, long, long, long, long, long, long},
+		})
+	}
+	compact := brandEvidenceForModel(map[string]any{
+		"brandName":     "Example",
+		"evidencePages": pages,
+		"logoUrl":       "https://example.com/logo.svg",
+		"brandColors":   []any{"#ff0000"},
+		"jsonLd": []any{map[string]any{
+			"@type": "SoftwareApplication", "name": "Example", "unused": long,
+		}},
+	})
+	encoded, err := json.Marshal(compact)
+	if err != nil {
+		t.Fatalf("marshal compact evidence: %v", err)
+	}
+	if len(encoded) > 30_000 {
+		t.Fatalf("compact evidence too large: %d bytes", len(encoded))
+	}
+	if _, exists := compact["logoUrl"]; exists {
+		t.Fatalf("visual asset leaked into model evidence: %#v", compact)
+	}
+	compactPages, _ := compact["evidencePages"].([]any)
+	if len(compactPages) != 6 {
+		t.Fatalf("evidence pages = %d, want 6", len(compactPages))
+	}
+}
+
+func TestValidateBrandAnalysisStageKeepsOnlyCoreSemanticFields(t *testing.T) {
+	stage, result, err := validateBrandAnalysisStage(map[string]any{
+		"stage": "core",
+		"result": map[string]any{
+			"productType": "SaaS",
+			"platforms":   []any{"Web"},
+			"audience":    "Marketing teams",
+			"keyFeatures": []any{"Generate", "Edit", "Review"},
+			"logoUrl":     "https://attacker.invalid/logo.svg",
+		},
+	})
+	if err != nil || stage != "core" {
+		t.Fatalf("validate stage: stage=%q err=%v", stage, err)
+	}
+	if _, ok := result["logoUrl"]; ok {
+		t.Fatalf("model must not replace deterministic logo: %#v", result)
+	}
+}
+
+func TestNormalizeCompetitorCandidatesChecksURLsWithoutVisitingThem(t *testing.T) {
+	items := normalizeCompetitorCandidates([]any{
+		map[string]any{"name": "Canva", "websiteUrl": "http://www.canva.com/design?utm_source=x#hero", "confidence": "high"},
+		map[string]any{"name": "Local", "websiteUrl": "http://127.0.0.1:8080/"},
+		map[string]any{"name": "Canva duplicate", "websiteUrl": "https://www.canva.com/other"},
+	})
+	if len(items) != 1 {
+		t.Fatalf("normalized candidates = %#v", items)
+	}
+	got := items[0].(map[string]any)
+	if got["websiteUrl"] != "https://www.canva.com/" || got["confidence"] != "low" {
+		t.Fatalf("normalized candidate = %#v", got)
+	}
+}
+
+func TestBrandAnalysisRejectsPrivateHostsAndInvalidCoreEnums(t *testing.T) {
+	for _, host := range []string{"localhost", "127.0.0.1", "10.0.0.8", "service.internal"} {
+		if isPublicHostname(host) {
+			t.Fatalf("private host accepted: %s", host)
+		}
+	}
+	if !isPublicHostname("tomako.ai") {
+		t.Fatal("public hostname rejected")
+	}
+	_, _, err := validateBrandAnalysisStage(map[string]any{
+		"stage": "core",
+		"result": map[string]any{
+			"productType": "website",
+			"platforms":   []any{"Web"},
+			"audience":    "Teams",
+			"keyFeatures": []any{"One", "Two", "Three"},
+		},
+	})
+	if err == nil {
+		t.Fatal("invalid product type accepted")
+	}
+}
+
 func TestAppServerSession_ApplyThreadRuntimeState(t *testing.T) {
 	s := &appServerSession{}
 	effort := "xhigh"
@@ -35,8 +407,10 @@ func TestAppServerSession_SessionRuntimeSelectsTurnModelAndMetadata(t *testing.T
 	s := &appServerSession{}
 	s.alive.Store(true)
 	err := s.SetSessionRuntime(core.SessionRuntime{
+		Scene:              "brand_analysis",
 		LogicalModel:       "VISION_BALANCED_V1",
 		GatewayModel:       "tomako/vision-balanced-v1",
+		WebSearch:          "live",
 		RoutePolicyID:      "rp-vision-balanced",
 		RoutePolicyVersion: 7,
 		InferenceRequestID: "infer-123",
@@ -46,6 +420,7 @@ func TestAppServerSession_SessionRuntimeSelectsTurnModelAndMetadata(t *testing.T
 		UserID:             "42",
 		ChatSessionID:      "csess-1",
 		TaskID:             "cmsg-1",
+		ReasoningEffort:    "low",
 		TurnNo:             2,
 	})
 	if err != nil {
@@ -53,6 +428,12 @@ func TestAppServerSession_SessionRuntimeSelectsTurnModelAndMetadata(t *testing.T
 	}
 	if got := s.GetModel(); got != "tomako/vision-balanced-v1" {
 		t.Fatalf("model = %q", got)
+	}
+	if got := s.getWebSearch(); got != "live" {
+		t.Fatalf("web search = %q", got)
+	}
+	if got := s.GetReasoningEffort(); got != "low" {
+		t.Fatalf("reasoning effort = %q", got)
 	}
 	metadata := s.responsesAPIClientMetadata()
 	if metadata["tomako.inference_request_id"] != "infer-123" {
@@ -81,8 +462,11 @@ func TestAppServerSession_FencedThreadParamsOverrideUnsafeGlobalMode(t *testing.
 		"experimentalRawEvents":  false,
 		"persistExtendedHistory": false,
 		"cwd":                    "/srv/tomako/workspaces/brand-42",
-		"permissions":            "tomako-brand-fence",
-		"approvalPolicy":         "never",
+		"config": map[string]any{
+			"features.default_mode_request_user_input": true,
+		},
+		"permissions":    "tomako-brand-fence",
+		"approvalPolicy": "never",
 	}
 	if !reflect.DeepEqual(params, want) {
 		t.Fatalf("thread params = %#v, want %#v", params, want)
@@ -106,6 +490,10 @@ func TestAppServerSession_FencedTurnKeepsPermissionsProfile(t *testing.T) {
 		pending:            make(map[int64]chan rpcResponseEnvelope),
 	}
 	s.alive.Store(true)
+	schema := json.RawMessage(`{"type":"object","properties":{"decision":{"enum":["KEEP","REJECT"]}},"required":["decision"],"additionalProperties":false}`)
+	if err := s.SetSessionRuntime(core.SessionRuntime{OutputSchema: schema, ReasoningEffort: "high"}); err != nil {
+		t.Fatal(err)
+	}
 	s.threadID.Store("thread-42")
 
 	done := make(chan error, 1)
@@ -125,6 +513,17 @@ func TestAppServerSession_FencedTurnKeepsPermissionsProfile(t *testing.T) {
 	if request.Method != "turn/start" {
 		t.Fatalf("method = %q, want turn/start", request.Method)
 	}
+	actualSchema, err := json.Marshal(request.Params["outputSchema"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wantSchema any
+	_ = json.Unmarshal(schema, &wantSchema)
+	var gotSchema any
+	_ = json.Unmarshal(actualSchema, &gotSchema)
+	if !reflect.DeepEqual(gotSchema, wantSchema) || request.Params["effort"] != "high" {
+		t.Fatalf("native schema/effort lost: %#v", request.Params)
+	}
 	if request.Params["permissions"] != "tomako-brand-fence" || request.Params["approvalPolicy"] != "never" {
 		t.Fatalf("turn permissions = %#v", request.Params)
 	}
@@ -143,6 +542,46 @@ func TestAppServerSession_FencedTurnKeepsPermissionsProfile(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Send() did not complete")
+	}
+}
+
+func TestAppServerSession_RuntimeSchemaIsCopiedClearedAndPreservesTaskEffort(t *testing.T) {
+	s := &appServerSession{}
+	s.alive.Store(true)
+	schema := json.RawMessage(`{"type":"object"}`)
+	defer func() { removeTaskRuntimeEnv(s.currentTaskRuntimeEnvFile()) }()
+	if err := s.SetSessionRuntime(core.SessionRuntime{
+		OutputSchema: schema, WebSearch: "live", ReasoningEffort: "high",
+		TaskID: "schema-authority-test", MachineCapabilityToken: "test-capability",
+		TaskAuthorityEnvelopeB64: "test-authority",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	schema[0] = '!'
+	if string(s.outputSchema()) != `{"type":"object"}` {
+		t.Fatal("caller mutation altered active schema")
+	}
+	low := "low"
+	s.applyThreadRuntimeState("", "", &low)
+	if s.GetReasoningEffort() != "high" {
+		t.Fatal("thread creation replaced the task's high reasoning with a default")
+	}
+	config := s.threadRequestParams()["config"].(map[string]any)
+	if config["web_search"] != "live" || config["model_reasoning_effort"] != "high" {
+		t.Fatalf("thread runtime lost: %#v", config)
+	}
+	if s.currentTaskRuntimeEnvFile() == "" || config["shell_environment_policy.set.TOMAKO_TASK_ENV_FILE"] != s.currentTaskRuntimeEnvFile() || config["features.default_mode_request_user_input"] != true {
+		t.Fatal("native schema runtime replaced the trusted task environment or interaction config")
+	}
+	s.threadID.Store("search-enabled-thread")
+	if err := s.SetSessionRuntime(core.SessionRuntime{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.outputSchema()) != 0 || s.CurrentSessionID() != "" {
+		t.Fatal("previous schema or thread-scoped search leaked into next task")
+	}
+	if err := s.SetSessionRuntime(core.SessionRuntime{OutputSchema: json.RawMessage(`null`)}); err == nil {
+		t.Fatal("invalid schema accepted")
 	}
 }
 
@@ -481,7 +920,7 @@ func TestAppServerSession_HandleRequestUserInputEmitsAskQuestion(t *testing.T) {
 	}
 }
 
-func TestAppServerSession_HandleRequestUserInputWritesCodexResponse(t *testing.T) {
+func TestAppServerSession_HandleRequestUserInputPreservesIDKeyedMultiSelectAnswers(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -520,7 +959,7 @@ func TestAppServerSession_HandleRequestUserInputWritesCodexResponse(t *testing.T
 		Behavior: "allow",
 		UpdatedInput: map[string]any{
 			"answers": map[string]any{
-				"Which database should we use?": "Postgres",
+				"database": "Postgres, SQLite",
 			},
 		},
 	}); err != nil {
@@ -544,6 +983,28 @@ func TestAppServerSession_HandleRequestUserInputWritesCodexResponse(t *testing.T
 		t.Fatalf("envelope = %#v", envelope)
 	}
 	got := envelope.Result.Answers["database"].Answers
+	if len(got) != 1 || got[0] != "Postgres, SQLite" {
+		t.Fatalf("answers[database] = %#v, want [Postgres, SQLite]", got)
+	}
+}
+
+func TestAppServerRequestUserInputResponseRetainsLegacyQuestionTextAnswers(t *testing.T) {
+	response := appServerRequestUserInputResponseFromResult(
+		[]appServerRequestUserInputQuestion{{
+			ID:       "database",
+			Question: "Which database should we use?",
+		}},
+		core.PermissionResult{
+			Behavior: "allow",
+			UpdatedInput: map[string]any{
+				"answers": map[string]any{
+					"Which database should we use?": "Postgres",
+				},
+			},
+		},
+	)
+
+	got := response.Answers["database"].Answers
 	if len(got) != 1 || got[0] != "Postgres" {
 		t.Fatalf("answers[database] = %#v, want [Postgres]", got)
 	}

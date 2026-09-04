@@ -299,4 +299,14 @@ func TestUnknownSlashCommandNotifiesThenFallsThroughToAgent(t *testing.T) {
 	if !strings.Contains(records[0].prompt, "/not-a-command keep this request") {
 		t.Fatalf("unknown slash command should fall through to agent, got prompt %q", records[0].prompt)
 	}
+	// Await the completed user reply and persistence, not merely Agent.Send.
+	platform.waitTextContaining(t, "matrix response")
+	deadline := time.Now().Add(5 * time.Second)
+	for engine.GetSessions().GetOrCreateActive("matrix:chat-1:user-1").Busy() {
+		if time.Now().After(deadline) {
+			t.Fatal("turn did not finish before fixture cleanup")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 }

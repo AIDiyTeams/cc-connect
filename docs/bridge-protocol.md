@@ -5,6 +5,29 @@
 
 ## Overview
 
+### Native constrained output (optional runtime capability)
+
+Successful `register_ack` responses advertise `runtime_capabilities: ["output_schema_v1", "turn_budget_v1"]`.
+This advertises protocol support; the selected Agent session is checked independently before
+dispatch. Adapters requiring constrained output must refuse an older Bridge without the capability.
+
+An authenticated adapter may include `runtime.output_schema`, a JSON Schema object (root
+`type: "object"`, at most 128 KiB). It is trusted control-plane metadata, never inferred from
+the prompt. Invalid schemas and unsupported Agent sessions fail explicitly; there is no
+prompt-only fallback. Omit it for ordinary turns. Each turn replaces the prior schema.
+
+The Codex app-server backend sends the unchanged object as `turn/start.outputSchema`.
+The exec backend writes a private per-process schema file, passes `--output-schema`, and removes
+the file after process exit or launch failure. Task-scoped `reasoning_effort` is applied by both
+backends; thread creation must not replace it with a model default. Existing permissions profiles
+remain in force, and this capability grants no additional file, network, or publishing permission.
+
+The authenticated adapter can also supply `runtime.turn_budget_seconds` with
+`turn_budget_v1`: 1–3600 seconds selects that turn's bounded wall-clock budget;
+0 or omission keeps the engine default. Invalid budgets fail before Agent.Send.
+It is replaced on every queued or foreground turn and does not alter ordinary
+chat defaults. Adapters requiring this budget must refuse an older Bridge.
+
 The Bridge Protocol allows **external platform adapters** written in any programming language to connect to cc-connect at runtime via WebSocket. This eliminates the requirement to write Go code and recompile the binary for every new platform integration.
 
 ### Architecture
@@ -55,6 +78,7 @@ The port and path are configured in `config.toml`:
 [bridge]
 enabled = true
 port = 9810
+host = "127.0.0.1"        # optional; omit to preserve all-interface binding
 path = "/bridge/ws"       # optional, default "/bridge/ws"
 token = "your-secret"     # required for authentication
 ```
@@ -546,12 +570,51 @@ Notify the adapter of a server-side error.
 | `token_stream` | Prefer by-token `reply_stream` for Studio chat (`reply_ctx` prefix `cmsg-`). LLM Task (`llm-`) keeps coarse `preview_start` / `update_message` + default throttle. | `reply_stream` (Studio only) |
 | `delete_message` | Delete messages | `delete_message` |
 | `reconstruct_reply` | Can reconstruct reply context from session_key | Enables cron/heartbeat messages |
+| `agent_trace` | Trusted control-plane diagnostics and validated staged results for `llm-` reply contexts | `agent_trace`, `agent_structured_result` |
 
 If a capability is not declared, cc-connect will automatically degrade:
 - No `card` → cards are rendered as plain text via `RenderText()`.
 - No `buttons` → buttons are omitted or rendered as text hints.
 - No `preview` → streaming is disabled; only the final reply is sent.
 - No `typing` → typing indicators are skipped.
+
+### Trusted Agent control-plane events
+
+Adapters that declare `agent_trace` may receive two internal event types for
+LLM tasks. These are control-plane messages, not user-visible chat output.
+
+`agent_trace` contains bounded tool/lifecycle metadata. Lifecycle events use
+`event_type: "lifecycle"`, `tool_name: "AgentLifecycle"`, a stable stage name
+in `input`, and the measured child duration in `duration_ms`. Prompt text,
+chain-of-thought, and unrestricted tool output must not be placed in this
+channel.
+
+`agent_structured_result` transports one result that was validated by a
+scene-specific dynamic tool:
+
+```json
+{
+  "type": "agent_structured_result",
+  "session_key": "tomako:workspace:user",
+  "reply_ctx": "llm-123",
+  "stage": "core",
+  "result": {},
+  "occurred_at": "2026-08-13T08:00:00Z"
+}
+```
+
+cc-connect only emits structured results for `llm-` reply contexts and only to
+an authenticated adapter that declared `agent_trace`. The receiving control
+plane remains responsible for authority validation and durable persistence.
+
+For the `brand_analysis` scene, cc-connect also enforces the staged protocol at
+the dynamic-tool boundary. Evidence must complete before `core`; `core` may be
+published once; a ready `competitors` stage requires completion of the first
+native Web Search observed after `core`; and no stage may be published twice.
+An `unavailable` competitor stage is the explicit fallback when native search
+cannot run. The crawler's full deterministic result is emitted to the control
+plane, while the Agent receives a bounded semantic-only evidence projection so
+logos, colors, raw CSS, and large asset lists do not inflate model context.
 
 ### Image Object
 

@@ -74,6 +74,7 @@ const (
 	messageRecallCheckTimeout = 2 * time.Second
 	messageRecallPollInterval = 2 * time.Second
 	recalledStopLockWait      = 2 * time.Second
+	stoppedTurnLockWait       = 2 * time.Second
 )
 
 // VersionInfo is set by main at startup so that /version works.
@@ -339,6 +340,7 @@ type queuedMessage struct {
 
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
+	turnBudgetSeconds      int // protected by mu; replaced for every foreground/queued turn
 	agentSession           AgentSession
 	platform               Platform
 	replyCtx               any
@@ -613,6 +615,25 @@ func (e *Engine) SetMultiWorkspace(baseDir, bindingStorePath string) {
 // Must be called after SetMultiWorkspace. Empty fields keep built-in defaults.
 func (e *Engine) SetWorkspaceShare(opts WorkspaceShareOptions) {
 	e.workspaceShare = opts.Normalize()
+	e.refreshSharedSkillRegistry()
+}
+
+// refreshSharedSkillRegistry makes slash-command discovery use the same
+// environment-specific Skills-OL tree that is linked into workspaces. The
+// shared directory must come first so a test/prod skill overrides an older
+// same-named copy from the agent's user-level skill directories.
+func (e *Engine) refreshSharedSkillRegistry() {
+	dirs := make([]string, 0, 4)
+	if sharedRoot := findSharedSkillsDir(e.baseDir, e.workspaceShare); sharedRoot != "" {
+		sharedSkills := filepath.Join(sharedRoot, "skills")
+		if info, err := os.Stat(sharedSkills); err == nil && info.IsDir() {
+			dirs = append(dirs, sharedSkills)
+		}
+	}
+	if sp, ok := e.agent.(SkillProvider); ok {
+		dirs = append(dirs, sp.SkillDirs()...)
+	}
+	e.skills.SetDirs(dirs)
 }
 
 // ResolveMemoryWorkDir returns the Codex cwd that memory fact writes must use
@@ -2584,6 +2605,21 @@ func (e *Engine) waitForSessionLock(session *Session, timeout time.Duration) boo
 	}
 }
 
+// waitForStoppedTurnLock handles the transient state created by /stop: the
+// interactive state is already gone, but the stopped turn still owns the
+// Session lock until its event loop observes stopCh and unwinds. An active
+// interactive state means this is an ordinary busy turn and must retain the
+// existing queue/busy behavior.
+func (e *Engine) waitForStoppedTurnLock(session *Session, interactiveKey string, timeout time.Duration) bool {
+	e.interactiveMu.Lock()
+	state, exists := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if exists && state != nil {
+		return false
+	}
+	return e.waitForSessionLock(session, timeout)
+}
+
 func (e *Engine) startMessageRecallMonitor(sessionKey string) context.CancelFunc {
 	ctx, cancel := context.WithCancel(e.ctx)
 	go func() {
@@ -2835,7 +2871,16 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
-	if !session.TryLock() {
+	if !e.tryLockSessionWithQueueState(session, interactiveKey, p, msg.ReplyCtx) {
+		// /stop removes the interactive state immediately so stale Agent events
+		// cannot reach the user, while the old processing goroutine releases the
+		// Session lock during its short asynchronous unwind. A follow-up arriving
+		// in that window is a new turn, not a message for a still-running task.
+		// Wait for the old owner to finish instead of leaking the internal /ps
+		// busy hint to the product surface.
+		if e.waitForStoppedTurnLock(session, interactiveKey, stoppedTurnLockWait) {
+			goto sessionLocked
+		}
 		if e.stopCurrentMessageIfRecalled(interactiveKey) {
 			if e.waitForSessionLock(session, recalledStopLockWait) {
 				goto sessionLocked
@@ -2981,7 +3026,15 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	if len(state.pendingMessages) >= e.maxQueuedMessages {
 		depth := len(state.pendingMessages)
 		state.mu.Unlock()
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgQueueFull), depth))
+		message := fmt.Sprintf(e.i18n.T(MsgQueueFull), depth)
+		if reporter, ok := p.(TurnDispatchStatusReporter); ok {
+			if err := reporter.ReportTurnDispatchStatus(e.ctx, msg.ReplyCtx, TurnDispatchStatus{
+				State: "rejected", QueueDepth: depth, Message: message,
+			}); err == nil {
+				return true
+			}
+		}
+		e.reply(p, msg.ReplyCtx, message)
 		return true // handled: queue-full reply sent
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
@@ -3016,7 +3069,15 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		"user", msg.UserName,
 		"queue_depth", queueDepth,
 	)
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	message := e.i18n.T(MsgMessageQueued)
+	if reporter, ok := p.(TurnDispatchStatusReporter); ok {
+		if err := reporter.ReportTurnDispatchStatus(e.ctx, msg.ReplyCtx, TurnDispatchStatus{
+			State: "queued", QueueDepth: queueDepth, Message: message,
+		}); err == nil {
+			return true
+		}
+	}
+	e.reply(p, msg.ReplyCtx, message)
 	return true
 }
 
@@ -3028,6 +3089,23 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 func (e *Engine) ensureInteractiveStateForQueueing(key string, p Platform, replyCtx any) {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
+	e.ensureQueueStateLocked(key, p, replyCtx)
+}
+
+// Publish the startup queue atomically with taking the session lock. Otherwise
+// another message can observe a busy session before its queue exists and be lost.
+func (e *Engine) tryLockSessionWithQueueState(session *Session, key string, p Platform, replyCtx any) bool {
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	if !session.TryLock() {
+		return false
+	}
+	e.ensureQueueStateLocked(key, p, replyCtx)
+	return true
+}
+
+// Caller holds interactiveMu.
+func (e *Engine) ensureQueueStateLocked(key string, p Platform, replyCtx any) {
 	if _, ok := e.interactiveStates[key]; !ok {
 		e.interactiveStates[key] = &interactiveState{
 			platform:         p,
@@ -3208,9 +3286,13 @@ found:
 			UpdatedInput: updatedInput,
 		}); err != nil {
 			slog.Error("failed to send AskUserQuestion response", "error", err)
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+			if !e.reportInteractionResponseStatus(p, msg.ReplyCtx, pending.InteractionID, "rejected", "INTERACTION_RUNTIME_REJECTED") {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+			}
 		} else {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", q.Question, answer))
+			if !e.reportInteractionResponseStatus(p, msg.ReplyCtx, pending.InteractionID, "accepted", "") {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", q.Question, answer))
+			}
 		}
 
 		state.mu.Lock()
@@ -3267,6 +3349,24 @@ found:
 	return true
 }
 
+func (e *Engine) reportInteractionResponseStatus(
+	p Platform,
+	replyCtx any,
+	interactionID string,
+	state string,
+	code string,
+) bool {
+	reporter, ok := p.(InteractionResponseStatusReporter)
+	if !ok {
+		return false
+	}
+	return reporter.ReportInteractionResponseStatus(e.ctx, replyCtx, InteractionResponseStatus{
+		InteractionID: interactionID,
+		State:         state,
+		Code:          code,
+	}) == nil
+}
+
 // lookupPending returns the interactive state and its pending permission for
 // the given key, or nil/nil if the state is absent or has no pending. Caller
 // must NOT hold interactiveMu.
@@ -3277,13 +3377,9 @@ func newInteractionID() string {
 // RespondInteraction resolves the structured interaction currently waiting on
 // a session. The native JSON-RPC request id never leaves cc-connect.
 func (e *Engine) RespondInteraction(sessionKey, interactionID, decision string, answers map[string][]string) error {
-	iKey := e.interactiveKeyForSessionKey(sessionKey)
-	state, pending := e.lookupPending(iKey)
+	state, pending := e.lookupPendingInteraction(sessionKey, interactionID)
 	if state == nil || pending == nil {
 		return fmt.Errorf("no pending interaction for session %q", sessionKey)
-	}
-	if pending.InteractionID != interactionID {
-		return fmt.Errorf("interaction %q is not pending", interactionID)
 	}
 
 	result := PermissionResult{Behavior: "allow", UpdatedInput: pending.ToolInput}
@@ -3296,6 +3392,11 @@ func (e *Engine) RespondInteraction(sessionKey, interactionID, decision string, 
 			}
 			if len(values) == 0 {
 				return fmt.Errorf("missing answer for question %q", question.ID)
+			}
+			for _, value := range values {
+				if strings.TrimSpace(value) == interactionSkippedAnswer && len(values) != 1 {
+					return fmt.Errorf("skipped answer for question %q cannot be combined with options", question.ID)
+				}
 			}
 			collected[idx] = interactionAnswerText(question, values)
 		}
@@ -3322,7 +3423,49 @@ func (e *Engine) RespondInteraction(sessionKey, interactionID, decision string, 
 	return nil
 }
 
+// lookupPendingInteraction finds the exact interaction even when a stale raw
+// session placeholder shadows the live workspace-prefixed state. Structured
+// bridge responses do not always carry the original project name, so the
+// opaque interaction id is the authoritative discriminator.
+func (e *Engine) lookupPendingInteraction(sessionKey, interactionID string) (*interactiveState, *pendingPermission) {
+	iKey := e.interactiveKeyForSessionKey(sessionKey)
+	if state, pending := e.lookupPending(iKey); pending != nil && pending.InteractionID == interactionID {
+		return state, pending
+	}
+
+	e.interactiveMu.Lock()
+	candidates := make([]*interactiveState, 0, 2)
+	suffix := ":" + sessionKey
+	for key, state := range e.interactiveStates {
+		if key == iKey || (key != sessionKey && !strings.HasSuffix(key, suffix)) {
+			continue
+		}
+		candidates = append(candidates, state)
+	}
+	e.interactiveMu.Unlock()
+
+	for _, state := range candidates {
+		state.mu.Lock()
+		pending := state.pending
+		state.mu.Unlock()
+		if pending != nil && pending.InteractionID == interactionID {
+			return state, pending
+		}
+	}
+	return nil, nil
+}
+
+func (e *Engine) hasPendingInteraction(sessionKey, interactionID string) bool {
+	_, pending := e.lookupPendingInteraction(sessionKey, interactionID)
+	return pending != nil
+}
+
+const interactionSkippedAnswer = "__tomako_skipped__"
+
 func interactionAnswerText(question UserQuestion, values []string) string {
+	if len(values) == 1 && strings.TrimSpace(values[0]) == interactionSkippedAnswer {
+		return "Skipped by user"
+	}
 	labels := make([]string, 0, len(values))
 	for _, value := range values {
 		value = strings.TrimSpace(value)
@@ -3613,6 +3756,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.platform = p
 	state.replyCtx = msg.ReplyCtx
 	state.currentMessageID = msg.MessageID
+	state.turnBudgetSeconds = msg.Runtime.TurnBudgetSeconds
 	state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
 	state.mu.Unlock()
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
@@ -4019,7 +4163,6 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	if startElapsed >= slowAgentStart {
 		slog.Warn("slow agent session start", "elapsed", startElapsed, "agent", agent.Name(), "session_id", startSessionID)
 	}
-
 	// Surface any startup warning (e.g. permission mode downgrade under root) to the IM user.
 	if warner, ok := agentSession.(StartupWarner); ok {
 		if msg := warner.StartupWarning(); msg != "" {
@@ -4597,11 +4740,27 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	// Max turn time: absolute wall-clock cap that does NOT reset on events.
 	// Prevents long-running tool calls from blocking the session forever (#1091).
 	var turnDeadlineCh <-chan time.Time
-	if e.maxTurnTime > 0 {
-		turnDeadlineTimer := time.NewTimer(e.maxTurnTime)
-		defer turnDeadlineTimer.Stop()
-		turnDeadlineCh = turnDeadlineTimer.C
+	var turnDeadlineTimer *time.Timer
+	var turnLimit time.Duration
+	resetTurnDeadline := func(seconds int) {
+		if turnDeadlineTimer != nil {
+			turnDeadlineTimer.Stop()
+		}
+		turnLimit = e.turnTimeLimit(seconds)
+		turnDeadlineCh = nil
+		if turnLimit > 0 {
+			turnDeadlineTimer = time.NewTimer(turnLimit)
+			turnDeadlineCh = turnDeadlineTimer.C
+		}
 	}
+	state.mu.Lock()
+	resetTurnDeadline(state.turnBudgetSeconds)
+	state.mu.Unlock()
+	defer func() {
+		if turnDeadlineTimer != nil {
+			turnDeadlineTimer.Stop()
+		}
+	}()
 
 	events := state.agentSession.Events()
 	stopCh := state.stopSignal()
@@ -4633,7 +4792,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.mu.Lock()
 				p := state.platform
 				state.mu.Unlock()
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+				e.failTurn(p, replyCtx, "AGENT_PROMPT_FAILED", fmt.Sprintf(e.i18n.T(MsgError), err))
 				return
 			}
 			continue
@@ -4646,20 +4805,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.eventsNeedResync = true
 			p := state.platform
 			state.mu.Unlock()
-			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
+			e.failTurn(p, replyCtx, "AGENT_IDLE_TIMEOUT",
+				fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
 			e.cleanupInteractiveState(sessionKey, state)
 			return
 		case <-turnDeadlineCh:
 			elapsed := time.Since(turnStart)
 			slog.Warn("agent turn exceeded max_turn_time: sending stop signal, will force-kill if needed",
-				"session_key", sessionKey, "max_turn_time", e.maxTurnTime, "elapsed", elapsed)
+				"session_key", sessionKey, "max_turn_time", turnLimit, "elapsed", elapsed)
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()
-			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError),
-				fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", e.maxTurnTime)))
+			e.failTurn(p, replyCtx, "AGENT_TURN_TIMEOUT", fmt.Sprintf(e.i18n.T(MsgError),
+				fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", turnLimit)))
 
 			// Two-phase shutdown: first try a graceful stop so the agent can
 			// write its final state before dying (preserves --resume ability).
@@ -4757,11 +4917,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		// model thinking. This bypasses DisplayCfg on purpose: ThinkingMessages /
 		// ThinkingMaxLen only govern messaging-platform rendering; user-facing
 		// visibility of thinking is gated by the backend adapter downstream.
-		if reporter, ok := p.(AgentTraceReporter); ok && (event.Type == EventToolUse || event.Type == EventToolResult ||
+		if reporter, ok := p.(AgentTraceReporter); ok && (event.Type == EventToolUse || event.Type == EventToolResult || event.Type == EventLifecycle ||
 			(event.Type == EventThinking && !isEllipsisOnly(event.Content))) {
 			trace := AgentTraceEvent{TraceID: event.TraceID, Type: event.Type, ToolName: event.ToolName,
 				Input: event.ToolInput, Output: event.ToolResult, Status: event.ToolStatus,
 				ExitCode: event.ToolExitCode, Success: event.ToolSuccess}
+			if event.Metadata != nil {
+				if duration, ok := event.Metadata["duration_ms"].(int64); ok {
+					trace.DurationMs = duration
+				} else if duration, ok := event.Metadata["duration_ms"].(int); ok {
+					trace.DurationMs = int64(duration)
+				}
+			}
 			if event.Type == EventThinking {
 				trace.Content = event.Content
 			}
@@ -4771,6 +4938,32 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if err := reporter.ReportAgentTrace(e.ctx, replyCtx, trace); err != nil {
 				slog.Debug("agent trace report failed", "platform", p.Name(), "error", err)
 			}
+		}
+		if event.Type == EventStructuredResult {
+			var deliveryErr error
+			if reporter, ok := p.(AgentStructuredResultReporter); ok && event.Metadata != nil {
+				stage, _ := event.Metadata["stage"].(string)
+				result, _ := event.Metadata["result"].(map[string]any)
+				if stage != "" && result != nil {
+					if err := reporter.ReportAgentStructuredResult(e.ctx, replyCtx, stage, result); err != nil {
+						deliveryErr = err
+					}
+				} else {
+					deliveryErr = fmt.Errorf("structured result is missing stage or result")
+				}
+			} else {
+				deliveryErr = fmt.Errorf("platform %q cannot report structured results", p.Name())
+			}
+			if deliveryErr != nil {
+				slog.Warn("agent structured result report failed", "platform", p.Name(), "error", deliveryErr)
+			}
+			if event.DeliveryAck != nil {
+				select {
+				case event.DeliveryAck <- deliveryErr:
+				default:
+				}
+			}
+			continue
 		}
 
 		switch event.Type {
@@ -5345,6 +5538,25 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
 			}
+			// A clean EventResult with no text and no tool activity is not a
+			// successful turn. Codex can emit this shape after an upstream model
+			// provider rejects every retry (for example, insufficient balance).
+			// Reporting it as ordinary assistant text previously left durable LLM
+			// tasks in AWAITING_INPUT with the literal "(empty response)".
+			if strings.TrimSpace(fullResponse) == "" && toolCount == 0 {
+				cp.Finalize(ProgressCardStateFailed)
+				sp.discard()
+				state.mu.Lock()
+				state.eventsNeedResync = true
+				state.mu.Unlock()
+				if pendingSend != nil {
+					if err := <-pendingSend; err != nil {
+						slog.Debug("async send error after empty EventResult", "error", err)
+					}
+				}
+				e.failTurn(p, replyCtx, "AGENT_EMPTY_RESPONSE", e.i18n.T(MsgAgentEmptyResponse))
+				return
+			}
 			if fullResponse == "" {
 				fullResponse = e.i18n.T(MsgEmptyResponse)
 			}
@@ -5695,6 +5907,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.platform = queued.platform
 				state.replyCtx = queued.replyCtx
 				state.currentMessageID = queued.messageID
+				state.turnBudgetSeconds = queued.runtime.TurnBudgetSeconds
 				state.fromVoice = queued.fromVoice
 				state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 				state.mu.Unlock()
@@ -5740,6 +5953,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				segmentStart = 0
 				toolCount = 0
 				turnStart = time.Now()
+				resetTurnDeadline(queued.runtime.TurnBudgetSeconds)
 				firstEventLogged = false
 				waitStart = time.Now()
 				// Snapshot workspace images for the queued turn's harvest.
@@ -5865,7 +6079,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						break
 					}
 				}
-				e.send(p, replyCtx, userMsg)
+				e.failTurn(p, replyCtx, "AGENT_RUNTIME_ERROR", userMsg)
 			}
 			// Only drop queued messages if the agent session is dead.
 			// Some agents (e.g. Codex) emit EventError for per-turn failures
@@ -6036,6 +6250,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.platform = queued.platform
 		state.replyCtx = queued.replyCtx
 		state.currentMessageID = queued.messageID
+		state.turnBudgetSeconds = queued.runtime.TurnBudgetSeconds
 		state.fromVoice = queued.fromVoice
 		state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 		state.mu.Unlock()
@@ -6068,6 +6283,15 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 	}
 }
 
+// Only authenticated runtime metadata may override the global default. Invalid
+// budgets fail before Send; this defensive bound also prevents duration overflow.
+func (e *Engine) turnTimeLimit(seconds int) time.Duration {
+	if seconds > 0 && seconds <= 3600 {
+		return time.Duration(seconds) * time.Second
+	}
+	return e.maxTurnTime
+}
+
 func sendWithSessionRuntime(
 	session AgentSession,
 	runtime SessionRuntime,
@@ -6075,6 +6299,22 @@ func sendWithSessionRuntime(
 	images []ImageAttachment,
 	files []FileAttachment,
 ) error {
+	if runtime.TurnBudgetSeconds < 0 || runtime.TurnBudgetSeconds > 3600 {
+		return fmt.Errorf("invalid runtime turn budget: must be between 0 and 3600 seconds")
+	}
+
+	if len(runtime.OutputSchema) > 0 {
+		if err := ValidateOutputSchema(runtime.OutputSchema); err != nil {
+			return err
+		}
+		capable, ok := session.(NativeOutputSchemaSession)
+		if !ok || !capable.SupportsOutputSchema() {
+			return fmt.Errorf("agent session does not support native output_schema")
+		}
+		if _, ok := session.(SessionRuntimeConfigurer); !ok {
+			return fmt.Errorf("agent session cannot apply output_schema runtime")
+		}
+	}
 	if configurable, ok := session.(SessionRuntimeConfigurer); ok {
 		if err := configurable.SetSessionRuntime(runtime); err != nil {
 			return fmt.Errorf("configure session runtime: %w", err)
@@ -11343,6 +11583,21 @@ func (e *Engine) send(p Platform, replyCtx any, content string) {
 	_ = e.sendWithError(p, replyCtx, content)
 }
 
+// failTurn prefers a typed terminal event when the platform supports one.
+// Plain chat adapters retain the existing localized visible reply fallback.
+func (e *Engine) failTurn(p Platform, replyCtx any, code, content string) {
+	if reporter, ok := p.(TurnFailureReporter); ok {
+		if err := reporter.ReportTurnFailure(e.ctx, replyCtx, TurnFailure{
+			Code: code, Message: content,
+		}); err == nil {
+			return
+		} else if !errors.Is(err, ErrNotSupported) {
+			slog.Warn("typed turn failure delivery failed", "platform", p.Name(), "code", code, "error", err)
+		}
+	}
+	e.send(p, replyCtx, content)
+}
+
 // sendRaw sends content without local-reference rendering. This is used for raw
 // tool outputs, where preserving the original text is preferable to applying the
 // agent-facing reference display transform.
@@ -11823,7 +12078,32 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		}
 
 	case "/stop":
-		e.stopInteractiveSession(interactiveKey, nil, nil)
+		stoppedKey := interactiveKey
+		stopped := e.stopInteractiveSession(stoppedKey, nil, nil)
+		if !stopped {
+			// Bridge card actions only carry the raw session key. A task message
+			// may have selected an explicit runtime workspace (for example a
+			// brand-scoped Tomako directory) while the channel's persisted
+			// binding still points at an older per-user workspace. In that case
+			// interactiveKeyForSessionKey resolves a valid but non-live key.
+			// Fall back to the actual live state for this session, matching the
+			// recovery already used by the text /stop command.
+			if found := e.findInteractiveKeyForSession(sessionKey); found != "" && found != stoppedKey {
+				stoppedKey = found
+				stopped = e.stopInteractiveSession(stoppedKey, nil, nil)
+			}
+		}
+		if stopped {
+			slog.Info("card action stopped interactive session",
+				"session_key", sessionKey,
+				"interactive_key", stoppedKey,
+			)
+		} else {
+			slog.Warn("card action stop found no live interactive session",
+				"session_key", sessionKey,
+				"resolved_interactive_key", interactiveKey,
+			)
+		}
 
 	case "/heartbeat":
 		if e.heartbeatScheduler == nil {
@@ -15764,6 +16044,17 @@ func (e *Engine) commandContext(p Platform, msg *Message) (Agent, *SessionManage
 func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *SessionManager, string, string, error) {
 	if !e.multiWorkspace {
 		return e.agent, e.sessions, msg.SessionKey, "", nil
+	}
+	// Java bridge tasks carry their stable business workspace in the session
+	// key rather than a platform channel binding. Route these commands before
+	// the channel lookup so Slash Skills run in the same brand workspace as
+	// ordinary Agent messages.
+	if workspace, ok := e.brandWorkspacePath(msg.SessionKey); ok {
+		agent, sessions, interactiveKey, effectiveDir, err := e.workspaceContext(workspace, msg.SessionKey)
+		if err != nil {
+			return nil, nil, "", "", err
+		}
+		return agent, sessions, interactiveKey, effectiveDir, nil
 	}
 	channelID := effectiveChannelID(msg)
 	channelKey := effectiveWorkspaceChannelKey(msg)

@@ -24,24 +24,28 @@ import (
 // codexSession manages a multi-turn Codex conversation.
 // First Send() uses `codex exec`, subsequent ones use `codex exec resume <threadID>`.
 type codexSession struct {
-	workDir       string
-	model         string
-	effort        string
-	mode          string
-	baseURL       string // provider base URL; passed as -c openai_base_url=<url>
-	modelProvider string // Codex model_provider name; passed as -c model_provider=<name>
-	cliBin        string   // CLI binary, default "codex"
-	cliExtraArgs  []string // extra args from cli_path, prepended before exec args
-	extraEnv      []string
-	events        chan core.Event
-	threadID  atomic.Value // stores string — Codex thread_id
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	alive     atomic.Bool
-	closeOnce sync.Once
-	cmdMu     sync.Mutex
-	cmds      map[*exec.Cmd]struct{}
+	workDir            string
+	model              string
+	effort             string
+	webSearch          string
+	outputSchema       json.RawMessage
+	mode               string
+	baseURL            string   // provider base URL; passed as -c openai_base_url=<url>
+	modelProvider      string   // Codex model_provider name; passed as -c model_provider=<name>
+	cliBin             string   // CLI binary, default "codex"
+	cliExtraArgs       []string // extra args from cli_path, prepended before exec args
+	extraEnv           []string
+	events             chan core.Event
+	threadID           atomic.Value // stores string — Codex thread_id
+	ctx                context.Context
+	cancel             context.CancelFunc
+	wg                 sync.WaitGroup
+	alive              atomic.Bool
+	closeOnce          sync.Once
+	cmdMu              sync.Mutex
+	cmds               map[*exec.Cmd]struct{}
+	runtimeMu          sync.RWMutex
+	taskRuntimeEnvFile string
 
 	pendingMsgs []string // buffered agent_message texts awaiting classification
 
@@ -109,6 +113,26 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 
 	isResume := cs.CurrentSessionID() != ""
 	args := cs.buildExecArgs(prompt, imagePaths)
+	// The CLI takes a file path, not inline JSON. Keep it private, per process,
+	// and alive until the child exits. Never reuse another turn's schema.
+	cs.runtimeMu.RLock()
+	schema := append(json.RawMessage(nil), cs.outputSchema...)
+	cs.runtimeMu.RUnlock()
+	cleanupSchema := func() {}
+	if len(schema) > 0 {
+		f, err := os.CreateTemp("", "cc-connect-output-schema-*.json")
+		if err != nil {
+			return fmt.Errorf("stage output schema: %w", err)
+		}
+		cleanupSchema = func() { _ = os.Remove(f.Name()) }
+		_, writeErr := f.Write(schema)
+		closeErr := f.Close()
+		if err := errors.Join(writeErr, closeErr); err != nil {
+			cleanupSchema()
+			return fmt.Errorf("write output schema: %w", err)
+		}
+		args = append(args[:len(args)-1], "--output-schema", f.Name(), "-")
+	}
 	if len(cs.cliExtraArgs) > 0 {
 		args = append(append([]string{}, cs.cliExtraArgs...), args...)
 	}
@@ -123,13 +147,21 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 	cmd := exec.CommandContext(cs.ctx, bin, args...)
 	cmd.Dir = cs.workDir
 	prepareCmdForKill(cmd)
-	if len(cs.extraEnv) > 0 {
-		cmd.Env = core.MergeEnv(os.Environ(), cs.extraEnv)
+	cs.runtimeMu.RLock()
+	taskRuntimeEnvFile := cs.taskRuntimeEnvFile
+	cs.runtimeMu.RUnlock()
+	turnEnv := append([]string(nil), cs.extraEnv...)
+	if taskRuntimeEnvFile != "" {
+		turnEnv = append(turnEnv, "TOMAKO_TASK_ENV_FILE="+taskRuntimeEnvFile)
+	}
+	if len(turnEnv) > 0 {
+		cmd.Env = core.MergeEnv(os.Environ(), turnEnv)
 	}
 	cmd.Stdin = strings.NewReader(prompt)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		cleanupSchema()
 		return fmt.Errorf("codexSession: stdout pipe: %w", err)
 	}
 
@@ -137,12 +169,16 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
+		cleanupSchema()
 		return fmt.Errorf("codexSession: start: %w", err)
 	}
 	cs.addCmd(cmd)
 
 	cs.wg.Add(1)
-	go cs.readLoop(cmd, stdout, &stderrBuf)
+	go func() {
+		defer cleanupSchema()
+		cs.readLoop(cmd, stdout, &stderrBuf)
+	}()
 
 	return nil
 }
@@ -176,6 +212,11 @@ func (cs *codexSession) stageImages(prompt string, images []core.ImageAttachment
 }
 
 func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []string {
+	cs.runtimeMu.RLock()
+	model := cs.model
+	webSearch := cs.webSearch
+	effort := cs.effort
+	cs.runtimeMu.RUnlock()
 	tid := cs.CurrentSessionID()
 	isResume := tid != ""
 
@@ -225,8 +266,8 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 		}
 	}
 
-	if cs.model != "" {
-		args = append(args, "--model", cs.model)
+	if model != "" {
+		args = append(args, "--model", model)
 	}
 	if cs.modelProvider != "" {
 		args = append(args, "-c", fmt.Sprintf("model_provider=%q", cs.modelProvider))
@@ -234,8 +275,11 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 	if cs.baseURL != "" {
 		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", cs.baseURL))
 	}
-	if cs.effort != "" {
-		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", cs.effort))
+	if effort != "" {
+		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", effort))
+	}
+	if webSearch != "" {
+		args = append(args, "-c", fmt.Sprintf("web_search=%q", webSearch))
 	}
 
 	if isResume {
@@ -780,6 +824,8 @@ func (cs *codexSession) GetWorkDir() string {
 }
 
 func (cs *codexSession) GetModel() string {
+	cs.runtimeMu.RLock()
+	defer cs.runtimeMu.RUnlock()
 	if model := strings.TrimSpace(cs.model); model != "" {
 		return model
 	}
@@ -787,11 +833,44 @@ func (cs *codexSession) GetModel() string {
 	return model
 }
 
+// SetSessionRuntime applies trusted task routing immediately before the exec
+// subprocess is built. This keeps native search scoped to the requested turn
+// instead of enabling it for every Codex agent in the project.
+func (cs *codexSession) SetSessionRuntime(runtime core.SessionRuntime) error {
+	if !cs.alive.Load() {
+		return fmt.Errorf("session is closed")
+	}
+	if err := core.ValidateOutputSchema(runtime.OutputSchema); err != nil {
+		return err
+	}
+	cs.runtimeMu.Lock()
+	defer cs.runtimeMu.Unlock()
+	envFile, err := updateTaskRuntimeEnv(cs.taskRuntimeEnvFile, runtime)
+	if err != nil {
+		return err
+	}
+	cs.taskRuntimeEnvFile = envFile
+	if model := strings.TrimSpace(runtime.GatewayModel); model != "" {
+		cs.model = model
+	}
+	cs.webSearch = normalizeWebSearch(runtime.WebSearch)
+	if effort := strings.TrimSpace(runtime.ReasoningEffort); effort != "" {
+		cs.effort = normalizeRuntimeReasoningEffort(effort)
+	}
+	cs.outputSchema = append(json.RawMessage(nil), runtime.OutputSchema...)
+	return nil
+}
+
+func (cs *codexSession) SupportsOutputSchema() bool { return true }
+
 func (cs *codexSession) GetReasoningEffort() string {
-	if effort := strings.TrimSpace(cs.effort); effort != "" {
+	cs.runtimeMu.RLock()
+	effort := strings.TrimSpace(cs.effort)
+	cs.runtimeMu.RUnlock()
+	if effort != "" {
 		return effort
 	}
-	_, effort := cs.runtimeConfig()
+	_, effort = cs.runtimeConfig()
 	return effort
 }
 
@@ -869,6 +948,10 @@ func (cs *codexSession) refreshContextUsageFromRollout() {
 
 func (cs *codexSession) Close() error {
 	cs.alive.Store(false)
+	cs.runtimeMu.Lock()
+	removeTaskRuntimeEnv(cs.taskRuntimeEnvFile)
+	cs.taskRuntimeEnvFile = ""
+	cs.runtimeMu.Unlock()
 	cs.cancel()
 	done := make(chan struct{})
 	go func() {

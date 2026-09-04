@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -207,8 +208,10 @@ type Message struct {
 // It is never inferred from prompt text and must only be populated by a trusted
 // platform adapter such as the authenticated Tomako Bridge connection.
 type SessionRuntime struct {
+	Scene              string   `json:"scene,omitempty"`
 	LogicalModel       string   `json:"logical_model,omitempty"`
 	GatewayModel       string   `json:"gateway_model,omitempty"`
+	WebSearch          string   `json:"web_search,omitempty"`
 	RoutePolicyID      string   `json:"route_policy_id,omitempty"`
 	RoutePolicyVersion int64    `json:"route_policy_version,omitempty"`
 	InferenceRequestID string   `json:"inference_request_id,omitempty"`
@@ -218,12 +221,20 @@ type SessionRuntime struct {
 	UserID             string   `json:"user_id,omitempty"`
 	ChatSessionID      string   `json:"chat_session_id,omitempty"`
 	TaskID             string   `json:"task_id,omitempty"`
+	ReasoningEffort    string   `json:"reasoning_effort,omitempty"`
 	TurnNo             int      `json:"turn_no,omitempty"`
 	// Scoped capabilities are control-plane data for the current turn. They are
 	// injected into the Agent prompt by the engine, never exposed to users.
+	// Machine authority is delivered on the trusted Bridge runtime lane so it
+	// never enters the model-visible prompt or persisted chat history.
 	MachineCapabilityToken   string `json:"machine_capability_token,omitempty"`
 	ImageCapabilityToken     string `json:"image_capability_token,omitempty"`
 	TaskAuthorityEnvelopeB64 string `json:"task_authority_envelope_b64,omitempty"`
+	// OutputSchema is supplied by the authenticated control plane, never parsed
+	// from user prose. A session must explicitly support native constrained output.
+	OutputSchema json.RawMessage `json:"output_schema,omitempty"`
+	// Trusted per-turn deadline; 0 keeps the engine default, 1..3600 seconds is bounded.
+	TurnBudgetSeconds int `json:"turn_budget_seconds,omitempty"`
 }
 
 // EventType distinguishes different kinds of agent output.
@@ -238,6 +249,8 @@ const (
 	EventPermissionRequest EventType = "permission_request" // agent requests permission via stdio protocol
 	EventThinking          EventType = "thinking"           // thinking/processing status
 	EventPlanUpdate        EventType = "plan_update"        // agent-authored task plan/status update
+	EventLifecycle         EventType = "lifecycle"          // internal runtime stage timing
+	EventStructuredResult  EventType = "structured_result"  // trusted structured stage result
 )
 
 // UserQuestion represents a structured question from AskUserQuestion.
@@ -279,6 +292,7 @@ type Event struct {
 	CacheCreationInputTokens int            // cache-write tokens (new content written to cache)
 	CacheReadInputTokens     int            // cache-read tokens (prior context retrieved from cache)
 	Metadata                 map[string]any // optional metadata from agent (e.g. compaction_continue)
+	DeliveryAck              chan error     // optional in-process acknowledgement for trusted result delivery
 	Synthetic                bool           // true if this is a synthetic/generated message (not from real user)
 }
 

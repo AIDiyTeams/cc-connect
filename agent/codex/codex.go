@@ -145,6 +145,15 @@ func normalizeBackend(raw string) string {
 	}
 }
 
+func normalizeWebSearch(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "live", "cached", "disabled":
+		return strings.ToLower(strings.TrimSpace(raw))
+	default:
+		return ""
+	}
+}
+
 func normalizeAppServerURL(raw string) string {
 	url := strings.TrimSpace(raw)
 	if url == "" {
@@ -438,7 +447,11 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	// providers in every cc-connect project. ensureCodexProviderConfig below
 	// can still upsert per-session overrides on top of the inherited baseline.
 	if codexHome != "" {
-		if err := ensureCodexHomeInheritedConfig(codexHome); err != nil {
+		sharedSkillsDir := strings.TrimSpace(envValue(extraEnv, "SKILLS_OL_DIR"))
+		if sharedSkillsDir == "" {
+			sharedSkillsDir = strings.TrimSpace(os.Getenv("SKILLS_OL_DIR"))
+		}
+		if err := ensureCodexHomeInheritedConfig(codexHome, permissionsProfile, sharedSkillsDir); err != nil {
 			slog.Warn("codex: failed to inherit global config into per-user codex_home", "codex_home", codexHome, "error", err)
 		}
 	}
@@ -547,6 +560,17 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	opts := map[string]any{
 		"mode":    a.mode,
 		"backend": a.backend,
+	}
+	if len(a.configEnv) > 0 {
+		// Brand agents need the same callback/Skill configuration. Never copy
+		// sessionEnv here: it can contain another task's authority or overrides.
+		env := make(map[string]string, len(a.configEnv))
+		for _, entry := range a.configEnv {
+			if key, value, ok := strings.Cut(entry, "="); ok {
+				env[key] = value
+			}
+		}
+		opts["env"] = env
 	}
 	if a.model != "" {
 		opts["model"] = a.model

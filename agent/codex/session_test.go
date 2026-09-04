@@ -71,6 +71,87 @@ func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestCodexSession_NativeSchemaFileLivesUntilProcessExitAndDoesNotLeakToNextTurn(t *testing.T) {
+	workDir := t.TempDir()
+	argsFile := filepath.Join(workDir, "args.txt")
+	copyFile := filepath.Join(workDir, "schema-copy.json")
+	writeFakeCodexScript(t, workDir, `#!/bin/sh
+printf '%s\n' "$@" > "$CODEX_ARGS_FILE"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-schema" ]; then
+    shift
+    cat "$1" > "$CODEX_SCHEMA_COPY"
+  fi
+  shift
+done
+`, `$a = @(fakeCodexArgs)
+[IO.File]::WriteAllLines($env:CODEX_ARGS_FILE, $a)
+for ($i=0; $i -lt $a.Count; $i++) {
+  if ($a[$i] -eq '--output-schema') { [IO.File]::Copy($a[$i+1], $env:CODEX_SCHEMA_COPY, $true) }
+}
+`)
+	bin := filepath.Join(workDir, "codex")
+	if runtime.GOOS == "windows" {
+		bin += ".cmd"
+	}
+	cs, err := newCodexSession(context.Background(), bin, nil, workDir, "default", "low", "suggest", "", "",
+		[]string{"CODEX_ARGS_FILE=" + argsFile, "CODEX_SCHEMA_COPY=" + copyFile}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	schema := json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}`)
+	if err := cs.SetSessionRuntime(core.SessionRuntime{GatewayModel: "tomako/gpt-5.6-sol", ReasoningEffort: "high", WebSearch: "live", OutputSchema: schema}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.Send("stage input", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	cs.wg.Wait()
+	got, err := os.ReadFile(copyFile)
+	if err != nil || string(got) != string(schema) {
+		t.Fatalf("child did not read exact native schema: %s, %v", got, err)
+	}
+	args := waitForArgsFile(t, argsFile)
+	if !containsSequence(args, []string{"-c", `model_reasoning_effort="high"`}) || !containsSequence(args, []string{"-c", `web_search="live"`}) {
+		t.Fatalf("runtime args missing: %v", args)
+	}
+	var schemaPath string
+	for i, arg := range args {
+		if arg == "--output-schema" {
+			schemaPath = args[i+1]
+		}
+	}
+	if schemaPath == "" {
+		t.Fatal("missing --output-schema")
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(schemaPath); os.IsNotExist(err) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := os.Stat(schemaPath); !os.IsNotExist(err) {
+		t.Fatalf("temporary schema leaked: %v", err)
+	}
+	if err := cs.SetSessionRuntime(core.SessionRuntime{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.Send("ordinary task", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	cs.wg.Wait()
+	for _, arg := range waitForArgsFile(t, argsFile) {
+		if arg == "--output-schema" {
+			t.Fatal("schema leaked into next task")
+		}
+	}
+	if err := cs.SetSessionRuntime(core.SessionRuntime{OutputSchema: json.RawMessage(`[]`)}); err == nil {
+		t.Fatal("invalid schema accepted")
+	}
+}
+
 func TestBuildExecArgs_IncludesBaseURL(t *testing.T) {
 	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "o3", "high", "full-auto", "", "https://custom.api.example.com", nil, "")
 	if err != nil {
@@ -97,6 +178,27 @@ func TestBuildExecArgs_IncludesModelProvider(t *testing.T) {
 	}
 	if !containsSequence(args, []string{"-c", `openai_base_url="https://router.example.com/api/v1"`}) {
 		t.Fatalf("args missing openai_base_url config flag: %v", args)
+	}
+}
+
+func TestBuildExecArgs_IncludesNativeWebSearch(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "o3", "", "full-auto", "", "", nil, "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	if err := cs.SetSessionRuntime(core.SessionRuntime{
+		GatewayModel: "tomako/deepseek-v4-flash-search",
+		WebSearch:    "live",
+	}); err != nil {
+		t.Fatalf("SetSessionRuntime: %v", err)
+	}
+
+	args := cs.buildExecArgs("hello", nil)
+	if !containsSequence(args, []string{"-c", `web_search="live"`}) {
+		t.Fatalf("args missing native web_search config flag: %v", args)
+	}
+	if !containsSequence(args, []string{"--model", "tomako/deepseek-v4-flash-search"}) {
+		t.Fatalf("args missing task-scoped gateway model: %v", args)
 	}
 }
 
@@ -127,11 +229,11 @@ func TestBuildExecArgs_ResumeOmitsCdFlag(t *testing.T) {
 // that this backend cannot answer.
 func TestBuildExecArgs_ModeMapping(t *testing.T) {
 	tests := []struct {
-		mode             string
-		wantSandbox      string // "" means no --sandbox flag (only yolo)
-		wantApproval     bool   // true means -c approval_policy="never" must be present
-		wantBypass       bool   // true means --dangerously-bypass-approvals-and-sandbox
-		wantNoFullAuto   bool   // always true: --full-auto is removed in codex 0.137+
+		mode           string
+		wantSandbox    string // "" means no --sandbox flag (only yolo)
+		wantApproval   bool   // true means -c approval_policy="never" must be present
+		wantBypass     bool   // true means --dangerously-bypass-approvals-and-sandbox
+		wantNoFullAuto bool   // always true: --full-auto is removed in codex 0.137+
 	}{
 		{mode: "suggest", wantSandbox: "read-only", wantApproval: true, wantNoFullAuto: true},
 		{mode: "auto-edit", wantSandbox: "workspace-write", wantApproval: true, wantNoFullAuto: true},
