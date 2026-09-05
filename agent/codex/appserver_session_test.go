@@ -58,6 +58,41 @@ func TestBrandAnalysisRuntimeRegistersOnlyDedicatedDynamicTools(t *testing.T) {
 	}
 }
 
+func TestBrandCompletionRequiresAcceptedCoreBeforePublicSuccess(t *testing.T) {
+	s := &appServerSession{
+		events: make(chan core.Event, 8), currentTurn: "brand-turn",
+		runtime:     core.SessionRuntime{Scene: "brand_analysis"},
+		brandFlow:   brandAnalysisFlow{evidenceReady: true},
+		pendingMsgs: []string{"Core profile completed."},
+	}
+	s.handleAgentMessageDelta("reply", "Core profile completed.")
+	s.completeTurn("brand-turn", nil)
+	if len(s.events) != 1 {
+		t.Fatalf("unpersisted core leaked success/text events: %d", len(s.events))
+	}
+	if event := <-s.events; event.Type != core.EventError || event.Error == nil {
+		t.Fatalf("missing core was treated as success: %#v", event)
+	}
+}
+
+func TestAcceptedBrandCoreAndOrdinaryDiscussionCanComplete(t *testing.T) {
+	for _, scene := range []string{"brand_analysis", "studio_chat", "kol_creator_discovery"} {
+		s := &appServerSession{
+			events: make(chan core.Event, 8), currentTurn: "turn",
+			runtime:     core.SessionRuntime{Scene: scene},
+			brandFlow:   brandAnalysisFlow{corePublished: scene == "brand_analysis"},
+			pendingMsgs: []string{"Visible reply"},
+		}
+		s.completeTurn("turn", nil)
+		if text := <-s.events; text.Type != core.EventText || text.Content != "Visible reply" {
+			t.Fatalf("%s lost public reply: %#v", scene, text)
+		}
+		if result := <-s.events; result.Type != core.EventResult || !result.Done {
+			t.Fatalf("%s did not complete: %#v", scene, result)
+		}
+	}
+}
+
 func TestBrandAnalysisRuntimeIsAppliedBeforeDeferredThreadCreation(t *testing.T) {
 	s := &appServerSession{workDir: "/srv/tomako"}
 	s.alive.Store(true)

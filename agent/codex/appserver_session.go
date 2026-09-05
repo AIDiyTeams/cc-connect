@@ -1197,6 +1197,10 @@ func (s *appServerSession) noteBrandWebSearchCompleted(traceID string) {
 
 func brandEvidenceForModel(result map[string]any) map[string]any {
 	compact := make(map[string]any, 16)
+	compact["workflow"] = map[string]any{
+		"state": "evidence_collected", "corePersisted": false,
+		"nextAction": "Call publish_brand_analysis_stage with stage=core and result containing the evidence-grounded core profile. Finish only after the tool accepts core; collecting evidence does not save the core profile.",
+	}
 	for _, key := range []string{
 		"brandName", "productName", "canonicalUrl", "oneLiner", "description",
 		"productType", "audience",
@@ -1337,6 +1341,15 @@ func (s *appServerSession) isBrandAnalysisRuntime() bool {
 	return strings.EqualFold(strings.TrimSpace(s.runtime.Scene), "brand_analysis")
 }
 
+func (s *appServerSession) brandCoreAwaitingPublication() bool {
+	if !s.isBrandAnalysisRuntime() {
+		return false
+	}
+	s.brandFlowMu.Lock()
+	defer s.brandFlowMu.Unlock()
+	return !s.brandFlow.corePublished
+}
+
 func brandAnalysisDynamicTools() []map[string]any {
 	return []map[string]any{
 		{
@@ -1356,7 +1369,7 @@ func brandAnalysisDynamicTools() []map[string]any {
 		{
 			"type":        "function",
 			"name":        "publish_brand_analysis_stage",
-			"description": "Persist one validated brand-analysis stage. Publish core before competitor search; publish competitors after the single native web search finishes or becomes unavailable.",
+			"description": "Persist one validated brand-analysis stage. Core-only onboarding must publish core before finishing; the backend starts its independent competitor task. Collecting evidence alone does not persist the core profile.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -2533,6 +2546,9 @@ func rpcIDToInt64(v any) (int64, bool) {
 }
 
 func (s *appServerSession) completeTurn(turnID string, turnErr error) {
+	if turnErr == nil && s.brandCoreAwaitingPublication() {
+		turnErr = fmt.Errorf("brand analysis ended before the core profile was accepted for persistence")
+	}
 	s.stateMu.Lock()
 	if s.currentTurn == "" || (turnID != "" && turnID != s.currentTurn) {
 		s.stateMu.Unlock()
@@ -2556,6 +2572,12 @@ func (s *appServerSession) completeTurn(turnID string, turnErr error) {
 // them nor demotes them to thinking when a tool call follows.
 func (s *appServerSession) handleAgentMessageDelta(itemID, delta string) {
 	if delta == "" {
+		return
+	}
+	// The dedicated onboarding task promises a saved core, not prose. Keep its
+	// completion claim private until the structured delivery acknowledgement;
+	// ordinary conversations continue to stream without this business gate.
+	if s.brandCoreAwaitingPublication() {
 		return
 	}
 	// Deltas do not carry the final/commentary phase. Structured tasks wait
