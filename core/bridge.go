@@ -414,7 +414,20 @@ var (
 	_ TurnDispatchStatusReporter        = (*BridgePlatform)(nil)
 	_ TurnFailureReporter               = (*BridgePlatform)(nil)
 	_ InteractionResponseStatusReporter = (*BridgePlatform)(nil)
+	_ MachineReplyChannel               = (*BridgePlatform)(nil)
 )
+
+// IsMachineReplyChannel reports whether the reply context belongs to a backend
+// machine channel (llm- tasks, cmsg- studio chat). System lifecycle notices on
+// these channels must ride the typed turn_status lane; adapters parse replies
+// as Agent deliverables and would store a reset notice as the turn's output.
+func (bp *BridgePlatform) IsMachineReplyChannel(replyCtx any) bool {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok {
+		return false
+	}
+	return strings.HasPrefix(rc.ReplyCtx, "llm-") || strings.HasPrefix(rc.ReplyCtx, "cmsg-")
+}
 
 func (bp *BridgePlatform) Name() string { return "bridge" }
 
@@ -498,7 +511,7 @@ func (bp *BridgePlatform) ReportInteractionResponseStatus(
 
 func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, event AgentTraceEvent) error {
 	rc, ok := replyCtx.(*bridgeReplyCtx)
-	if !ok || !strings.HasPrefix(rc.ReplyCtx, "llm-") {
+	if !ok {
 		return nil
 	}
 	a := bp.server.getAdapter(rc.Platform)
@@ -506,6 +519,28 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 		return nil
 	}
 	now := time.Now().UTC()
+	// Model thinking rides a dedicated frame so the backend can persist and
+	// gate it independently of tool traces. Content is capped, not summarized.
+	// Thinking flows for both backend tasks (llm-) and studio chat turns
+	// (cmsg-); user-facing visibility is gated by the backend adapter.
+	if event.Type == EventThinking {
+		if !strings.HasPrefix(rc.ReplyCtx, "llm-") && !strings.HasPrefix(rc.ReplyCtx, "cmsg-") {
+			return nil
+		}
+		return bp.server.sendToAdapter(rc.Platform, map[string]any{
+			"type":        "agent_thinking",
+			"session_key": rc.SessionKey,
+			"reply_ctx":   rc.ReplyCtx,
+			"trace_id":    event.TraceID,
+			"content":     truncateBridgeTrace(event.Content, 65536),
+			"occurred_at": now.Format(time.RFC3339Nano),
+		})
+	}
+	// Redacted tool traces stay task-only; chat turns surface tool activity
+	// through the existing progress card instead.
+	if !strings.HasPrefix(rc.ReplyCtx, "llm-") {
+		return nil
+	}
 	key := rc.ReplyCtx + ":" + event.TraceID
 	durationMs := event.DurationMs
 	if event.Type == EventToolUse {

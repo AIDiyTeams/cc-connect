@@ -223,6 +223,8 @@ type SessionRuntime struct {
 	TaskID             string   `json:"task_id,omitempty"`
 	ReasoningEffort    string   `json:"reasoning_effort,omitempty"`
 	TurnNo             int      `json:"turn_no,omitempty"`
+	// Scoped capabilities are control-plane data for the current turn. They are
+	// injected into the Agent prompt by the engine, never exposed to users.
 	// Machine authority is delivered on the trusted Bridge runtime lane so it
 	// never enters the model-visible prompt or persisted chat history.
 	MachineCapabilityToken   string `json:"machine_capability_token,omitempty"`

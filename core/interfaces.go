@@ -15,8 +15,10 @@ type Platform interface {
 	Stop() error
 }
 
-// AgentTraceReporter is an optional internal audit channel for tool actions.
-// Engines report tool use/results only; model thinking is deliberately excluded.
+// AgentTraceReporter is an optional internal channel toward backend adapters.
+// Engines report tool use/results plus model thinking for backend task
+// channels (llm- reply contexts); user-facing visibility of that data is
+// gated downstream by the backend, not here.
 type AgentTraceReporter interface {
 	ReportAgentTrace(ctx context.Context, replyCtx any, event AgentTraceEvent) error
 }
@@ -31,6 +33,9 @@ type AgentTraceEvent struct {
 	ExitCode   *int
 	Success    *bool
 	DurationMs int64
+	// Content carries full model thinking text for EventThinking reports;
+	// it stays separate from Input/Output, which remain tool-result fields.
+	Content string
 }
 
 // AgentStructuredResultReporter transports a validated dynamic-tool result to
@@ -76,6 +81,15 @@ type InteractionResponseStatus struct {
 	InteractionID string
 	State         string
 	Code          string
+}
+
+// MachineReplyChannel is implemented by platforms whose reply contexts are
+// backend machine channels (llm- tasks, cmsg- studio chat): adapters parse
+// replies as Agent deliverables, so system lifecycle notices (session auto
+// reset, graceful close) must ride the typed turn_status lane instead of the
+// business reply stream.
+type MachineReplyChannel interface {
+	IsMachineReplyChannel(replyCtx any) bool
 }
 
 // ErrNotSupported indicates a platform doesn't support a particular operation.
