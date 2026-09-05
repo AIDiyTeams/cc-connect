@@ -145,6 +145,9 @@ rotates this file between turns and removes it on session close. Tools can read
 it through the existing `.codex` read-only mount but cannot overwrite it. Host
 `/tmp` is intentionally hidden by the fence and cannot hold a tool-readable
 authority file.
+The file path is bound both in the app-server process environment (for Node/MCP
+child tools) and in the thread shell policy. Credentials remain in the protected
+file and are not embedded in either configuration or prompts.
 
 ## Acceptance tests
 
