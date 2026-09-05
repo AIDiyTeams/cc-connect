@@ -1564,6 +1564,11 @@ func (a *bridgeAdapter) handleMessage(raw json.RawMessage) {
 		Runtime:    normalizeSessionRuntime(m.Runtime),
 		ReplyCtx:   newBridgeReplyCtx(a, m.SessionKey, m.ReplyCtx),
 	}
+	// Older control planes duplicate trusted runtime values as leading prompt
+	// markers. Remove only exact matches before routing slash Skills. Runtime
+	// authority is never inferred from this text; legacy agents get the markers
+	// restored by sendWithSessionRuntime after command expansion.
+	msg.Content = stripMatchingRuntimeMarkers(msg.Runtime, msg.Content)
 
 	for _, img := range m.Images {
 		data, err := base64.StdEncoding.DecodeString(img.Data)

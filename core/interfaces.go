@@ -530,6 +530,13 @@ type SessionRuntimeConfigurer interface {
 	SetSessionRuntime(runtime SessionRuntime) error
 }
 
+// ToolAuthoritySession delivers the trusted runtime's scoped credentials to
+// tools without embedding them in model-visible prompts or conversation history.
+type ToolAuthoritySession interface {
+	SessionRuntimeConfigurer
+	SupportsToolAuthority() bool
+}
+
 // NativeOutputSchemaSession opts into enforcing Runtime.OutputSchema in the
 // model runtime, rather than treating the schema as instructions in the prompt.
 type NativeOutputSchemaSession interface {

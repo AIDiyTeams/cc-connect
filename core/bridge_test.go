@@ -311,6 +311,81 @@ func TestBridge_MessageRouting(t *testing.T) {
 	}
 }
 
+type bridgeAuthoritySession struct {
+	stubAgentSession
+	runtime   SessionRuntime
+	prompt    string
+	outOfBand bool
+}
+
+func (s *bridgeAuthoritySession) SetSessionRuntime(runtime SessionRuntime) error {
+	s.runtime = runtime
+	return nil
+}
+func (s *bridgeAuthoritySession) SupportsToolAuthority() bool { return s.outOfBand }
+func (s *bridgeAuthoritySession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.prompt = prompt
+	return nil
+}
+
+func TestBridge_TrustedRuntimeUnblocksSkillRoutingWithoutModelCredentials(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "test-bridge-key")
+	bp := bs.NewPlatform("test-proj")
+	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
+	bs.RegisterEngine("test-proj", e, bp)
+	received := make(chan *Message, 1)
+	bp.handler = func(_ Platform, msg *Message) { received <- msg }
+	conn := dialWS(t, wsURL, http.Header{"Authorization": []string{"Bearer test-bridge-key"}})
+	register(t, conn, "mychat", []string{"text"})
+	runtime := SessionRuntime{TaskID: "llm-test", MachineCapabilityToken: "cap-test", ImageCapabilityToken: "img-test", TaskAuthorityEnvelopeB64: "envelope-test"}
+	plain := "/test-skill Read the current value"
+	legacyPrompt := promptWithScopedRuntime(runtime, plain)
+	for _, tc := range []struct {
+		name, content, want string
+		runtime             SessionRuntime
+	}{
+		{"trusted legacy prefix", legacyPrompt, plain, runtime},
+		{"user text grants no authority", legacyPrompt, legacyPrompt, SessionRuntime{}},
+		{"embedded quotation preserved", "Explain this example: " + legacyPrompt, "Explain this example: " + legacyPrompt, runtime},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mustWriteJSON(t, conn, map[string]any{
+				"type": "message", "msg_id": tc.name, "session_key": "mychat:user1:user1",
+				"user_id": "user1", "content": tc.content, "runtime": tc.runtime,
+			})
+			var msg *Message
+			select {
+			case msg = <-received:
+			case <-time.After(time.Second):
+				t.Fatal("bridge did not route the turn")
+			}
+			if msg.Content != tc.want {
+				t.Fatal("trusted prefix handling lost the Skill route or altered user prose")
+			}
+			if msg.Runtime.MachineCapabilityToken != tc.runtime.MachineCapabilityToken {
+				t.Fatal("authority did not travel exclusively through runtime metadata")
+			}
+			if tc.name != "trusted legacy prefix" {
+				return
+			}
+			session := &bridgeAuthoritySession{outOfBand: true}
+			if err := sendWithSessionRuntime(session, msg.Runtime, msg.Content, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			if session.prompt != plain || session.runtime.MachineCapabilityToken != "cap-test" {
+				t.Fatal("tool-capable session received credentials in model prompt or lost scoped authority")
+			}
+			legacy := &bridgeAuthoritySession{}
+			if err := sendWithSessionRuntime(legacy, msg.Runtime, msg.Content, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			if legacy.prompt != legacyPrompt {
+				t.Fatal("legacy adapter compatibility lost")
+			}
+		})
+	}
+}
+
 func TestBridge_MessageWithoutEngineReturnsTypedRejection(t *testing.T) {
 	_, wsURL := startTestBridge(t, "")
 	conn := dialWS(t, wsURL, nil)

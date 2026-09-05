@@ -36,6 +36,27 @@ func TestPromptWithScopedRuntimeInjectsCapabilityMarkersOnce(t *testing.T) {
 		t.Fatalf("markers duplicated on replay: %q", again)
 	}
 }
+
+func TestSkillCommandPreservesMultilineStructuredContext(t *testing.T) {
+	root := t.TempDir()
+	writeSkillFile(t, filepath.Join(root, "context-check", "SKILL.md"), "Read current state")
+	p := &stubPlatformEngine{n: "plain"}
+	agentSession := newResultAgentSession("ok")
+	e := NewEngine("test", &resultAgent{session: agentSession}, []Platform{p}, "", LangEnglish)
+	defer e.cancel()
+	e.skills.SetDirs([]string{root})
+	arguments := "[Current state]\n{\"notes\":\"two  spaces\",\"revision\":14}\n\n[User request]\nKeep \"quoted words\" and line breaks."
+	msg := &Message{SessionKey: "plain:user1", UserID: "user1", Content: "/context-check " + arguments, ReplyCtx: "ctx"}
+	if !e.handleCommand(p, msg, msg.Content) {
+		t.Fatal("Skill was not routed")
+	}
+	if !strings.Contains(msg.Content, "## User Arguments:\n"+arguments+"\n\n") {
+		t.Fatal("Skill routing rewrote structured state or user text")
+	}
+	if got := waitForSentText(t, p); got != "ok" {
+		t.Fatalf("reply = %q", got)
+	}
+}
 func (a *stubAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) { return nil, nil }
 func (a *stubAgent) Stop() error                                                { return nil }
 
@@ -1619,6 +1640,50 @@ func TestProcessInteractiveEvents_ToolMessagesDisabledSuppressesToolProgressOnly
 	}
 	if sent[len(sent)-1] != "done" {
 		t.Fatalf("final message = %q, want done", sent[len(sent)-1])
+	}
+}
+
+func TestProcessInteractiveEvents_MachineReplyKeepsFinalAnswerWithoutToolNarration(t *testing.T) {
+	p := &stubMachineChannelPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ToolMessages: false})
+	sessionKey := "test:durable-answer"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-1"}
+	e.interactiveStates[sessionKey] = state
+	agentSession.events <- Event{Type: EventText, Content: "I will inspect /private/tool/path.\n\n"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "private command"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "saved"}
+	agentSession.events <- Event{Type: EventText, Content: "Saved Marc's note. Other fields are unchanged."}
+	agentSession.events <- Event{Type: EventResult, Content: "Saved Marc's note. Other fields are unchanged.", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.replies) != 1 || p.replies[0] != "Saved Marc's note. Other fields are unchanged." {
+		t.Fatalf("durable reply = %#v, want only terminal answer", p.replies)
+	}
+}
+
+func TestProcessInteractiveEvents_MachineToolResultDoesNotCompleteTaskWithDisplayEnabled(t *testing.T) {
+	p := &stubMachineChannelPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ToolMessages: true, ToolMaxLen: 500})
+	sessionKey := "test:durable-answer"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-1"}
+	e.interactiveStates[sessionKey] = state
+	agentSession.events <- Event{Type: EventText, Content: "I will inspect /private/tool/path.\n\n"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "private command"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "{\"source\":\"public_reddit_atom_feeds\"}", ToolStatus: "completed"}
+	agentSession.events <- Event{Type: EventText, Content: "Saved Marc's note. Other fields are unchanged."}
+	agentSession.events <- Event{Type: EventResult, Content: "Saved Marc's note. Other fields are unchanged.", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.replies) != 1 || p.replies[0] != "Saved Marc's note. Other fields are unchanged." {
+		t.Fatalf("durable reply = %#v, want only terminal answer", p.replies)
 	}
 }
 
@@ -15619,8 +15684,8 @@ func TestProcessInteractiveEvents_SkipsEllipsisThinkingInTraceReporter(t *testin
 
 type stubMachineChannelPlatform struct {
 	stubPlatformEngine
-	replies     []string
-	turnStatus  []TurnDispatchStatus
+	replies      []string
+	turnStatus   []TurnDispatchStatus
 	withReporter bool
 }
 

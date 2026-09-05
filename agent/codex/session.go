@@ -863,6 +863,8 @@ func (cs *codexSession) SetSessionRuntime(runtime core.SessionRuntime) error {
 
 func (cs *codexSession) SupportsOutputSchema() bool { return true }
 
+func (cs *codexSession) SupportsToolAuthority() bool { return true }
+
 func (cs *codexSession) GetReasoningEffort() string {
 	cs.runtimeMu.RLock()
 	effort := strings.TrimSpace(cs.effort)
