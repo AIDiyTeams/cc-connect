@@ -4944,7 +4944,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		// ThinkingMaxLen only govern messaging-platform rendering; user-facing
 		// visibility of thinking is gated by the backend adapter downstream.
 		if reporter, ok := p.(AgentTraceReporter); ok && (event.Type == EventToolUse || event.Type == EventToolResult || event.Type == EventLifecycle ||
-			(event.Type == EventThinking && !isEllipsisOnly(event.Content))) {
+			((event.Type == EventThinking || event.Type == EventCommentary) && !isEllipsisOnly(event.Content))) {
 			trace := AgentTraceEvent{TraceID: event.TraceID, Type: event.Type, ToolName: event.ToolName,
 				Input: event.ToolInput, Output: event.ToolResult, Status: event.ToolStatus,
 				ExitCode: event.ToolExitCode, Success: event.ToolSuccess}
@@ -4955,7 +4955,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					trace.DurationMs = int64(duration)
 				}
 			}
-			if event.Type == EventThinking {
+			if event.Type == EventThinking || event.Type == EventCommentary {
 				trace.Content = event.Content
 			}
 			if trace.Output == "" {
@@ -4993,6 +4993,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 
 		switch event.Type {
+		case EventCommentary:
+			// Public progress must not enter the accumulated terminal answer.
+			// Bridge adapters already received the typed event above.
+			if _, reported := p.(AgentTraceReporter); !reported && strings.TrimSpace(event.Content) != "" {
+				sendWorkspace(p, replyCtx, event.Content)
+			}
 		case EventPlanUpdate:
 			// The plan comes from Codex update_plan/turn/plan/updated. It is
 			// already user-facing and must replace any runtime inference.

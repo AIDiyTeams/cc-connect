@@ -36,7 +36,7 @@ func TestAppServerSession_StructuredTurnOnlyReturnsNativeFinalAnswer(t *testing.
 		switch event.Type {
 		case core.EventText:
 			output.WriteString(event.Content)
-		case core.EventThinking:
+		case core.EventCommentary:
 			thinking++
 		case core.EventResult:
 			results++
@@ -47,6 +47,32 @@ func TestAppServerSession_StructuredTurnOnlyReturnsNativeFinalAnswer(t *testing.
 	}
 	if thinking != 2 || results != 1 {
 		t.Fatalf("thinking=%d results=%d, want 2 and 1", thinking, results)
+	}
+}
+
+func TestAppServerSession_PublicCommentaryDoesNotLeakReasoningOrEnterFinal(t *testing.T) {
+	s := terminalTestSession()
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "progress", "phase": "commentary"})
+	s.handleAgentMessageDelta("progress", "我会先核对近期公开资料。")
+	if len(s.events) != 0 {
+		t.Fatal("commentary delta entered terminal text")
+	}
+	s.handleItemCompleted(map[string]any{"type": "reasoning", "id": "reason", "summary": []any{map[string]any{"text": "private reasoning"}}})
+	s.handleItemCompleted(map[string]any{"type": "agentMessage", "id": "progress", "phase": "commentary", "text": "我会先核对近期公开资料。"})
+	s.handleItemCompleted(map[string]any{"type": "agentMessage", "id": "final", "phase": "final_answer", "text": "最终建议"})
+	s.completeTurn("turn-1", nil)
+	var public, final string
+	for len(s.events) > 0 {
+		e := <-s.events
+		if e.Type == core.EventCommentary {
+			public += e.Content
+		}
+		if e.Type == core.EventText {
+			final += e.Content
+		}
+	}
+	if public != "我会先核对近期公开资料。" || final != "最终建议" {
+		t.Fatalf("public=%q final=%q", public, final)
 	}
 }
 

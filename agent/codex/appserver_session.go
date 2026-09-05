@@ -203,6 +203,7 @@ type appServerSession struct {
 	// item/completed does not re-emit or re-classify them as thinking.
 	streamedItems    map[string]string
 	lastStreamedItem string
+	commentaryItems  map[string]bool
 
 	runtimeMu          sync.RWMutex
 	usage              *core.UsageReport
@@ -632,6 +633,7 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	s.currentTurn = resp.Turn.ID
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.streamedItems = nil
+	s.commentaryItems = nil
 	s.lastStreamedItem = ""
 	s.stateMu.Unlock()
 
@@ -2040,6 +2042,7 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 			s.currentTurn = notif.Turn.ID
 			s.pendingMsgs = s.pendingMsgs[:0]
 			s.streamedItems = nil
+			s.commentaryItems = nil
 			s.lastStreamedItem = ""
 			s.stateMu.Unlock()
 			s.storeContextUsage(nil)
@@ -2164,6 +2167,14 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 	if itemType == "" {
 		return
 	}
+	if itemType == "agentMessage" && item["phase"] == "commentary" {
+		s.stateMu.Lock()
+		if s.commentaryItems == nil {
+			s.commentaryItems = make(map[string]bool)
+		}
+		s.commentaryItems[itemID] = true
+		s.stateMu.Unlock()
+	}
 
 	switch itemType {
 	case "agentMessage", "reasoning", "userMessage", "plan", "hookPrompt", "contextCompaction":
@@ -2216,13 +2227,17 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		if strings.TrimSpace(text) == "" {
 			return
 		}
+		if item["phase"] == "commentary" {
+			s.stateMu.Lock()
+			delete(s.commentaryItems, itemID)
+			s.stateMu.Unlock()
+			s.emit(core.Event{Type: core.EventCommentary, TraceID: itemID, Content: text})
+			return
+		}
 		if len(s.outputSchema()) > 0 {
 			// Schema-constrained progress may also look like JSON. The native
 			// phase, not its shape, identifies the terminal structured answer.
 			switch item["phase"] {
-			case "commentary":
-				s.emit(core.Event{Type: core.EventThinking, Content: text})
-				return
 			case "final_answer":
 				s.flushPendingAsThinking()
 				s.emit(core.Event{Type: core.EventText, Content: text})
@@ -2587,6 +2602,10 @@ func (s *appServerSession) handleAgentMessageDelta(itemID, delta string) {
 	}
 	prefix := ""
 	s.stateMu.Lock()
+	if s.commentaryItems[itemID] {
+		s.stateMu.Unlock()
+		return
+	}
 	if s.streamedItems == nil {
 		s.streamedItems = make(map[string]string)
 	}
@@ -2607,7 +2626,7 @@ func (s *appServerSession) flushPendingAsThinking() {
 
 	for _, text := range msgs {
 		if strings.TrimSpace(text) != "" {
-			s.emit(core.Event{Type: core.EventThinking, Content: text})
+			s.emit(core.Event{Type: core.EventCommentary, Content: text})
 		}
 	}
 }
