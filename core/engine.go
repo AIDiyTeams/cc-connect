@@ -5232,6 +5232,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
+			// Machine consumers receive tool results on the typed trace lane above.
+			// A standalone display fallback is a terminal reply on these channels,
+			// so it must never finish the task while the Agent is still working.
+			if machine, ok := p.(MachineReplyChannel); ok && machine.IsMachineReplyChannel(replyCtx) {
+				continue
+			}
 			if e.display.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
