@@ -316,6 +316,12 @@ func (s *appServerSession) connect() error {
 	cmd := exec.CommandContext(s.ctx, "codex", args...)
 	cmd.Dir = s.workDir
 	env := append([]string(nil), s.extraEnv...)
+	// Node/MCP child tools inherit the app-server environment, not the shell
+	// policy passed to thread/start. Bind the same non-secret stable path before
+	// process startup so every tool runtime can load the current turn authority.
+	if envFile := s.currentTaskRuntimeEnvFile(); envFile != "" {
+		env = append(env, "TOMAKO_TASK_ENV_FILE="+envFile)
+	}
 	if s.codexHome != "" {
 		env = append(env, "CODEX_HOME="+s.codexHome)
 	}

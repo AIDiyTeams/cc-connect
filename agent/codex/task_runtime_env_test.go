@@ -109,6 +109,7 @@ func testResumedThreadAuthority(t *testing.T, permissionsProfile string) {
 	workDir := t.TempDir()
 	requestsFile := filepath.Join(workDir, "requests.jsonl")
 	shellScript := `#!/bin/sh
+printf '%s' "$TOMAKO_TASK_ENV_FILE" > "$CC_TEST_RUNTIME_REQUESTS.env"
 while IFS= read -r line; do
   printf '%s\n' "$line" >> "$CC_TEST_RUNTIME_REQUESTS"
   id=$(printf '%s' "$line" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')
@@ -123,6 +124,7 @@ while IFS= read -r line; do
 done
 `
 	powershellScript := `
+[System.IO.File]::WriteAllText($env:CC_TEST_RUNTIME_REQUESTS + '.env', [string]$env:TOMAKO_TASK_ENV_FILE)
 while (($line = [Console]::In.ReadLine()) -ne $null) {
   [System.IO.File]::AppendAllText($env:CC_TEST_RUNTIME_REQUESTS, $line + [Environment]::NewLine)
   $request = $line | ConvertFrom-Json
@@ -139,6 +141,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
 	writeFakeCodexScript(t, workDir, shellScript, powershellScript)
 	t.Setenv("PATH", workDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CC_TEST_RUNTIME_REQUESTS", requestsFile)
+	t.Setenv("TOMAKO_TASK_ENV_FILE", filepath.Join(workDir, "stale-authority.env"))
 	var extraEnv []string
 	if permissionsProfile != "" {
 		var err error
@@ -185,6 +188,10 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
 	}
 	if boundPath == "" {
 		t.Fatal("first resume did not bind the tool authority file; a second resume cannot repair a loaded thread")
+	}
+	processEnv, err := os.ReadFile(requestsFile + ".env")
+	if err != nil || string(processEnv) != boundPath {
+		t.Fatal("app-server child tools do not inherit the same authority path as shell tools")
 	}
 	if permissionsProfile != "" && filepath.Dir(filepath.Dir(boundPath)) != filepath.Join(workDir, ".codex") {
 		t.Fatal("authority file is outside the brand's read-only .codex mount and is invisible inside the filesystem fence")
