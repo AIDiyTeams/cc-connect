@@ -278,6 +278,9 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 	if effort != "" {
 		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", effort))
 	}
+	if needsReasoningCapability(model, effort) {
+		args = append(args, "-c", "model_supports_reasoning_summaries=true")
+	}
 	if webSearch != "" {
 		args = append(args, "-c", fmt.Sprintf("web_search=%q", webSearch))
 	}

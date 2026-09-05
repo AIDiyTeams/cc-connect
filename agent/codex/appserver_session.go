@@ -452,6 +452,11 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	if effort := s.GetReasoningEffort(); effort != "" {
 		config["model_reasoning_effort"] = effort
 	}
+	// Thread overrides must also work when the process started with a different
+	// default model, before the trusted task runtime arrived.
+	if needsReasoningCapability(s.GetModel(), s.GetReasoningEffort()) {
+		config["model_supports_reasoning_summaries"] = true
+	}
 	if s.isBrandAnalysisRuntime() {
 		params["dynamicTools"] = brandAnalysisDynamicTools()
 	}
@@ -642,6 +647,7 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	}
 	s.taskRuntimeEnvFile = envFile
 	searchChanged := s.webSearch != normalizeWebSearch(runtime.WebSearch)
+	previousReasoningCapability := needsReasoningCapability(s.model, s.effort)
 	s.runtime = runtime
 	if model := strings.TrimSpace(runtime.GatewayModel); model != "" {
 		s.model = model
@@ -650,6 +656,7 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 		s.effort = normalizeRuntimeReasoningEffort(effort)
 	}
 	s.webSearch = normalizeWebSearch(runtime.WebSearch)
+	reasoningCapabilityChanged := previousReasoningCapability != needsReasoningCapability(s.model, s.effort)
 	s.runtimeMu.Unlock()
 
 	// Resumed app-server threads were created before this turn's trusted
@@ -678,7 +685,7 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	// brand-analysis tool mode so the model sees exactly the tools for this turn.
 	wantsBrandTools := strings.EqualFold(strings.TrimSpace(runtime.Scene), "brand_analysis")
 	s.threadMu.Lock()
-	if s.CurrentSessionID() != "" && (s.threadBrandTools != wantsBrandTools || searchChanged) {
+	if s.CurrentSessionID() != "" && (s.threadBrandTools != wantsBrandTools || searchChanged || reasoningCapabilityChanged) {
 		s.threadID.Store("")
 		s.resumeID = ""
 	}
