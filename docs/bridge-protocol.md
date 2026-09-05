@@ -1062,3 +1062,18 @@ The protocol version is declared in the `register` message via `metadata.protoco
   }
 }
 ```
+
+### Structured result persistence receipt
+
+Adapters that persist `agent_structured_result` advertise `structured_result_ack`.
+Each result includes an opaque `ref_id`, `reply_ctx`, and `stage`. The adapter sends
+`{ "type": "structured_result_ack", "ref_id": "...", "reply_ctx": "...", "stage": "...", "status": "persisted" }`
+only after its synchronous domain transaction commits. Exceptions return `status: "rejected"`
+without private database details. A WebSocket write, a mismatched receipt, or a timeout
+never means persistence succeeded. Requests are scoped to the adapter connection and
+removed on completion or cancellation; the bridge waits up to 10 seconds for a receipt.
+Adapters without this capability are rejected before any structured result is sent.
+
+Rollout order: deploy the receipt-capable backend first, then the bridge. The backend
+continues accepting older result envelopes without `ref_id` during rollout. For rollback,
+revert the bridge before removing backend receipt support, using the deployment controller.

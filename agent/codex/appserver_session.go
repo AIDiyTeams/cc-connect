@@ -1036,7 +1036,7 @@ func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRa
 				return
 			}
 			s.finishBrandAnalysisStagePublication(stage, true)
-			s.writeDynamicToolResponse(rawID, true, "stage accepted for persistence")
+			s.writeDynamicToolResponse(rawID, true, "stage persisted by backend")
 		default:
 			s.writeDynamicToolResponse(rawID, false, "unknown dynamic tool")
 		}
@@ -1048,7 +1048,7 @@ func (s *appServerSession) publishStructuredResult(stage string, result map[stri
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	deliveryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	deliveryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	ack := make(chan error, 1)
 	event := core.Event{
