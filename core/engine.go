@@ -6350,7 +6350,23 @@ func sendWithSessionRuntime(
 			return fmt.Errorf("configure session runtime: %w", err)
 		}
 	}
+	if capable, ok := session.(ToolAuthoritySession); ok && capable.SupportsToolAuthority() {
+		return session.Send(stripMatchingRuntimeMarkers(runtime, prompt), images, files)
+	}
 	return session.Send(promptWithScopedRuntime(runtime, prompt), images, files)
+}
+
+func stripMatchingRuntimeMarkers(runtime SessionRuntime, prompt string) string {
+	for _, marker := range []struct{ name, value string }{
+		{"MACHINE_CAPABILITY_TOKEN", runtime.MachineCapabilityToken},
+		{"IMAGE_CAPABILITY_TOKEN", runtime.ImageCapabilityToken},
+		{"TASK_AUTHORITY_ENVELOPE_B64", runtime.TaskAuthorityEnvelopeB64},
+	} {
+		if value := strings.TrimSpace(marker.value); value != "" {
+			prompt = strings.TrimPrefix(prompt, "["+marker.name+"="+value+"]\n")
+		}
+	}
+	return prompt
 }
 
 func promptWithScopedRuntime(runtime SessionRuntime, prompt string) string {
@@ -6698,7 +6714,10 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			slog.Info("audit: command_executed",
 				"user_id", msg.UserID, "platform", msg.Platform,
 				"project", e.name, "command", skill.Name, "type", "skill")
-			e.executeSkill(p, msg, skill, args)
+			// Skill input is prose/structured context, not shell argv. Preserve
+			// JSON quotes and line breaks that splitCommandArgs would remove.
+			arguments := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), parts[0]))
+			e.executeSkill(p, msg, skill, []string{arguments})
 			return true
 		}
 		// Not a cc-connect command — notify user, then fall through to agent

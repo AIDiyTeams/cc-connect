@@ -1,6 +1,8 @@
 package codex
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,22 +94,129 @@ func TestThreadParamsExposeOnlyTaskRuntimeFilePath(t *testing.T) {
 	}
 }
 
-func TestSessionRuntimeRebindsResumedThreadWithTaskEnvFile(t *testing.T) {
-	s := &appServerSession{}
-	s.alive.Store(true)
-	s.threadID.Store("thread-existing")
-	if err := s.SetSessionRuntime(core.SessionRuntime{
-		TaskID:                   "llm-task-1",
-		MachineCapabilityToken:   "machine-token",
-		TaskAuthorityEnvelopeB64: "authority-envelope",
-	}); err != nil {
-		t.Fatalf("SetSessionRuntime: %v", err)
+// Loaded app-server threads ignore subsequent resume config overrides. Capture
+// the FIRST resume request and verify that every turn uses that original binding.
+func TestResumedThreadToolsReceiveRotatingAuthorityWithoutReResume(t *testing.T) {
+	workDir := t.TempDir()
+	requestsFile := filepath.Join(workDir, "requests.jsonl")
+	shellScript := `#!/bin/sh
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$CC_TEST_RUNTIME_REQUESTS"
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) result='{}' ;;
+    *'"method":"thread/resume"'*) result='{"thread":{"id":"thread-existing"}}' ;;
+    *'"method":"account/rateLimits/read"'*) result='{}' ;;
+    *'"method":"turn/start"'*) result='{"turn":{"id":"test-turn"}}' ;;
+    *) continue ;;
+  esac
+  printf '{"id":%s,"result":%s}\n' "$id" "$result"
+done
+`
+	powershellScript := `
+while (($line = [Console]::In.ReadLine()) -ne $null) {
+  [System.IO.File]::AppendAllText($env:CC_TEST_RUNTIME_REQUESTS, $line + [Environment]::NewLine)
+  $request = $line | ConvertFrom-Json
+  switch ($request.method) {
+    'initialize' { $result = '{}' }
+    'thread/resume' { $result = '{"thread":{"id":"thread-existing"}}' }
+    'account/rateLimits/read' { $result = '{}' }
+    'turn/start' { $result = '{"turn":{"id":"test-turn"}}' }
+    default { continue }
+  }
+  [Console]::Out.WriteLine('{"id":' + $request.id + ',"result":' + $result + '}')
+}
+`
+	writeFakeCodexScript(t, workDir, shellScript, powershellScript)
+	t.Setenv("PATH", workDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CC_TEST_RUNTIME_REQUESTS", requestsFile)
+	s, err := newAppServerSession(context.Background(), "", workDir, "test-model", "low", "", "", "thread-existing", "", "", nil, "")
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { removeTaskRuntimeEnv(s.currentTaskRuntimeEnvFile()) })
-	if got := s.CurrentSessionID(); got != "" {
-		t.Fatalf("current thread id = %q, want cleared for configured resume", got)
+	t.Cleanup(func() { _ = s.Close() })
+	readRequests := func() []struct {
+		Method string
+		Params map[string]any
+	} { body, err := os.ReadFile(requestsFile); if err != nil {
+		t.Fatal(err)
+	}; var requests []struct {
+		Method string
+		Params map[string]any
+	}; for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+		var request struct {
+			Method string
+			Params map[string]any
+		}
+		if err := json.Unmarshal([]byte(line), &request); err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, request)
+	}; return requests }
+	var boundPath string
+	for _, request := range readRequests() {
+		if request.Method == "thread/resume" {
+			config := request.Params["config"].(map[string]any)
+			boundPath, _ = config["shell_environment_policy.set.TOMAKO_TASK_ENV_FILE"].(string)
+		}
 	}
-	if s.resumeID != "thread-existing" {
-		t.Fatalf("resume id = %q, want thread-existing", s.resumeID)
+	if boundPath == "" {
+		t.Fatal("first resume did not bind the tool authority file; a second resume cannot repair a loaded thread")
+	}
+	assertBoundContents := func(expected string) {
+		body, err := os.ReadFile(boundPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if expected == "" {
+			if len(body) != 0 {
+				t.Fatal("unscoped turn retained prior authority")
+			}
+		} else if !strings.Contains(string(body), "export MACHINE_CAPABILITY_TOKEN='"+expected+"'") {
+			t.Fatal("tool's original shell environment cannot resolve current turn authority")
+		}
+		if s.currentTaskRuntimeEnvFile() != boundPath {
+			t.Fatal("file path changed after thread config was frozen")
+		}
+	}
+	assertBoundContents("")
+	for _, token := range []string{"first-token", "second-token", "", "restored-token"} {
+		var runtime core.SessionRuntime
+		if token != "" {
+			wire := `{"task_id":"llm-task-1","machine_capability_token":"` + token + `","task_authority_envelope_b64":"test-envelope"}`
+			if err := json.Unmarshal([]byte(wire), &runtime); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.SetSessionRuntime(runtime); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Send("Check current value without modifying it", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		assertBoundContents(token)
+		if s.CurrentSessionID() != "thread-existing" {
+			t.Fatal("authority rotation lost conversation history")
+		}
+	}
+	resumes, turns := 0, 0
+	for _, request := range readRequests() {
+		switch request.Method {
+		case "thread/resume":
+			resumes++
+		case "thread/start":
+			t.Fatal("authority rotation replaced the history thread")
+		case "turn/start":
+			turns++
+		}
+	}
+	if resumes != 1 || turns != 4 {
+		t.Fatalf("got %d resumes and %d turns, want 1 and 4", resumes, turns)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Dir(boundPath)); !os.IsNotExist(err) {
+		t.Fatal("closing session did not remove its authority directory")
 	}
 }

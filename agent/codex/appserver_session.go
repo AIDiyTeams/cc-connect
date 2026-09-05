@@ -253,9 +253,19 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 		resumeID:           resumeID,
 	}
 	s.alive.Store(true)
+	// Bind a stable, initially empty authority file before the first start or
+	// eager resume. Codex ignores config overrides when resuming a loaded
+	// thread; a second resume cannot add the shell environment after the fact.
+	var err error
+	s.taskRuntimeEnvFile, err = writeTaskRuntimeEnv("", "")
+	if err != nil {
+		cancel()
+		return nil, err
+	}
 
 	connectStartedAt := time.Now()
 	if err := s.connect(); err != nil {
+		removeTaskRuntimeEnv(s.taskRuntimeEnvFile)
 		cancel()
 		return nil, err
 	}
@@ -634,7 +644,6 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	}
 	runtime.OutputSchema = append(json.RawMessage(nil), runtime.OutputSchema...)
 	s.runtimeMu.Lock()
-	previousEnvFile := s.taskRuntimeEnvFile
 	envFile, err := updateTaskRuntimeEnv(s.taskRuntimeEnvFile, runtime)
 	if err != nil {
 		s.runtimeMu.Unlock()
@@ -652,20 +661,8 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	s.webSearch = normalizeWebSearch(runtime.WebSearch)
 	s.runtimeMu.Unlock()
 
-	// Resumed app-server threads were created before this turn's trusted
-	// runtime arrived. Resume the same thread once more with the task env-file
-	// path in its shell policy; subsequent turns keep the stable path while the
-	// file contents rotate atomically.
-	if previousEnvFile == "" && envFile != "" {
-		if currentID := s.CurrentSessionID(); currentID != "" {
-			s.threadMu.Lock()
-			if s.CurrentSessionID() == currentID {
-				s.resumeID = currentID
-				s.threadID.Store("")
-			}
-			s.threadMu.Unlock()
-		}
-	}
+	// The thread retains its original shell policy. Only the protected file's
+	// contents rotate between turns, including revocation on an unscoped turn.
 	// Each bridge task is a new Agent turn. Do not leak evidence/search guards
 	// from an earlier brand-analysis task that happened to share the same
 	// workspace session.
@@ -693,6 +690,8 @@ func (s *appServerSession) currentTaskRuntimeEnvFile() string {
 }
 
 func (s *appServerSession) SupportsOutputSchema() bool { return true }
+
+func (s *appServerSession) SupportsToolAuthority() bool { return true }
 
 func (s *appServerSession) outputSchema() json.RawMessage {
 	s.runtimeMu.RLock()

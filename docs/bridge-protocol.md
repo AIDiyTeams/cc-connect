@@ -32,6 +32,19 @@ The Bridge Protocol allows **external platform adapters** written in any program
 
 ### Architecture
 
+Task authority belongs in the authenticated `runtime` fields
+`machine_capability_token`, `image_capability_token`, `task_authority_envelope_b64`
+and `task_id`. It is never derived from user text. Exact matching legacy markers
+at the beginning of a prompt are removed before Skill routing. Sessions that
+implement `ToolAuthoritySession` pass authority to tools outside model prompts;
+other adapters retain the legacy marker fallback after routing.
+
+Codex app-server sessions bind a protected, initially empty `TOMAKO_TASK_ENV_FILE`
+before their first thread start/resume. Its path stays fixed; each turn atomically
+replaces the contents, and an unscoped turn clears old credentials. Closing the
+session removes the file. Re-resuming an already loaded Codex thread cannot add
+shell config, so delaying this binding until after history recovery is invalid.
+
 ```
 ┌──────────────────────────────────────────────────────┐
 │                    cc-connect                        │

@@ -36,6 +36,27 @@ func TestPromptWithScopedRuntimeInjectsCapabilityMarkersOnce(t *testing.T) {
 		t.Fatalf("markers duplicated on replay: %q", again)
 	}
 }
+
+func TestSkillCommandPreservesMultilineStructuredContext(t *testing.T) {
+	root := t.TempDir()
+	writeSkillFile(t, filepath.Join(root, "context-check", "SKILL.md"), "Read current state")
+	p := &stubPlatformEngine{n: "plain"}
+	agentSession := newResultAgentSession("ok")
+	e := NewEngine("test", &resultAgent{session: agentSession}, []Platform{p}, "", LangEnglish)
+	defer e.cancel()
+	e.skills.SetDirs([]string{root})
+	arguments := "[Current state]\n{\"notes\":\"two  spaces\",\"revision\":14}\n\n[User request]\nKeep \"quoted words\" and line breaks."
+	msg := &Message{SessionKey: "plain:user1", UserID: "user1", Content: "/context-check " + arguments, ReplyCtx: "ctx"}
+	if !e.handleCommand(p, msg, msg.Content) {
+		t.Fatal("Skill was not routed")
+	}
+	if !strings.Contains(msg.Content, "## User Arguments:\n"+arguments+"\n\n") {
+		t.Fatal("Skill routing rewrote structured state or user text")
+	}
+	if got := waitForSentText(t, p); got != "ok" {
+		t.Fatalf("reply = %q", got)
+	}
+}
 func (a *stubAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) { return nil, nil }
 func (a *stubAgent) Stop() error                                                { return nil }
 
