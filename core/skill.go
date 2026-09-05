@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"unicode"
 )
 
 // Skill represents an agent skill discovered from a SKILL.md file.
@@ -285,6 +286,19 @@ func parseFrontmatter(block string) map[string]string {
 // a user invokes a skill. Instead of raw prompt expansion, we instruct the
 // agent to execute the skill.
 func BuildSkillInvocationPrompt(skill *Skill, args []string) string {
+	return buildSkillInvocationPrompt(skill, strings.Join(args, " "))
+}
+
+// Skill arguments are prose or structured task input, not shell arguments.
+// Keep quotes, escapes and internal whitespace intact at the dispatch boundary.
+func skillCommandArguments(command string) string {
+	if index := strings.IndexFunc(command, unicode.IsSpace); index >= 0 {
+		return strings.TrimLeftFunc(command[index:], unicode.IsSpace)
+	}
+	return ""
+}
+
+func buildSkillInvocationPrompt(skill *Skill, arguments string) string {
 	var sb strings.Builder
 
 	sb.WriteString("The user is asking you to execute the following skill.\n\n")
@@ -305,9 +319,9 @@ func BuildSkillInvocationPrompt(skill *Skill, args []string) string {
 	sb.WriteString("\n## Skill Instructions:\n")
 	sb.WriteString(skill.Prompt)
 
-	if len(args) > 0 {
+	if arguments != "" {
 		sb.WriteString("\n\n## User Arguments:\n")
-		sb.WriteString(strings.Join(args, " "))
+		sb.WriteString(arguments)
 	}
 
 	sb.WriteString("\n\nPlease follow the skill instructions above to complete the task.")

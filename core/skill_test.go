@@ -1,11 +1,13 @@
 package core
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSkillRegistryResolve_SeesDeployedInstructionsWithoutRestart(t *testing.T) {
@@ -22,7 +24,7 @@ func TestSkillRegistryResolve_SeesDeployedInstructionsWithoutRestart(t *testing.
 	if first.Prompt != "Prompt body" || second.Prompt != "new instructions" {
 		t.Fatalf("resolved prompts: first=%q, second=%q", first.Prompt, second.Prompt)
 	}
-	if prompt := BuildSkillInvocationPrompt(second, nil); !strings.Contains(prompt, filepath.Dir(path)) {
+	if prompt := BuildSkillInvocationPrompt(second, ""); !strings.Contains(prompt, filepath.Dir(path)) {
 		t.Fatalf("invocation is missing the deployed skill directory: %s", prompt)
 	}
 	if err := os.Remove(path); err != nil {
@@ -30,6 +32,52 @@ func TestSkillRegistryResolve_SeesDeployedInstructionsWithoutRestart(t *testing.
 	}
 	if r.Resolve("example") != nil {
 		t.Fatal("removed instructions must not run from stale cache")
+	}
+}
+
+type skillPromptCaptureSession struct {
+	stubAgentSession
+	prompts chan string
+}
+
+func (s *skillPromptCaptureSession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.prompts <- prompt
+	return nil
+}
+
+// The Portal sends structured stage input after a slash Skill invocation.
+// Shell argument parsing removed its JSON quotes and changed literal queries.
+func TestSkillCommandPreservesStructuredPromptVerbatim(t *testing.T) {
+	root := t.TempDir()
+	writeSkillFile(t, filepath.Join(root, "research", "SKILL.md"), "Research")
+	session := &skillPromptCaptureSession{prompts: make(chan string, 1)}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &sessionEnvRecordingAgent{session: session}, []Platform{p}, "", LangEnglish)
+	defer e.cancel()
+	e.skills.SetDirs([]string{root})
+
+	input := "[USER_VOICE_PIPELINE_STAGE=search]\nUse the exact query and original text.\n[USER_VOICE_PIPELINE_INPUT_JSON]\n" +
+		`{"queries":["site:reddit.com \"Canva resize\""],"text":"I don't need an alternative.  Keep \\\"quotes\\\", tabs\tand newlines\n原文。"}`
+	raw := "/research " + input
+	if !e.handleCommand(p, &Message{SessionKey: "test:research", UserID: "user", Content: raw, ReplyCtx: "ctx"}, raw) {
+		t.Fatal("Skill command was not handled")
+	}
+	select {
+	case prompt := <-session.prompts:
+		_, arguments, ok := strings.Cut(prompt, "\n\n## User Arguments:\n")
+		if !ok {
+			t.Fatal("Skill arguments missing")
+		}
+		arguments = strings.TrimSuffix(arguments, "\n\nPlease follow the skill instructions above to complete the task.")
+		if arguments != input {
+			t.Fatalf("Skill altered structured input\ngot:  %q\nwant: %q", arguments, input)
+		}
+		_, data, _ := strings.Cut(arguments, "[USER_VOICE_PIPELINE_INPUT_JSON]\n")
+		if !json.Valid([]byte(data)) {
+			t.Fatal("Dispatched stage input is not valid JSON")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Skill did not dispatch to Agent")
 	}
 }
 
