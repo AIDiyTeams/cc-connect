@@ -23,7 +23,7 @@ func updateTaskRuntimeEnv(existingPath string, runtime core.SessionRuntime) (str
 		// Keep the path already bound to the thread, but revoke prior authority.
 		return writeTaskRuntimeEnv(existingPath, "")
 	}
-	if token == "" || envelope == "" {
+	if (token == "") != (envelope == "") {
 		return existingPath, fmt.Errorf("machine capability and task authority envelope must be supplied together")
 	}
 	if imageToken == "" {
@@ -43,11 +43,22 @@ func updateTaskRuntimeEnv(existingPath string, runtime core.SessionRuntime) (str
 		}
 	}
 
+	for _, value := range []string{runtime.WorkspaceID, runtime.BrandID} {
+		if value != "" && !taskRuntimeIDPattern.MatchString(value) {
+			return existingPath, fmt.Errorf("invalid task runtime scope")
+		}
+	}
+	if token == "" && (runtime.WorkspaceID == "" || runtime.BrandID == "") {
+		return existingPath, fmt.Errorf("image authority requires workspace and brand scope")
+	}
 	content := strings.Join([]string{
 		"export MACHINE_CAPABILITY_TOKEN=" + shellSingleQuote(token),
 		"export IMAGE_CAPABILITY_TOKEN=" + shellSingleQuote(imageToken),
 		"export TOMAKO_TASK_AUTHORITY_ENVELOPE_B64=" + shellSingleQuote(envelope),
 		"export TASK_AUTHORITY_ENVELOPE_B64=" + shellSingleQuote(envelope),
+		"export TOMAKO_TASK_ID=" + shellSingleQuote(taskID),
+		"export TOMAKO_WORKSPACE_ID=" + shellSingleQuote(runtime.WorkspaceID),
+		"export TOMAKO_BRAND_ID=" + shellSingleQuote(runtime.BrandID),
 		"",
 	}, "\n")
 	return writeTaskRuntimeEnv(existingPath, content)

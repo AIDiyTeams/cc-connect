@@ -77,6 +77,37 @@ func TestUpdateTaskRuntimeEnvRejectsIncompleteAuthority(t *testing.T) {
 	}
 }
 
+func TestImageOnlyConversationRotatesScopedAuthorityWithoutRequiringMachineWriteAccess(t *testing.T) {
+	path, err := updateTaskRuntimeEnv("", core.SessionRuntime{
+		TaskID: "llm-old", MachineCapabilityToken: "old-machine", TaskAuthorityEnvelopeB64: "old-envelope",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { removeTaskRuntimeEnv(path) })
+	for _, taskID := range []string{"cmsg-home", "cmsg-content", "llm-kol"} {
+		_, err = updateTaskRuntimeEnv(path, core.SessionRuntime{
+			TaskID: taskID, WorkspaceID: "workspace-a", BrandID: "brand-a", ImageCapabilityToken: "image-only",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(body)
+		if strings.Contains(text, "old-machine") || strings.Contains(text, "old-envelope") {
+			t.Fatal("previous turn authority leaked")
+		}
+		for _, expected := range []string{"export MACHINE_CAPABILITY_TOKEN=''", "export IMAGE_CAPABILITY_TOKEN='image-only'", "export TOMAKO_TASK_ID='" + taskID + "'", "export TOMAKO_WORKSPACE_ID='workspace-a'", "export TOMAKO_BRAND_ID='brand-a'"} {
+			if !strings.Contains(text, expected) {
+				t.Fatalf("missing %s", expected)
+			}
+		}
+	}
+}
+
 func TestThreadParamsExposeOnlyTaskRuntimeFilePath(t *testing.T) {
 	s := &appServerSession{
 		workDir:            "/srv/tomako",
