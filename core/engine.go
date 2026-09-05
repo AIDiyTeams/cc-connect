@@ -1430,7 +1430,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		if len(parts) > 0 {
 			cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
 			if skill := e.skills.Resolve(cmd); skill != nil {
-				content = BuildSkillInvocationPrompt(skill, parts[1:])
+				content = buildSkillInvocationPrompt(skill, skillCommandArguments(content))
 			}
 		}
 	}
@@ -1633,7 +1633,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		if len(parts) > 0 {
 			cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
 			if skill := e.skills.Resolve(cmd); skill != nil {
-				content = BuildSkillInvocationPrompt(skill, parts[1:])
+				content = buildSkillInvocationPrompt(skill, skillCommandArguments(content))
 			}
 		}
 	}
@@ -6660,7 +6660,7 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			slog.Info("audit: command_executed",
 				"user_id", msg.UserID, "platform", msg.Platform,
 				"project", e.name, "command", skill.Name, "type", "skill")
-			e.executeSkill(p, msg, skill, args)
+			e.executeSkill(p, msg, skill, skillCommandArguments(raw))
 			return true
 		}
 		// Not a cc-connect command — notify user, then fall through to agent
@@ -14540,8 +14540,8 @@ func (e *Engine) cmdCommandsDel(p Platform, msg *Message, args []string) {
 // Skill discovery & execution
 // ──────────────────────────────────────────────────────────────
 
-func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, args []string) {
-	prompt := BuildSkillInvocationPrompt(skill, args)
+func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, arguments string) {
+	prompt := buildSkillInvocationPrompt(skill, arguments)
 	_, _, _, err := e.commandContext(p, msg)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
