@@ -1561,33 +1561,61 @@ func TestBridge_SessionNameInStatus(t *testing.T) {
 	}
 }
 
-func TestBridge_ReportAgentStructuredResultRequiresCapabilityAndDelivers(t *testing.T) {
+func TestBridge_ReportAgentStructuredResultRequiresPersistenceReceipt(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
-	withoutCapability := dialWS(t, wsURL, nil)
-	register(t, withoutCapability, "plain-backend", []string{"text"})
-	bp := bs.NewPlatform("proj")
-	plainCtx := newBridgeReplyCtx(
-		bs.getAdapter("plain-backend"),
-		"plain-backend:workspace:user",
-		"llm-brand-plain",
-	)
-	if err := bp.ReportAgentStructuredResult(context.Background(), plainCtx, "core", map[string]any{"productType": "SaaS"}); err == nil {
-		t.Fatal("structured result succeeded without the agent_trace capability")
-	}
-
 	conn := dialWS(t, wsURL, nil)
-	register(t, conn, "java-backend", []string{"text", "agent_trace"})
-	rc := newBridgeReplyCtx(
-		bs.getAdapter("java-backend"),
-		"java-backend:workspace:user",
-		"llm-brand-capable",
-	)
-	if err := bp.ReportAgentStructuredResult(context.Background(), rc, "core", map[string]any{"productType": "SaaS"}); err != nil {
-		t.Fatalf("ReportAgentStructuredResult: %v", err)
+	register(t, conn, "backend", []string{"text", "agent_trace", "structured_result_ack"})
+	bp := bs.NewPlatform("proj")
+	adapter := bs.getAdapter("backend")
+	rc := newBridgeReplyCtx(adapter, "backend:workspace:user", "llm-brand-capable")
+	for _, status := range []string{"persisted", "rejected"} {
+		done := make(chan error, 1)
+		go func() {
+			done <- bp.ReportAgentStructuredResult(context.Background(), rc, "core", map[string]any{"productType": "SaaS"})
+		}()
+		msg := readMsg(t, conn)
+		if msg["type"] != "agent_structured_result" {
+			t.Fatalf("unexpected payload: %v", msg)
+		}
+		// Socket delivery alone, and a receipt for another task, cannot complete the tool.
+		bad, _ := json.Marshal(map[string]any{"ref_id": msg["ref_id"], "reply_ctx": "llm-other", "stage": "core", "status": "persisted"})
+		adapter.handleStructuredResultAck(bad)
+		select {
+		case err := <-done:
+			t.Fatalf("completed without matching receipt: %v", err)
+		default:
+		}
+		if err := conn.WriteJSON(map[string]any{"type": "structured_result_ack", "ref_id": msg["ref_id"], "reply_ctx": rc.ReplyCtx, "stage": "core", "status": status}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-done:
+			if (err == nil) != (status == "persisted") {
+				t.Fatalf("status=%s err=%v", status, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("receipt did not resolve pending tool")
+		}
 	}
-	msg := readMsg(t, conn)
-	if msg["type"] != "agent_structured_result" || msg["stage"] != "core" {
-		t.Fatalf("structured result payload = %#v", msg)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- bp.ReportAgentStructuredResult(ctx, rc, "core", map[string]any{}) }()
+	readMsg(t, conn)
+	cancel()
+	if err := <-done; err == nil {
+		t.Fatal("missing receipt treated as success")
+	}
+	adapter.resultMu.Lock()
+	pending := len(adapter.resultRequests)
+	adapter.resultMu.Unlock()
+	if pending != 0 {
+		t.Fatalf("leaked %d pending requests", pending)
+	}
+	legacy := dialWS(t, wsURL, nil)
+	register(t, legacy, "legacy", []string{"text", "agent_trace"})
+	oldCtx := newBridgeReplyCtx(bs.getAdapter("legacy"), "legacy:workspace:user", "llm-old")
+	if err := bp.ReportAgentStructuredResult(context.Background(), oldCtx, "core", map[string]any{}); err == nil {
+		t.Fatal("legacy adapter accepted unconfirmed persistence")
 	}
 }
 
