@@ -54,9 +54,26 @@ func updateTaskRuntimeEnv(existingPath string, runtime core.SessionRuntime) (str
 }
 
 func writeTaskRuntimeEnv(existingPath, content string) (string, error) {
+	return writeTaskRuntimeEnvInDir(existingPath, content, "")
+}
+
+// The brand fence hides host /tmp. Stage authority under its read-only .codex
+// mount, never under writable outputs or memories, without widening the fence.
+func createTaskRuntimeEnv(workDir, permissionsProfile string) (string, error) {
+	var dir string
+	if strings.TrimSpace(permissionsProfile) != "" {
+		dir = filepath.Join(workDir, ".codex")
+		if err := ensureFencedPrivateDir(dir, 0o700); err != nil {
+			return "", err
+		}
+	}
+	return writeTaskRuntimeEnvInDir("", "", dir)
+}
+
+func writeTaskRuntimeEnvInDir(existingPath, content, tempDir string) (string, error) {
 	path := existingPath
 	if path == "" {
-		dir, err := os.MkdirTemp("", "cc-connect-task-runtime-")
+		dir, err := os.MkdirTemp(tempDir, "cc-connect-task-runtime-")
 		if err != nil {
 			return "", fmt.Errorf("create task runtime directory: %w", err)
 		}

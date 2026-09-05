@@ -139,6 +139,13 @@ workspace does not make its external target writable.
 cc-connect sets `TMPDIR=<brand-workspace>/.tmp` with mode `0700`. Tooling that
 needs temporary files therefore does not require write access to host `/tmp`.
 
+Per-session execution authority is staged separately under
+`.codex/cc-connect-task-runtime-*/machine.env`. The trusted bridge atomically
+rotates this file between turns and removes it on session close. Tools can read
+it through the existing `.codex` read-only mount but cannot overwrite it. Host
+`/tmp` is intentionally hidden by the fence and cannot hold a tool-readable
+authority file.
+
 ## Acceptance tests
 
 Run the fence probe as the cc-connect service user. It must produce this matrix:

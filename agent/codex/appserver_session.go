@@ -257,7 +257,7 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 	// eager resume. Codex ignores config overrides when resuming a loaded
 	// thread; a second resume cannot add the shell environment after the fact.
 	var err error
-	s.taskRuntimeEnvFile, err = writeTaskRuntimeEnv("", "")
+	s.taskRuntimeEnvFile, err = createTaskRuntimeEnv(workDir, permissionsProfile)
 	if err != nil {
 		cancel()
 		return nil, err
