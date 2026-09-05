@@ -33,7 +33,7 @@ type AgentTraceEvent struct {
 	ExitCode   *int
 	Success    *bool
 	DurationMs int64
-	// Content carries full model thinking text for EventThinking reports;
+	// Content carries reasoning or public commentary, identified by Type;
 	// it stays separate from Input/Output, which remain tool-result fields.
 	Content string
 }
@@ -528,6 +528,13 @@ type AgentSession interface {
 // agent configuration or another concurrent session.
 type SessionRuntimeConfigurer interface {
 	SetSessionRuntime(runtime SessionRuntime) error
+}
+
+// ToolAuthoritySession delivers the trusted runtime's scoped credentials to
+// tools without embedding them in model-visible prompts or conversation history.
+type ToolAuthoritySession interface {
+	SessionRuntimeConfigurer
+	SupportsToolAuthority() bool
 }
 
 // NativeOutputSchemaSession opts into enforcing Runtime.OutputSchema in the

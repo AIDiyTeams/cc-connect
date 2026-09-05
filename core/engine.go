@@ -4714,6 +4714,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		return e.renderOutgoingContentForWorkspace(state.platform, content, workspaceDir)
 	}
 	sendWorkspace := func(p Platform, replyCtx any, content string) {
+		// These are intermediate segment/progress fallbacks. On a machine
+		// channel plain Send is terminal; use previews/typed progress there.
+		if machine, ok := p.(MachineReplyChannel); ok && machine.IsMachineReplyChannel(replyCtx) {
+			return
+		}
 		e.sendForWorkspace(p, replyCtx, content, workspaceDir)
 	}
 	sendWorkspaceWithError := func(p Platform, replyCtx any, content string) error {
@@ -4939,7 +4944,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		// ThinkingMaxLen only govern messaging-platform rendering; user-facing
 		// visibility of thinking is gated by the backend adapter downstream.
 		if reporter, ok := p.(AgentTraceReporter); ok && (event.Type == EventToolUse || event.Type == EventToolResult || event.Type == EventLifecycle ||
-			(event.Type == EventThinking && !isEllipsisOnly(event.Content))) {
+			((event.Type == EventThinking || event.Type == EventCommentary) && !isEllipsisOnly(event.Content))) {
 			trace := AgentTraceEvent{TraceID: event.TraceID, Type: event.Type, ToolName: event.ToolName,
 				Input: event.ToolInput, Output: event.ToolResult, Status: event.ToolStatus,
 				ExitCode: event.ToolExitCode, Success: event.ToolSuccess}
@@ -4950,7 +4955,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					trace.DurationMs = int64(duration)
 				}
 			}
-			if event.Type == EventThinking {
+			if event.Type == EventThinking || event.Type == EventCommentary {
 				trace.Content = event.Content
 			}
 			if trace.Output == "" {
@@ -4988,6 +4993,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 
 		switch event.Type {
+		case EventCommentary:
+			// Public progress must not enter the accumulated terminal answer.
+			// Bridge adapters already received the typed event above.
+			if _, reported := p.(AgentTraceReporter); !reported && strings.TrimSpace(event.Content) != "" {
+				sendWorkspace(p, replyCtx, event.Content)
+			}
 		case EventPlanUpdate:
 			// The plan comes from Codex update_plan/turn/plan/updated. It is
 			// already user-facing and must replace any runtime inference.
@@ -5227,6 +5238,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
+			// Machine consumers receive tool results on the typed trace lane above.
+			// A standalone display fallback is a terminal reply on these channels,
+			// so it must never finish the task while the Agent is still working.
+			if machine, ok := p.(MachineReplyChannel); ok && machine.IsMachineReplyChannel(replyCtx) {
+				continue
+			}
 			if e.display.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
@@ -5551,10 +5568,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 
 			fullResponse := event.Content
+			machine, machineChannel := p.(MachineReplyChannel)
+			terminalAnswer := machineChannel && machine.IsMachineReplyChannel(replyCtx) && strings.TrimSpace(fullResponse) != ""
 			// When tool progress is hidden, segmentStart stays 0 and textParts
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
-			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
+			// Product consumers already have typed progress. Their durable reply
+			// must keep the terminal answer, not prepend earlier tool narration.
+			if !terminalAnswer && len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
 				fullResponse = strings.Join(textParts, "")
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
@@ -5824,7 +5845,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						return
 					}
 				}
-			} else if toolCount > 0 && segmentStart > 0 {
+			} else if !terminalAnswer && toolCount > 0 && segmentStart > 0 {
 				// When tool calls happened and prior text was already surfaced in segments,
 				// only send the unsent remainder. When tool progress is hidden, tool events don't surface
 				// side-channel messages and segmentStart stays 0, so keep normal finalize flow.
@@ -6341,7 +6362,23 @@ func sendWithSessionRuntime(
 			return fmt.Errorf("configure session runtime: %w", err)
 		}
 	}
+	if capable, ok := session.(ToolAuthoritySession); ok && capable.SupportsToolAuthority() {
+		return session.Send(stripMatchingRuntimeMarkers(runtime, prompt), images, files)
+	}
 	return session.Send(promptWithScopedRuntime(runtime, prompt), images, files)
+}
+
+func stripMatchingRuntimeMarkers(runtime SessionRuntime, prompt string) string {
+	for _, marker := range []struct{ name, value string }{
+		{"MACHINE_CAPABILITY_TOKEN", runtime.MachineCapabilityToken},
+		{"IMAGE_CAPABILITY_TOKEN", runtime.ImageCapabilityToken},
+		{"TASK_AUTHORITY_ENVELOPE_B64", runtime.TaskAuthorityEnvelopeB64},
+	} {
+		if value := strings.TrimSpace(marker.value); value != "" {
+			prompt = strings.TrimPrefix(prompt, "["+marker.name+"="+value+"]\n")
+		}
+	}
+	return prompt
 }
 
 func promptWithScopedRuntime(runtime SessionRuntime, prompt string) string {
@@ -6689,6 +6726,7 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			slog.Info("audit: command_executed",
 				"user_id", msg.UserID, "platform", msg.Platform,
 				"project", e.name, "command", skill.Name, "type", "skill")
+			// Skill arguments are structured prose; preserve quotes and line breaks.
 			e.executeSkill(p, msg, skill, skillCommandArguments(raw))
 			return true
 		}

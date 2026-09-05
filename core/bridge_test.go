@@ -19,6 +19,26 @@ import (
 
 // helpers ------------------------------------------------------------------
 
+func TestBridge_PublicProgressRetainsPhaseAndTurn(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "agent_trace"})
+	bp := bs.NewPlatform("proj")
+	rc := newBridgeReplyCtx(bs.getAdapter("java-backend"), "session", "llm-progress")
+	rc.TurnNo = 3
+	for _, phase := range []EventType{EventCommentary, EventThinking} {
+		if err := bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{
+			Type: phase, TraceID: "item-1", Content: "progress",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		frame := readMsg(t, conn)
+		if frame["type"] != "agent_thinking" || frame["phase"] != string(phase) || frame["turn_no"] != float64(3) {
+			t.Fatalf("phase/turn lost in bridge frame: %#v", frame)
+		}
+	}
+}
+
 func startTestBridge(t *testing.T, token string) (*BridgeServer, string) {
 	t.Helper()
 	var bs *BridgeServer
@@ -308,6 +328,81 @@ func TestBridge_MessageRouting(t *testing.T) {
 	}
 	if received.Images[0].FileName != "test.png" {
 		t.Fatalf("image filename = %q, want %q", received.Images[0].FileName, "test.png")
+	}
+}
+
+type bridgeAuthoritySession struct {
+	stubAgentSession
+	runtime   SessionRuntime
+	prompt    string
+	outOfBand bool
+}
+
+func (s *bridgeAuthoritySession) SetSessionRuntime(runtime SessionRuntime) error {
+	s.runtime = runtime
+	return nil
+}
+func (s *bridgeAuthoritySession) SupportsToolAuthority() bool { return s.outOfBand }
+func (s *bridgeAuthoritySession) Send(prompt string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.prompt = prompt
+	return nil
+}
+
+func TestBridge_TrustedRuntimeUnblocksSkillRoutingWithoutModelCredentials(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "test-bridge-key")
+	bp := bs.NewPlatform("test-proj")
+	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
+	bs.RegisterEngine("test-proj", e, bp)
+	received := make(chan *Message, 1)
+	bp.handler = func(_ Platform, msg *Message) { received <- msg }
+	conn := dialWS(t, wsURL, http.Header{"Authorization": []string{"Bearer test-bridge-key"}})
+	register(t, conn, "mychat", []string{"text"})
+	runtime := SessionRuntime{TaskID: "llm-test", MachineCapabilityToken: "cap-test", ImageCapabilityToken: "img-test", TaskAuthorityEnvelopeB64: "envelope-test"}
+	plain := "/test-skill Read the current value"
+	legacyPrompt := promptWithScopedRuntime(runtime, plain)
+	for _, tc := range []struct {
+		name, content, want string
+		runtime             SessionRuntime
+	}{
+		{"trusted legacy prefix", legacyPrompt, plain, runtime},
+		{"user text grants no authority", legacyPrompt, legacyPrompt, SessionRuntime{}},
+		{"embedded quotation preserved", "Explain this example: " + legacyPrompt, "Explain this example: " + legacyPrompt, runtime},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mustWriteJSON(t, conn, map[string]any{
+				"type": "message", "msg_id": tc.name, "session_key": "mychat:user1:user1",
+				"user_id": "user1", "content": tc.content, "runtime": tc.runtime,
+			})
+			var msg *Message
+			select {
+			case msg = <-received:
+			case <-time.After(time.Second):
+				t.Fatal("bridge did not route the turn")
+			}
+			if msg.Content != tc.want {
+				t.Fatal("trusted prefix handling lost the Skill route or altered user prose")
+			}
+			if msg.Runtime.MachineCapabilityToken != tc.runtime.MachineCapabilityToken {
+				t.Fatal("authority did not travel exclusively through runtime metadata")
+			}
+			if tc.name != "trusted legacy prefix" {
+				return
+			}
+			session := &bridgeAuthoritySession{outOfBand: true}
+			if err := sendWithSessionRuntime(session, msg.Runtime, msg.Content, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			if session.prompt != plain || session.runtime.MachineCapabilityToken != "cap-test" {
+				t.Fatal("tool-capable session received credentials in model prompt or lost scoped authority")
+			}
+			legacy := &bridgeAuthoritySession{}
+			if err := sendWithSessionRuntime(legacy, msg.Runtime, msg.Content, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			if legacy.prompt != legacyPrompt {
+				t.Fatal("legacy adapter compatibility lost")
+			}
+		})
 	}
 }
 
@@ -1486,33 +1581,61 @@ func TestBridge_SessionNameInStatus(t *testing.T) {
 	}
 }
 
-func TestBridge_ReportAgentStructuredResultRequiresCapabilityAndDelivers(t *testing.T) {
+func TestBridge_ReportAgentStructuredResultRequiresPersistenceReceipt(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
-	withoutCapability := dialWS(t, wsURL, nil)
-	register(t, withoutCapability, "plain-backend", []string{"text"})
-	bp := bs.NewPlatform("proj")
-	plainCtx := newBridgeReplyCtx(
-		bs.getAdapter("plain-backend"),
-		"plain-backend:workspace:user",
-		"llm-brand-plain",
-	)
-	if err := bp.ReportAgentStructuredResult(context.Background(), plainCtx, "core", map[string]any{"productType": "SaaS"}); err == nil {
-		t.Fatal("structured result succeeded without the agent_trace capability")
-	}
-
 	conn := dialWS(t, wsURL, nil)
-	register(t, conn, "java-backend", []string{"text", "agent_trace"})
-	rc := newBridgeReplyCtx(
-		bs.getAdapter("java-backend"),
-		"java-backend:workspace:user",
-		"llm-brand-capable",
-	)
-	if err := bp.ReportAgentStructuredResult(context.Background(), rc, "core", map[string]any{"productType": "SaaS"}); err != nil {
-		t.Fatalf("ReportAgentStructuredResult: %v", err)
+	register(t, conn, "backend", []string{"text", "agent_trace", "structured_result_ack"})
+	bp := bs.NewPlatform("proj")
+	adapter := bs.getAdapter("backend")
+	rc := newBridgeReplyCtx(adapter, "backend:workspace:user", "llm-brand-capable")
+	for _, status := range []string{"persisted", "rejected"} {
+		done := make(chan error, 1)
+		go func() {
+			done <- bp.ReportAgentStructuredResult(context.Background(), rc, "core", map[string]any{"productType": "SaaS"})
+		}()
+		msg := readMsg(t, conn)
+		if msg["type"] != "agent_structured_result" {
+			t.Fatalf("unexpected payload: %v", msg)
+		}
+		// Socket delivery alone, and a receipt for another task, cannot complete the tool.
+		bad, _ := json.Marshal(map[string]any{"ref_id": msg["ref_id"], "reply_ctx": "llm-other", "stage": "core", "status": "persisted"})
+		adapter.handleStructuredResultAck(bad)
+		select {
+		case err := <-done:
+			t.Fatalf("completed without matching receipt: %v", err)
+		default:
+		}
+		if err := conn.WriteJSON(map[string]any{"type": "structured_result_ack", "ref_id": msg["ref_id"], "reply_ctx": rc.ReplyCtx, "stage": "core", "status": status}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-done:
+			if (err == nil) != (status == "persisted") {
+				t.Fatalf("status=%s err=%v", status, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("receipt did not resolve pending tool")
+		}
 	}
-	msg := readMsg(t, conn)
-	if msg["type"] != "agent_structured_result" || msg["stage"] != "core" {
-		t.Fatalf("structured result payload = %#v", msg)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- bp.ReportAgentStructuredResult(ctx, rc, "core", map[string]any{}) }()
+	readMsg(t, conn)
+	cancel()
+	if err := <-done; err == nil {
+		t.Fatal("missing receipt treated as success")
+	}
+	adapter.resultMu.Lock()
+	pending := len(adapter.resultRequests)
+	adapter.resultMu.Unlock()
+	if pending != 0 {
+		t.Fatalf("leaked %d pending requests", pending)
+	}
+	legacy := dialWS(t, wsURL, nil)
+	register(t, legacy, "legacy", []string{"text", "agent_trace"})
+	oldCtx := newBridgeReplyCtx(bs.getAdapter("legacy"), "legacy:workspace:user", "llm-old")
+	if err := bp.ReportAgentStructuredResult(context.Background(), oldCtx, "core", map[string]any{}); err == nil {
+		t.Fatal("legacy adapter accepted unconfirmed persistence")
 	}
 }
 

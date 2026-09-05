@@ -203,6 +203,7 @@ type appServerSession struct {
 	// item/completed does not re-emit or re-classify them as thinking.
 	streamedItems    map[string]string
 	lastStreamedItem string
+	commentaryItems  map[string]bool
 
 	runtimeMu          sync.RWMutex
 	usage              *core.UsageReport
@@ -253,9 +254,19 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 		resumeID:           resumeID,
 	}
 	s.alive.Store(true)
+	// Bind a stable, initially empty authority file before the first start or
+	// eager resume. Codex ignores config overrides when resuming a loaded
+	// thread; a second resume cannot add the shell environment after the fact.
+	var err error
+	s.taskRuntimeEnvFile, err = createTaskRuntimeEnv(workDir, permissionsProfile)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
 
 	connectStartedAt := time.Now()
 	if err := s.connect(); err != nil {
+		removeTaskRuntimeEnv(s.taskRuntimeEnvFile)
 		cancel()
 		return nil, err
 	}
@@ -306,6 +317,12 @@ func (s *appServerSession) connect() error {
 	cmd := exec.CommandContext(s.ctx, "codex", args...)
 	cmd.Dir = s.workDir
 	env := append([]string(nil), s.extraEnv...)
+	// Node/MCP child tools inherit the app-server environment, not the shell
+	// policy passed to thread/start. Bind the same non-secret stable path before
+	// process startup so every tool runtime can load the current turn authority.
+	if envFile := s.currentTaskRuntimeEnvFile(); envFile != "" {
+		env = append(env, "TOMAKO_TASK_ENV_FILE="+envFile)
+	}
 	if s.codexHome != "" {
 		env = append(env, "CODEX_HOME="+s.codexHome)
 	}
@@ -621,6 +638,7 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	s.currentTurn = resp.Turn.ID
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.streamedItems = nil
+	s.commentaryItems = nil
 	s.lastStreamedItem = ""
 	s.stateMu.Unlock()
 
@@ -639,7 +657,6 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	}
 	runtime.OutputSchema = append(json.RawMessage(nil), runtime.OutputSchema...)
 	s.runtimeMu.Lock()
-	previousEnvFile := s.taskRuntimeEnvFile
 	envFile, err := updateTaskRuntimeEnv(s.taskRuntimeEnvFile, runtime)
 	if err != nil {
 		s.runtimeMu.Unlock()
@@ -659,20 +676,8 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	reasoningCapabilityChanged := previousReasoningCapability != needsReasoningCapability(s.model, s.effort)
 	s.runtimeMu.Unlock()
 
-	// Resumed app-server threads were created before this turn's trusted
-	// runtime arrived. Resume the same thread once more with the task env-file
-	// path in its shell policy; subsequent turns keep the stable path while the
-	// file contents rotate atomically.
-	if previousEnvFile == "" && envFile != "" {
-		if currentID := s.CurrentSessionID(); currentID != "" {
-			s.threadMu.Lock()
-			if s.CurrentSessionID() == currentID {
-				s.resumeID = currentID
-				s.threadID.Store("")
-			}
-			s.threadMu.Unlock()
-		}
-	}
+	// The thread retains its original shell policy. Only the protected file's
+	// contents rotate between turns, including revocation on an unscoped turn.
 	// Each bridge task is a new Agent turn. Do not leak evidence/search guards
 	// from an earlier brand-analysis task that happened to share the same
 	// workspace session.
@@ -700,6 +705,8 @@ func (s *appServerSession) currentTaskRuntimeEnvFile() string {
 }
 
 func (s *appServerSession) SupportsOutputSchema() bool { return true }
+
+func (s *appServerSession) SupportsToolAuthority() bool { return true }
 
 func (s *appServerSession) outputSchema() json.RawMessage {
 	s.runtimeMu.RLock()
@@ -1038,7 +1045,7 @@ func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRa
 				return
 			}
 			s.finishBrandAnalysisStagePublication(stage, true)
-			s.writeDynamicToolResponse(rawID, true, "stage accepted for persistence")
+			s.writeDynamicToolResponse(rawID, true, "stage persisted by backend")
 		default:
 			s.writeDynamicToolResponse(rawID, false, "unknown dynamic tool")
 		}
@@ -1050,7 +1057,7 @@ func (s *appServerSession) publishStructuredResult(stage string, result map[stri
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	deliveryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	deliveryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	ack := make(chan error, 1)
 	event := core.Event{
@@ -1199,6 +1206,10 @@ func (s *appServerSession) noteBrandWebSearchCompleted(traceID string) {
 
 func brandEvidenceForModel(result map[string]any) map[string]any {
 	compact := make(map[string]any, 16)
+	compact["workflow"] = map[string]any{
+		"state": "evidence_collected", "corePersisted": false,
+		"nextAction": "Call publish_brand_analysis_stage with stage=core and result containing the evidence-grounded core profile. Finish only after the tool accepts core; collecting evidence does not save the core profile.",
+	}
 	for _, key := range []string{
 		"brandName", "productName", "canonicalUrl", "oneLiner", "description",
 		"productType", "audience",
@@ -1339,6 +1350,15 @@ func (s *appServerSession) isBrandAnalysisRuntime() bool {
 	return strings.EqualFold(strings.TrimSpace(s.runtime.Scene), "brand_analysis")
 }
 
+func (s *appServerSession) brandCoreAwaitingPublication() bool {
+	if !s.isBrandAnalysisRuntime() {
+		return false
+	}
+	s.brandFlowMu.Lock()
+	defer s.brandFlowMu.Unlock()
+	return !s.brandFlow.corePublished
+}
+
 func brandAnalysisDynamicTools() []map[string]any {
 	return []map[string]any{
 		{
@@ -1358,7 +1378,7 @@ func brandAnalysisDynamicTools() []map[string]any {
 		{
 			"type":        "function",
 			"name":        "publish_brand_analysis_stage",
-			"description": "Persist one validated brand-analysis stage. Publish core before competitor search; publish competitors after the single native web search finishes or becomes unavailable.",
+			"description": "Persist one validated brand-analysis stage. Core-only onboarding must publish core before finishing; the backend starts its independent competitor task. Collecting evidence alone does not persist the core profile.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -2029,6 +2049,7 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 			s.currentTurn = notif.Turn.ID
 			s.pendingMsgs = s.pendingMsgs[:0]
 			s.streamedItems = nil
+			s.commentaryItems = nil
 			s.lastStreamedItem = ""
 			s.stateMu.Unlock()
 			s.storeContextUsage(nil)
@@ -2153,6 +2174,14 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 	if itemType == "" {
 		return
 	}
+	if itemType == "agentMessage" && item["phase"] == "commentary" {
+		s.stateMu.Lock()
+		if s.commentaryItems == nil {
+			s.commentaryItems = make(map[string]bool)
+		}
+		s.commentaryItems[itemID] = true
+		s.stateMu.Unlock()
+	}
 
 	switch itemType {
 	case "agentMessage", "reasoning", "userMessage", "plan", "hookPrompt", "contextCompaction":
@@ -2205,13 +2234,17 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		if strings.TrimSpace(text) == "" {
 			return
 		}
+		if item["phase"] == "commentary" {
+			s.stateMu.Lock()
+			delete(s.commentaryItems, itemID)
+			s.stateMu.Unlock()
+			s.emit(core.Event{Type: core.EventCommentary, TraceID: itemID, Content: text})
+			return
+		}
 		if len(s.outputSchema()) > 0 {
 			// Schema-constrained progress may also look like JSON. The native
 			// phase, not its shape, identifies the terminal structured answer.
 			switch item["phase"] {
-			case "commentary":
-				s.emit(core.Event{Type: core.EventThinking, Content: text})
-				return
 			case "final_answer":
 				s.flushPendingAsThinking()
 				s.emit(core.Event{Type: core.EventText, Content: text})
@@ -2535,6 +2568,9 @@ func rpcIDToInt64(v any) (int64, bool) {
 }
 
 func (s *appServerSession) completeTurn(turnID string, turnErr error) {
+	if turnErr == nil && s.brandCoreAwaitingPublication() {
+		turnErr = fmt.Errorf("brand analysis ended before the core profile was accepted for persistence")
+	}
 	s.stateMu.Lock()
 	if s.currentTurn == "" || (turnID != "" && turnID != s.currentTurn) {
 		s.stateMu.Unlock()
@@ -2560,6 +2596,12 @@ func (s *appServerSession) handleAgentMessageDelta(itemID, delta string) {
 	if delta == "" {
 		return
 	}
+	// The dedicated onboarding task promises a saved core, not prose. Keep its
+	// completion claim private until the structured delivery acknowledgement;
+	// ordinary conversations continue to stream without this business gate.
+	if s.brandCoreAwaitingPublication() {
+		return
+	}
 	// Deltas do not carry the final/commentary phase. Structured tasks wait
 	// for item/completed so progress cannot contaminate the terminal JSON.
 	if len(s.outputSchema()) > 0 {
@@ -2567,6 +2609,10 @@ func (s *appServerSession) handleAgentMessageDelta(itemID, delta string) {
 	}
 	prefix := ""
 	s.stateMu.Lock()
+	if s.commentaryItems[itemID] {
+		s.stateMu.Unlock()
+		return
+	}
 	if s.streamedItems == nil {
 		s.streamedItems = make(map[string]string)
 	}
@@ -2587,7 +2633,7 @@ func (s *appServerSession) flushPendingAsThinking() {
 
 	for _, text := range msgs {
 		if strings.TrimSpace(text) != "" {
-			s.emit(core.Event{Type: core.EventThinking, Content: text})
+			s.emit(core.Event{Type: core.EventCommentary, Content: text})
 		}
 	}
 }

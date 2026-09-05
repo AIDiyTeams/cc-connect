@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
@@ -60,6 +61,14 @@ type bridgeAdapter struct {
 
 	previewMu       sync.Mutex
 	previewRequests map[string]chan string // ref_id → channel receiving preview_handle
+	resultMu        sync.Mutex
+	resultRequests  map[string]*bridgeResultRequest
+}
+
+type bridgeResultRequest struct {
+	replyCtx string
+	stage    string
+	ack      chan error
 }
 
 // bridgeReplyCtx carries the information needed to route replies back to the adapter.
@@ -67,6 +76,7 @@ type bridgeReplyCtx struct {
 	Platform   string `json:"platform"`
 	SessionKey string `json:"session_key"`
 	ReplyCtx   string `json:"reply_ctx"`
+	TurnNo     int    `json:"turn_no,omitempty"`
 
 	// PreviewHandle is the platform-side streaming message id (from preview_ack
 	// or a synthetic id for token_stream auto-ack). ReplyCtx must stay as the
@@ -523,7 +533,7 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 	// gate it independently of tool traces. Content is capped, not summarized.
 	// Thinking flows for both backend tasks (llm-) and studio chat turns
 	// (cmsg-); user-facing visibility is gated by the backend adapter.
-	if event.Type == EventThinking {
+	if event.Type == EventThinking || event.Type == EventCommentary {
 		if !strings.HasPrefix(rc.ReplyCtx, "llm-") && !strings.HasPrefix(rc.ReplyCtx, "cmsg-") {
 			return nil
 		}
@@ -532,6 +542,8 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 			"session_key": rc.SessionKey,
 			"reply_ctx":   rc.ReplyCtx,
 			"trace_id":    event.TraceID,
+			"turn_no":     rc.TurnNo,
+			"phase":       string(event.Type),
 			"content":     truncateBridgeTrace(event.Content, 65536),
 			"occurred_at": now.Format(time.RFC3339Nano),
 		})
@@ -553,6 +565,7 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 		"session_key": rc.SessionKey,
 		"reply_ctx":   rc.ReplyCtx,
 		"trace_id":    event.TraceID,
+		"turn_no":     rc.TurnNo,
 		"event_type":  string(event.Type),
 		"tool_name":   event.ToolName,
 		"input":       truncateBridgeTrace(event.Input, 8000),
@@ -586,18 +599,48 @@ func (bp *BridgePlatform) ReportAgentStructuredResult(
 	if a == nil {
 		return fmt.Errorf("bridge: adapter %q not connected", rc.Platform)
 	}
-	if !a.capabilities["agent_trace"] {
-		return fmt.Errorf("bridge: adapter %q does not support agent structured results", rc.Platform)
+	if !a.capabilities["structured_result_ack"] {
+		return fmt.Errorf("bridge: adapter %q cannot confirm structured result persistence", rc.Platform)
 	}
+	refBytes := make([]byte, 16)
+	if _, err := rand.Read(refBytes); err != nil {
+		return err
+	}
+	refID := base64.RawURLEncoding.EncodeToString(refBytes)
+	request := &bridgeResultRequest{replyCtx: rc.ReplyCtx, stage: boundedOpaqueValue(stage, 32), ack: make(chan error, 1)}
+	a.resultMu.Lock()
+	if a.resultRequests == nil {
+		a.resultRequests = make(map[string]*bridgeResultRequest)
+	}
+	a.resultRequests[refID] = request
+	a.resultMu.Unlock()
+	defer func() {
+		a.resultMu.Lock()
+		delete(a.resultRequests, refID)
+		a.resultMu.Unlock()
+	}()
 	payload := map[string]any{
 		"type":        "agent_structured_result",
+		"ref_id":      refID,
 		"session_key": rc.SessionKey,
 		"reply_ctx":   rc.ReplyCtx,
 		"stage":       boundedOpaqueValue(stage, 32),
 		"result":      result,
 		"occurred_at": time.Now().UTC().Format(time.RFC3339Nano),
 	}
-	return bp.server.sendToAdapter(rc.Platform, payload)
+	// A successful WebSocket write is not a database receipt. Wait for this
+	// adapter to acknowledge the same request after its transaction commits.
+	if err := writeJSON(a.conn, &a.writeMu, payload); err != nil {
+		return err
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	select {
+	case err := <-request.ack:
+		return err
+	case <-waitCtx.Done():
+		return fmt.Errorf("bridge: structured result persistence unconfirmed: %w", waitCtx.Err())
+	}
 }
 
 func truncateBridgeTrace(value string, max int) string {
@@ -1450,6 +1493,8 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 			adapter.handleRespondInteraction(raw)
 		case "preview_ack":
 			adapter.handlePreviewAck(raw)
+		case "structured_result_ack":
+			adapter.handleStructuredResultAck(raw)
 		case "ping":
 			if err := writeJSON(conn, &adapter.writeMu, map[string]any{"type": "pong", "ts": time.Now().UnixMilli()}); err != nil {
 				slog.Debug("bridge: write pong failed", "platform", reg.Platform, "error", err)
@@ -1564,6 +1609,12 @@ func (a *bridgeAdapter) handleMessage(raw json.RawMessage) {
 		Runtime:    normalizeSessionRuntime(m.Runtime),
 		ReplyCtx:   newBridgeReplyCtx(a, m.SessionKey, m.ReplyCtx),
 	}
+	msg.ReplyCtx.(*bridgeReplyCtx).TurnNo = msg.Runtime.TurnNo
+	// Older control planes duplicate trusted runtime values as leading prompt
+	// markers. Remove only exact matches before routing slash Skills. Runtime
+	// authority is never inferred from this text; legacy agents get the markers
+	// restored by sendWithSessionRuntime after command expansion.
+	msg.Content = stripMatchingRuntimeMarkers(msg.Runtime, msg.Content)
 
 	for _, img := range m.Images {
 		data, err := base64.StdEncoding.DecodeString(img.Data)
@@ -1823,6 +1874,31 @@ func (a *bridgeAdapter) handlePreviewAck(raw json.RawMessage) {
 	if ok {
 		ch <- ack.PreviewHandle
 	}
+}
+
+func (a *bridgeAdapter) handleStructuredResultAck(raw json.RawMessage) {
+	var ack struct {
+		RefID    string `json:"ref_id"`
+		ReplyCtx string `json:"reply_ctx"`
+		Stage    string `json:"stage"`
+		Status   string `json:"status"`
+	}
+	if json.Unmarshal(raw, &ack) != nil {
+		return
+	}
+	a.resultMu.Lock()
+	request := a.resultRequests[ack.RefID]
+	if request == nil || request.replyCtx != ack.ReplyCtx || request.stage != ack.Stage {
+		a.resultMu.Unlock()
+		return
+	}
+	delete(a.resultRequests, ack.RefID)
+	a.resultMu.Unlock()
+	if ack.Status != "persisted" {
+		request.ack <- fmt.Errorf("bridge: backend rejected structured result persistence")
+		return
+	}
+	request.ack <- nil
 }
 
 // ---------------------------------------------------------------------------

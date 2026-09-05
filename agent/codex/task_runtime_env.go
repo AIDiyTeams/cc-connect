@@ -17,8 +17,11 @@ func updateTaskRuntimeEnv(existingPath string, runtime core.SessionRuntime) (str
 	imageToken := strings.TrimSpace(runtime.ImageCapabilityToken)
 	envelope := strings.TrimSpace(runtime.TaskAuthorityEnvelopeB64)
 	if token == "" && imageToken == "" && envelope == "" {
-		removeTaskRuntimeEnv(existingPath)
-		return "", nil
+		if existingPath == "" {
+			return "", nil
+		}
+		// Keep the path already bound to the thread, but revoke prior authority.
+		return writeTaskRuntimeEnv(existingPath, "")
 	}
 	if token == "" || envelope == "" {
 		return existingPath, fmt.Errorf("machine capability and task authority envelope must be supplied together")
@@ -40,9 +43,37 @@ func updateTaskRuntimeEnv(existingPath string, runtime core.SessionRuntime) (str
 		}
 	}
 
+	content := strings.Join([]string{
+		"export MACHINE_CAPABILITY_TOKEN=" + shellSingleQuote(token),
+		"export IMAGE_CAPABILITY_TOKEN=" + shellSingleQuote(imageToken),
+		"export TOMAKO_TASK_AUTHORITY_ENVELOPE_B64=" + shellSingleQuote(envelope),
+		"export TASK_AUTHORITY_ENVELOPE_B64=" + shellSingleQuote(envelope),
+		"",
+	}, "\n")
+	return writeTaskRuntimeEnv(existingPath, content)
+}
+
+func writeTaskRuntimeEnv(existingPath, content string) (string, error) {
+	return writeTaskRuntimeEnvInDir(existingPath, content, "")
+}
+
+// The brand fence hides host /tmp. Stage authority under its read-only .codex
+// mount, never under writable outputs or memories, without widening the fence.
+func createTaskRuntimeEnv(workDir, permissionsProfile string) (string, error) {
+	var dir string
+	if strings.TrimSpace(permissionsProfile) != "" {
+		dir = filepath.Join(workDir, ".codex")
+		if err := ensureFencedPrivateDir(dir, 0o700); err != nil {
+			return "", err
+		}
+	}
+	return writeTaskRuntimeEnvInDir("", "", dir)
+}
+
+func writeTaskRuntimeEnvInDir(existingPath, content, tempDir string) (string, error) {
 	path := existingPath
 	if path == "" {
-		dir, err := os.MkdirTemp("", "cc-connect-task-runtime-")
+		dir, err := os.MkdirTemp(tempDir, "cc-connect-task-runtime-")
 		if err != nil {
 			return "", fmt.Errorf("create task runtime directory: %w", err)
 		}
@@ -53,13 +84,13 @@ func updateTaskRuntimeEnv(existingPath string, runtime core.SessionRuntime) (str
 		path = filepath.Join(dir, "machine.env")
 	}
 
-	content := strings.Join([]string{
-		"export MACHINE_CAPABILITY_TOKEN=" + shellSingleQuote(token),
-		"export IMAGE_CAPABILITY_TOKEN=" + shellSingleQuote(imageToken),
-		"export TOMAKO_TASK_AUTHORITY_ENVELOPE_B64=" + shellSingleQuote(envelope),
-		"export TASK_AUTHORITY_ENVELOPE_B64=" + shellSingleQuote(envelope),
-		"",
-	}, "\n")
+	// A failed initial write must not leave a directory that Close cannot find.
+	published := false
+	defer func() {
+		if existingPath == "" && !published {
+			removeTaskRuntimeEnv(path)
+		}
+	}()
 	tmp, err := os.CreateTemp(filepath.Dir(path), "machine.env.tmp-*")
 	if err != nil {
 		return existingPath, fmt.Errorf("create task runtime file: %w", err)
@@ -80,6 +111,7 @@ func updateTaskRuntimeEnv(existingPath string, runtime core.SessionRuntime) (str
 	if err := os.Rename(tmpPath, path); err != nil {
 		return existingPath, fmt.Errorf("publish task runtime file: %w", err)
 	}
+	published = true
 	return path, nil
 }
 
