@@ -97,6 +97,15 @@ func TestThreadParamsExposeOnlyTaskRuntimeFilePath(t *testing.T) {
 // Loaded app-server threads ignore subsequent resume config overrides. Capture
 // the FIRST resume request and verify that every turn uses that original binding.
 func TestResumedThreadToolsReceiveRotatingAuthorityWithoutReResume(t *testing.T) {
+	testResumedThreadAuthority(t, "")
+}
+
+func TestFencedResumedThreadAuthorityStaysInReadOnlyBrandDirectory(t *testing.T) {
+	testResumedThreadAuthority(t, "tomako-brand-fence")
+}
+
+func testResumedThreadAuthority(t *testing.T, permissionsProfile string) {
+	t.Helper()
 	workDir := t.TempDir()
 	requestsFile := filepath.Join(workDir, "requests.jsonl")
 	shellScript := `#!/bin/sh
@@ -130,7 +139,15 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
 	writeFakeCodexScript(t, workDir, shellScript, powershellScript)
 	t.Setenv("PATH", workDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CC_TEST_RUNTIME_REQUESTS", requestsFile)
-	s, err := newAppServerSession(context.Background(), "", workDir, "test-model", "low", "", "", "thread-existing", "", "", nil, "")
+	var extraEnv []string
+	if permissionsProfile != "" {
+		var err error
+		extraEnv, err = prepareFencedEnvironment(workDir, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, err := newAppServerSession(context.Background(), "", workDir, "test-model", "low", "", permissionsProfile, "thread-existing", "", "", extraEnv, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,21 +155,27 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
 	readRequests := func() []struct {
 		Method string
 		Params map[string]any
-	} { body, err := os.ReadFile(requestsFile); if err != nil {
-		t.Fatal(err)
-	}; var requests []struct {
-		Method string
-		Params map[string]any
-	}; for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
-		var request struct {
+	} {
+		body, err := os.ReadFile(requestsFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var requests []struct {
 			Method string
 			Params map[string]any
 		}
-		if err := json.Unmarshal([]byte(line), &request); err != nil {
-			t.Fatal(err)
+		for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+			var request struct {
+				Method string
+				Params map[string]any
+			}
+			if err := json.Unmarshal([]byte(line), &request); err != nil {
+				t.Fatal(err)
+			}
+			requests = append(requests, request)
 		}
-		requests = append(requests, request)
-	}; return requests }
+		return requests
+	}
 	var boundPath string
 	for _, request := range readRequests() {
 		if request.Method == "thread/resume" {
@@ -162,6 +185,9 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
 	}
 	if boundPath == "" {
 		t.Fatal("first resume did not bind the tool authority file; a second resume cannot repair a loaded thread")
+	}
+	if permissionsProfile != "" && filepath.Dir(filepath.Dir(boundPath)) != filepath.Join(workDir, ".codex") {
+		t.Fatal("authority file is outside the brand's read-only .codex mount and is invisible inside the filesystem fence")
 	}
 	assertBoundContents := func(expected string) {
 		body, err := os.ReadFile(boundPath)
