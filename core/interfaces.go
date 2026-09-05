@@ -33,7 +33,7 @@ type AgentTraceEvent struct {
 	ExitCode   *int
 	Success    *bool
 	DurationMs int64
-	// Content carries full model thinking text for EventThinking reports;
+	// Content carries reasoning or public commentary, identified by Type;
 	// it stays separate from Input/Output, which remain tool-result fields.
 	Content string
 }

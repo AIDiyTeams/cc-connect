@@ -247,6 +247,7 @@ const (
 	EventError             EventType = "error"              // error occurred
 	EventPermissionRequest EventType = "permission_request" // agent requests permission via stdio protocol
 	EventThinking          EventType = "thinking"           // thinking/processing status
+	EventCommentary        EventType = "commentary"         // public progress, separate from reasoning and final text
 	EventPlanUpdate        EventType = "plan_update"        // agent-authored task plan/status update
 	EventLifecycle         EventType = "lifecycle"          // internal runtime stage timing
 	EventStructuredResult  EventType = "structured_result"  // trusted structured stage result

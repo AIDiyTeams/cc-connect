@@ -76,6 +76,7 @@ type bridgeReplyCtx struct {
 	Platform   string `json:"platform"`
 	SessionKey string `json:"session_key"`
 	ReplyCtx   string `json:"reply_ctx"`
+	TurnNo     int    `json:"turn_no,omitempty"`
 
 	// PreviewHandle is the platform-side streaming message id (from preview_ack
 	// or a synthetic id for token_stream auto-ack). ReplyCtx must stay as the
@@ -532,7 +533,7 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 	// gate it independently of tool traces. Content is capped, not summarized.
 	// Thinking flows for both backend tasks (llm-) and studio chat turns
 	// (cmsg-); user-facing visibility is gated by the backend adapter.
-	if event.Type == EventThinking {
+	if event.Type == EventThinking || event.Type == EventCommentary {
 		if !strings.HasPrefix(rc.ReplyCtx, "llm-") && !strings.HasPrefix(rc.ReplyCtx, "cmsg-") {
 			return nil
 		}
@@ -541,6 +542,8 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 			"session_key": rc.SessionKey,
 			"reply_ctx":   rc.ReplyCtx,
 			"trace_id":    event.TraceID,
+			"turn_no":     rc.TurnNo,
+			"phase":       string(event.Type),
 			"content":     truncateBridgeTrace(event.Content, 65536),
 			"occurred_at": now.Format(time.RFC3339Nano),
 		})
@@ -562,6 +565,7 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 		"session_key": rc.SessionKey,
 		"reply_ctx":   rc.ReplyCtx,
 		"trace_id":    event.TraceID,
+		"turn_no":     rc.TurnNo,
 		"event_type":  string(event.Type),
 		"tool_name":   event.ToolName,
 		"input":       truncateBridgeTrace(event.Input, 8000),
@@ -1605,6 +1609,7 @@ func (a *bridgeAdapter) handleMessage(raw json.RawMessage) {
 		Runtime:    normalizeSessionRuntime(m.Runtime),
 		ReplyCtx:   newBridgeReplyCtx(a, m.SessionKey, m.ReplyCtx),
 	}
+	msg.ReplyCtx.(*bridgeReplyCtx).TurnNo = msg.Runtime.TurnNo
 	// Older control planes duplicate trusted runtime values as leading prompt
 	// markers. Remove only exact matches before routing slash Skills. Runtime
 	// authority is never inferred from this text; legacy agents get the markers

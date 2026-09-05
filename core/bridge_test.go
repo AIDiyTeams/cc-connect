@@ -19,6 +19,26 @@ import (
 
 // helpers ------------------------------------------------------------------
 
+func TestBridge_PublicProgressRetainsPhaseAndTurn(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "agent_trace"})
+	bp := bs.NewPlatform("proj")
+	rc := newBridgeReplyCtx(bs.getAdapter("java-backend"), "session", "llm-progress")
+	rc.TurnNo = 3
+	for _, phase := range []EventType{EventCommentary, EventThinking} {
+		if err := bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{
+			Type: phase, TraceID: "item-1", Content: "progress",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		frame := readMsg(t, conn)
+		if frame["type"] != "agent_thinking" || frame["phase"] != string(phase) || frame["turn_no"] != float64(3) {
+			t.Fatalf("phase/turn lost in bridge frame: %#v", frame)
+		}
+	}
+}
+
 func startTestBridge(t *testing.T, token string) (*BridgeServer, string) {
 	t.Helper()
 	var bs *BridgeServer
