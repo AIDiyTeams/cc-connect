@@ -2272,9 +2272,8 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "MCP", ToolInput: name + "\n" + appServerJSON(item["arguments"])})
 
 	case "webSearch":
-		query, _ := item["query"].(string)
 		s.noteBrandWebSearchStarted(itemID)
-		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "WebSearch", ToolInput: query})
+		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "WebSearch", ToolInput: appServerWebAction(item)})
 
 	case "dynamicToolCall":
 		tool, _ := item["tool"].(string)
@@ -2382,13 +2381,12 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		})
 
 	case "webSearch":
-		query, _ := item["query"].(string)
 		s.noteBrandWebSearchCompleted(itemID)
 		s.emit(core.Event{
 			Type:       core.EventToolResult,
 			TraceID:    itemID,
 			ToolName:   "WebSearch",
-			ToolResult: truncate(strings.TrimSpace(query), 500),
+			ToolResult: appServerWebAction(item),
 		})
 
 	case "dynamicToolCall":
@@ -2588,6 +2586,38 @@ func stringValue(v *string) string {
 		return ""
 	}
 	return strings.TrimSpace(*v)
+}
+
+// Native web actions carry page URLs and batched queries in action, while the
+// legacy query field may be empty. Expose only the public tool arguments, never
+// the whole item or arbitrary future metadata.
+func appServerWebAction(item map[string]any) string {
+	if action, ok := item["action"].(map[string]any); ok {
+		kind, _ := action["type"].(string)
+		switch kind {
+		case "search", "openPage", "findInPage", "open_page", "find_in_page":
+			visible := map[string]any{"type": kind}
+			for _, key := range []string{"query", "url", "pattern"} {
+				if value, ok := action[key].(string); ok && value != "" {
+					visible[key] = value
+				}
+			}
+			if values, ok := action["queries"].([]any); ok {
+				queries := make([]string, 0, len(values))
+				for _, value := range values {
+					if query, ok := value.(string); ok {
+						queries = append(queries, query)
+					}
+				}
+				if len(queries) > 0 {
+					visible["queries"] = queries
+				}
+			}
+			return truncate(appServerJSON(visible), 4096)
+		}
+	}
+	query, _ := item["query"].(string)
+	return truncate(strings.TrimSpace(query), 4096)
 }
 
 func appServerJSON(v any) string {
