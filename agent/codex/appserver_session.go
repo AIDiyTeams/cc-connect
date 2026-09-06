@@ -207,11 +207,12 @@ type appServerSession struct {
 	commentaryStreams map[string]*commentaryStream
 	finalItems        map[string]bool
 
-	runtimeMu          sync.RWMutex
-	usage              *core.UsageReport
-	context            *core.ContextUsage
-	runtime            core.SessionRuntime
-	taskRuntimeEnvFile string
+	runtimeMu             sync.RWMutex
+	usage                 *core.UsageReport
+	context               *core.ContextUsage
+	runtime               core.SessionRuntime
+	taskRuntimeEnvFile    string
+	nativeWebModelCatalog string
 	// Resumed threads may retain a previous turn's collaboration instructions.
 	// A later unscoped turn must explicitly restore Codex's built-in default.
 	developerInstructionsManaged bool
@@ -237,7 +238,7 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, permissionsProfile, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, permissionsProfile, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, startupRuntime ...core.SessionRuntime) (*appServerSession, error) {
 	sessionStartedAt := time.Now()
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
@@ -268,6 +269,23 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 	if err != nil {
 		cancel()
 		return nil, err
+	}
+
+	if len(startupRuntime) > 0 {
+		runtime := startupRuntime[0]
+		if err := s.SetSessionRuntime(runtime); err != nil {
+			removeTaskRuntimeEnv(s.taskRuntimeEnvFile)
+			cancel()
+			return nil, err
+		}
+		if needsNativeWebModelCatalog(runtime) {
+			s.nativeWebModelCatalog, err = writeNativeWebModelCatalog(s.taskRuntimeEnvFile)
+			if err != nil {
+				removeTaskRuntimeEnv(s.taskRuntimeEnvFile)
+				cancel()
+				return nil, err
+			}
+		}
 	}
 
 	connectStartedAt := time.Now()
@@ -303,7 +321,7 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 	return s, nil
 }
 
-func (s *appServerSession) connect() error {
+func (s *appServerSession) startupArgs() []string {
 	args := []string{"app-server"}
 	if strings.TrimSpace(s.url) != "" {
 		args = append(args, "--listen", strings.TrimSpace(s.url))
@@ -320,7 +338,14 @@ func (s *appServerSession) connect() error {
 	if baseURL := strings.TrimSpace(s.baseURL); baseURL != "" {
 		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", baseURL))
 	}
-	cmd := exec.CommandContext(s.ctx, "codex", args...)
+	if s.nativeWebModelCatalog != "" {
+		args = append(args, "-c", fmt.Sprintf("model_catalog_json=%q", s.nativeWebModelCatalog))
+	}
+	return args
+}
+
+func (s *appServerSession) connect() error {
+	cmd := exec.CommandContext(s.ctx, "codex", s.startupArgs()...)
 	cmd.Dir = s.workDir
 	env := append([]string(nil), s.extraEnv...)
 	// Node/MCP child tools inherit the app-server environment, not the shell

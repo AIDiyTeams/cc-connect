@@ -394,6 +394,10 @@ func (a *Agent) SetSessionEnv(env []string) {
 }
 
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
+	return a.StartSessionWithRuntime(ctx, sessionID, core.SessionRuntime{})
+}
+
+func (a *Agent) StartSessionWithRuntime(ctx context.Context, sessionID string, runtime core.SessionRuntime) (core.AgentSession, error) {
 	a.mu.Lock()
 	mode := a.mode
 	model := a.model
@@ -466,7 +470,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, permissionsProfile, sessionID, baseURL, provName, extraEnv, codexHome)
+		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, permissionsProfile, sessionID, baseURL, provName, extraEnv, codexHome, runtime)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
