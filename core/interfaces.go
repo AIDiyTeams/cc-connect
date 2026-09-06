@@ -507,6 +507,18 @@ type Agent interface {
 	Stop() error
 }
 
+// SessionRuntimeStarter applies trusted startup-only model/tool configuration
+// before creating or resuming the agent process.
+type SessionRuntimeStarter interface {
+	StartSessionWithRuntime(context.Context, string, SessionRuntime) (AgentSession, error)
+}
+
+// SessionRuntimeCompatibility detects startup-only configuration changes that
+// require recycling a process rather than merely updating its next turn.
+type SessionRuntimeCompatibility interface {
+	SupportsSessionRuntime(SessionRuntime) bool
+}
+
 // AgentSession represents a running interactive agent session with a persistent process.
 type AgentSession interface {
 	// Send sends a user message (with optional images and files) to the running agent process.
