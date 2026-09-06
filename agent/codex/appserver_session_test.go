@@ -526,7 +526,7 @@ func TestAppServerSession_FencedTurnKeepsPermissionsProfile(t *testing.T) {
 	}
 	s.alive.Store(true)
 	schema := json.RawMessage(`{"type":"object","properties":{"decision":{"enum":["KEEP","REJECT"]}},"required":["decision"],"additionalProperties":false}`)
-	if err := s.SetSessionRuntime(core.SessionRuntime{OutputSchema: schema, ReasoningEffort: "high"}); err != nil {
+	if err := s.SetSessionRuntime(core.SessionRuntime{OutputSchema: schema, ReasoningEffort: "high", GatewayModel: "test-model", DeveloperInstructions: "Use the user's language for public findings."}); err != nil {
 		t.Fatal(err)
 	}
 	s.threadID.Store("thread-42")
@@ -547,6 +547,15 @@ func TestAppServerSession_FencedTurnKeepsPermissionsProfile(t *testing.T) {
 	}
 	if request.Method != "turn/start" {
 		t.Fatalf("method = %q, want turn/start", request.Method)
+	}
+	mode := request.Params["collaborationMode"].(map[string]any)
+	settings := mode["settings"].(map[string]any)
+	if mode["mode"] != "default" || settings["model"] != "test-model" || settings["reasoning_effort"] != "high" || !strings.Contains(settings["developer_instructions"].(string), "Use the user's language for public findings.") {
+		t.Fatalf("native developer policy/model/effort lost: %#v", mode)
+	}
+	input := request.Params["input"].([]any)[0].(map[string]any)
+	if input["text"] != "update my files" || request.Params["threadId"] != "thread-42" {
+		t.Fatal("developer policy contaminated user input or reset conversation history")
 	}
 	actualSchema, err := json.Marshal(request.Params["outputSchema"])
 	if err != nil {

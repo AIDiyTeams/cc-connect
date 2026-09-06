@@ -210,6 +210,9 @@ type appServerSession struct {
 	context            *core.ContextUsage
 	runtime            core.SessionRuntime
 	taskRuntimeEnvFile string
+	// Resumed threads may retain a previous turn's collaboration instructions.
+	// A later unscoped turn must explicitly restore Codex's built-in default.
+	developerInstructionsManaged bool
 
 	brandFlowMu sync.Mutex
 	brandFlow   brandAnalysisFlow
@@ -236,22 +239,23 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 	sessionStartedAt := time.Now()
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
-		url:                url,
-		workDir:            workDir,
-		model:              model,
-		effort:             effort,
-		mode:               mode,
-		permissionsProfile: strings.TrimSpace(permissionsProfile),
-		baseURL:            baseURL,
-		modelProvider:      modelProvider,
-		extraEnv:           append([]string(nil), extraEnv...),
-		codexHome:          strings.TrimSpace(codexHome),
-		events:             make(chan core.Event, 128),
-		ctx:                sessionCtx,
-		cancel:             cancel,
-		pending:            make(map[int64]chan rpcResponseEnvelope),
-		pendingApprovals:   make(map[string]chan core.PermissionResult),
-		resumeID:           resumeID,
+		url:                          url,
+		workDir:                      workDir,
+		model:                        model,
+		effort:                       effort,
+		mode:                         mode,
+		permissionsProfile:           strings.TrimSpace(permissionsProfile),
+		baseURL:                      baseURL,
+		modelProvider:                modelProvider,
+		extraEnv:                     append([]string(nil), extraEnv...),
+		codexHome:                    strings.TrimSpace(codexHome),
+		events:                       make(chan core.Event, 128),
+		ctx:                          sessionCtx,
+		cancel:                       cancel,
+		pending:                      make(map[int64]chan rpcResponseEnvelope),
+		pendingApprovals:             make(map[string]chan core.PermissionResult),
+		resumeID:                     resumeID,
+		developerInstructionsManaged: resumeID != "" && resumeID != core.ContinueSession,
 	}
 	s.alive.Store(true)
 	// Bind a stable, initially empty authority file before the first start or
@@ -606,6 +610,9 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	if effort := s.GetReasoningEffort(); effort != "" {
 		params["effort"] = effort
 	}
+	if collaborationMode := s.turnDeveloperInstructions(); collaborationMode != nil {
+		params["collaborationMode"] = collaborationMode
+	}
 	if schema := s.outputSchema(); len(schema) > 0 {
 		params["outputSchema"] = schema
 	}
@@ -650,6 +657,9 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	if err := core.ValidateOutputSchema(runtime.OutputSchema); err != nil {
 		return err
 	}
+	if err := core.ValidateDeveloperInstructions(runtime.DeveloperInstructions); err != nil {
+		return err
+	}
 	runtime.OutputSchema = append(json.RawMessage(nil), runtime.OutputSchema...)
 	s.runtimeMu.Lock()
 	envFile, err := updateTaskRuntimeEnv(s.taskRuntimeEnvFile, runtime)
@@ -660,6 +670,9 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	s.taskRuntimeEnvFile = envFile
 	searchChanged := s.webSearch != normalizeWebSearch(runtime.WebSearch)
 	s.runtime = runtime
+	if runtime.DeveloperInstructions != "" {
+		s.developerInstructionsManaged = true
+	}
 	if model := strings.TrimSpace(runtime.GatewayModel); model != "" {
 		s.model = model
 	}
@@ -698,6 +711,38 @@ func (s *appServerSession) currentTaskRuntimeEnvFile() string {
 }
 
 func (s *appServerSession) SupportsOutputSchema() bool { return true }
+
+func (s *appServerSession) SupportsDeveloperInstructions() bool { return true }
+
+// thread/resume ignores instruction overrides on loaded threads. The native
+// turn/start collaboration settings emit developer-role context updates while
+// retaining the same thread and its history. They also override model/effort,
+// so repeat the effective values rather than selecting a preset's defaults.
+func (s *appServerSession) turnDeveloperInstructions() map[string]any {
+	s.runtimeMu.RLock()
+	defer s.runtimeMu.RUnlock()
+	if !s.developerInstructionsManaged {
+		return nil
+	}
+	var instructions any
+	if s.runtime.DeveloperInstructions != "" {
+		instructions = "You are in Default mode. The following current application instructions replace earlier application instructions in this collaboration-mode block and remain in effect until replaced by later collaboration instructions.\n\n" + s.runtime.DeveloperInstructions
+	}
+	var effort any
+	if s.effort != "" {
+		effort = s.effort
+	}
+	return map[string]any{
+		"mode": "default",
+		"settings": map[string]any{
+			"model":            s.model,
+			"reasoning_effort": effort,
+			// null restores the built-in default instructions. Empty text would
+			// emit no update and leave the previous policy in prompt history.
+			"developer_instructions": instructions,
+		},
+	}
+}
 
 func (s *appServerSession) SupportsToolAuthority() bool { return true }
 
