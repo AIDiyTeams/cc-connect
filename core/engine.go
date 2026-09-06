@@ -6344,6 +6344,15 @@ func sendWithSessionRuntime(
 	if runtime.TurnBudgetSeconds < 0 || runtime.TurnBudgetSeconds > 3600 {
 		return fmt.Errorf("invalid runtime turn budget: must be between 0 and 3600 seconds")
 	}
+	if err := ValidateDeveloperInstructions(runtime.DeveloperInstructions); err != nil {
+		return err
+	}
+	if runtime.DeveloperInstructions != "" {
+		capable, ok := session.(NativeDeveloperInstructionsSession)
+		if !ok || !capable.SupportsDeveloperInstructions() {
+			return fmt.Errorf("agent session does not support native developer_instructions")
+		}
+	}
 
 	if len(runtime.OutputSchema) > 0 {
 		if err := ValidateOutputSchema(runtime.OutputSchema); err != nil {

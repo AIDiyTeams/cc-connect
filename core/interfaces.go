@@ -543,6 +543,13 @@ type NativeOutputSchemaSession interface {
 	SupportsOutputSchema() bool
 }
 
+// NativeDeveloperInstructionsSession keeps trusted application instructions
+// separate from user text, including when a conversation resumes.
+type NativeDeveloperInstructionsSession interface {
+	SessionRuntimeConfigurer
+	SupportsDeveloperInstructions() bool
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"

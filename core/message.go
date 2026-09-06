@@ -223,6 +223,9 @@ type SessionRuntime struct {
 	TaskID             string   `json:"task_id,omitempty"`
 	ReasoningEffort    string   `json:"reasoning_effort,omitempty"`
 	TurnNo             int      `json:"turn_no,omitempty"`
+	// DeveloperInstructions is trusted application policy for this turn, not
+	// user input. Adapters must opt into native developer-role delivery.
+	DeveloperInstructions string `json:"developer_instructions,omitempty"`
 	// Machine authority is delivered on the trusted Bridge runtime lane so it
 	// stays outside model-visible prompts for ToolAuthoritySession adapters.
 	// Other adapters retain the legacy prompt-marker compatibility path.
