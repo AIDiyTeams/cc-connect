@@ -813,6 +813,32 @@ func TestAppServerSession_ToolEventsKeepStableTraceID(t *testing.T) {
 	}
 }
 
+func TestAppServerSession_WebActionsPreserveURLsAndAllQueries(t *testing.T) {
+	for _, action := range []map[string]any{
+		{"type": "openPage", "url": "https://example.com/alternatives"},
+		{"type": "search", "query": "first query", "queries": []any{"first query", "second query"}},
+		{"type": "findInPage", "url": "https://example.com/post", "pattern": "workflow"},
+	} {
+		t.Run(action["type"].(string), func(t *testing.T) {
+			s := &appServerSession{events: make(chan core.Event, 4)}
+			item := map[string]any{"type": "webSearch", "id": "native-web-1", "query": "", "action": action}
+			s.handleItemStarted(item)
+			started := <-s.events
+			s.handleItemCompleted(item)
+			completed := <-s.events
+			for _, content := range []string{started.ToolInput, completed.ToolResult} {
+				var decoded map[string]any
+				if err := json.Unmarshal([]byte(content), &decoded); err != nil || !reflect.DeepEqual(decoded, action) {
+					t.Fatalf("public web action lost: %q, want %#v", content, action)
+				}
+			}
+			if started.TraceID != completed.TraceID || completed.TraceID != "native-web-1" {
+				t.Fatal("native action trace changed")
+			}
+		})
+	}
+}
+
 func TestAppServerSession_AgentMessageDeltaEmitsMissingTailOnCompletion(t *testing.T) {
 	s := &appServerSession{events: make(chan core.Event, 8)}
 	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "msg-1", "phase": "final_answer"})
