@@ -159,12 +159,15 @@ func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx contex
 
 func applyStreamPreviewOverrides(cfg StreamPreviewCfg, p Platform, replyCtx any) StreamPreviewCfg {
 	if tuner, ok := replyCtx.(StreamPreviewTuner); ok {
-		if intervalMs, minDeltaChars, ok := tuner.StreamPreviewOverrides(); ok {
+		if intervalMs, minDeltaChars, maxChars, ok := tuner.StreamPreviewOverrides(); ok {
 			if intervalMs > 0 {
 				cfg.IntervalMs = intervalMs
 			}
 			if minDeltaChars > 0 {
 				cfg.MinDeltaChars = minDeltaChars
+			}
+			if maxChars >= 0 {
+				cfg.MaxChars = maxChars
 			}
 			return cfg
 		}
@@ -173,7 +176,7 @@ func applyStreamPreviewOverrides(cfg StreamPreviewCfg, p Platform, replyCtx any)
 	if !ok {
 		return cfg
 	}
-	intervalMs, minDeltaChars, ok := tuner.StreamPreviewOverrides()
+	intervalMs, minDeltaChars, maxChars, ok := tuner.StreamPreviewOverrides()
 	if !ok {
 		return cfg
 	}
@@ -182,6 +185,9 @@ func applyStreamPreviewOverrides(cfg StreamPreviewCfg, p Platform, replyCtx any)
 	}
 	if minDeltaChars > 0 {
 		cfg.MinDeltaChars = minDeltaChars
+	}
+	if maxChars >= 0 {
+		cfg.MaxChars = maxChars
 	}
 	return cfg
 }

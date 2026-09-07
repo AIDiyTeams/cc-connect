@@ -362,9 +362,10 @@ type StreamCompleter interface {
 }
 
 // StreamPreviewTuner is an optional interface for platforms that want tighter
-// streaming flush intervals (e.g. bridge adapters declaring token_stream).
+// streaming flush intervals and length (e.g. adapters declaring token_stream).
+// maxChars=0 is unlimited; a negative value retains the configured limit.
 type StreamPreviewTuner interface {
-	StreamPreviewOverrides() (intervalMs, minDeltaChars int, ok bool)
+	StreamPreviewOverrides() (intervalMs, minDeltaChars, maxChars int, ok bool)
 }
 
 // StatusFooterSender is an optional Platform extension for sending a reply

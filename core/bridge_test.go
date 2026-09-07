@@ -1472,12 +1472,15 @@ func TestBridge_LlmTaskWithoutTokenStreamKeepsCoarseUpdateMessage(t *testing.T) 
 
 func TestBridge_ReplyCtxStreamPreviewOverrides(t *testing.T) {
 	rc := &bridgeReplyCtx{tokenStream: true}
-	interval, minDelta, ok := rc.StreamPreviewOverrides()
+	interval, minDelta, maxChars, ok := rc.StreamPreviewOverrides()
 	if !ok || interval != 50 || minDelta != 1 {
 		t.Fatalf("overrides=%d,%d,%v", interval, minDelta, ok)
 	}
 	rc2 := &bridgeReplyCtx{}
-	if _, _, ok := rc2.StreamPreviewOverrides(); ok {
+	if maxChars != 0 {
+		t.Fatalf("token streams must not truncate long answers: maxChars=%d", maxChars)
+	}
+	if _, _, _, ok := rc2.StreamPreviewOverrides(); ok {
 		t.Fatal("expected no overrides without token_stream")
 	}
 }
