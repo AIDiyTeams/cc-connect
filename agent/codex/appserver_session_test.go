@@ -763,6 +763,7 @@ func TestAppServerSession_HandleTurnPlanUpdatedEmitsAgentPlan(t *testing.T) {
 
 func TestAppServerSession_AgentMessageDeltaStreamsText(t *testing.T) {
 	s := &appServerSession{events: make(chan core.Event, 8)}
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "msg-1", "phase": "final_answer"})
 
 	s.handleNotification("item/agentMessage/delta",
 		json.RawMessage(`{"threadId":"t1","turnId":"u1","itemId":"msg-1","delta":"你好，"}`))
@@ -840,6 +841,7 @@ func TestAppServerSession_WebActionsPreserveURLsAndAllQueries(t *testing.T) {
 
 func TestAppServerSession_AgentMessageDeltaEmitsMissingTailOnCompletion(t *testing.T) {
 	s := &appServerSession{events: make(chan core.Event, 8)}
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "msg-1", "phase": "final_answer"})
 
 	s.handleNotification("item/agentMessage/delta",
 		json.RawMessage(`{"itemId":"msg-1","delta":"部分"}`))
@@ -858,6 +860,8 @@ func TestAppServerSession_AgentMessageDeltaEmitsMissingTailOnCompletion(t *testi
 
 func TestAppServerSession_AgentMessageSeparatorBetweenStreamedItems(t *testing.T) {
 	s := &appServerSession{events: make(chan core.Event, 8)}
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "msg-1", "phase": "final_answer"})
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "msg-2", "phase": "final_answer"})
 
 	s.handleNotification("item/agentMessage/delta",
 		json.RawMessage(`{"itemId":"msg-1","delta":"第一段"}`))
