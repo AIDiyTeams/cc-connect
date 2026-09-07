@@ -5,3 +5,5 @@ The Codex app-server adapter maps `agentMessage.phase=commentary` to `EventComme
 The engine reports commentary through `AgentTraceReporter` without accumulating it into final text. The bridge keeps its backwards-compatible `agent_thinking` envelope and adds `phase` plus the trusted dispatch `turn_no` from `SessionRuntime`. The backend owns persistence, authorization and visibility; the bridge does not infer business-specific progress, translate text or summarize reasoning.
 
 Tests cover native phase separation, terminal text exclusion, engine forwarding and bridge phase/turn identity. Formal Test deployment uses the controller child component route with a frozen pushed revision.
+
+Connections that negotiate `token_stream` use 50 ms / 1-character preview updates without the 2,000-character IM preview cap, so long final answers keep growing before the terminal frame. Consumers without that capability retain their configured cadence and length limit. This changes transport previews only: commentary and unclassified native items still cannot enter final-answer streaming, and a preview does not confirm business completion.

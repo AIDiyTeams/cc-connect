@@ -67,6 +67,28 @@ func TestStreamPreview_BasicFlow(t *testing.T) {
 	}
 }
 
+func TestStreamPreview_TokenStreamContinuesBeyondPreviewLimit(t *testing.T) {
+	for _, tokenStream := range []bool{true, false} {
+		mp := &mockUpdaterPlatform{}
+		sp := newStreamPreview(DefaultStreamPreviewCfg(), mp, &bridgeReplyCtx{tokenStream: tokenStream}, context.Background(), nil)
+		t.Cleanup(sp.discard)
+		first := strings.Repeat("长", 2100)
+		sp.appendText(first)
+		if tokenStream {
+			sp.mu.Lock()
+			sp.lastSentAt = time.Now().Add(-time.Second)
+			sp.mu.Unlock()
+			sp.appendText("第二段仍在生成")
+			msgs := mp.getMessages()
+			if len(msgs) != 2 || msgs[1] != "update:"+first+"第二段仍在生成" {
+				t.Fatalf("long answer stopped growing before completion: frames=%d", len(msgs))
+			}
+		} else if got := mp.getMessages()[0]; got != "start:"+strings.Repeat("长", 2000)+"…" {
+			t.Fatal("non-token consumer lost its configured preview limit")
+		}
+	}
+}
+
 func TestStreamPreview_ThrottlesUpdates(t *testing.T) {
 	mp := &mockUpdaterPlatform{}
 	cfg := StreamPreviewCfg{

@@ -1088,13 +1088,13 @@ func (bp *BridgePlatform) CompleteStream(ctx context.Context, replyCtx any, cont
 // done frame in-place instead of deleting the preview and sending a fresh reply.
 func (bp *BridgePlatform) KeepPreviewOnFinish() bool { return true }
 
-// StreamPreviewOverrides tightens flush cadence only for Studio token streams.
-// LLM Task keeps DefaultStreamPreviewCfg (≈1500ms / 30 chars).
-func (rc *bridgeReplyCtx) StreamPreviewOverrides() (intervalMs, minDeltaChars int, ok bool) {
+// Token streams carry the full answer as it grows, including beyond the IM
+// preview limit. Other bridge consumers retain their configured preview limits.
+func (rc *bridgeReplyCtx) StreamPreviewOverrides() (intervalMs, minDeltaChars, maxChars int, ok bool) {
 	if rc == nil || !rc.tokenStream {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
-	return 50, 1, true
+	return 50, 1, 0, true
 }
 
 func (bp *BridgePlatform) sendReplyStream(rc *bridgeReplyCtx, content string, done bool) error {
