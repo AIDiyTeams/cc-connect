@@ -204,6 +204,7 @@ type appServerSession struct {
 	streamedItems    map[string]string
 	lastStreamedItem string
 	commentaryItems  map[string]bool
+	finalItems       map[string]bool
 
 	runtimeMu          sync.RWMutex
 	usage              *core.UsageReport
@@ -641,6 +642,7 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.streamedItems = nil
 	s.commentaryItems = nil
+	s.finalItems = nil
 	s.lastStreamedItem = ""
 	s.stateMu.Unlock()
 
@@ -2088,6 +2090,7 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 			s.pendingMsgs = s.pendingMsgs[:0]
 			s.streamedItems = nil
 			s.commentaryItems = nil
+			s.finalItems = nil
 			s.lastStreamedItem = ""
 			s.stateMu.Unlock()
 			s.storeContextUsage(nil)
@@ -2218,6 +2221,14 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 			s.commentaryItems = make(map[string]bool)
 		}
 		s.commentaryItems[itemID] = true
+		s.stateMu.Unlock()
+	}
+	if itemType == "agentMessage" && item["phase"] == "final_answer" {
+		s.stateMu.Lock()
+		if s.finalItems == nil {
+			s.finalItems = make(map[string]bool)
+		}
+		s.finalItems[itemID] = true
 		s.stateMu.Unlock()
 	}
 
@@ -2647,7 +2658,11 @@ func (s *appServerSession) handleAgentMessageDelta(itemID, delta string) {
 	}
 	prefix := ""
 	s.stateMu.Lock()
-	if s.commentaryItems[itemID] {
+	// Some providers announce phase only on item/completed, or omit it.
+	// Unclassified deltas cannot safely enter the final answer. The complete
+	// item is routed by its phase, or the existing tool/turn boundary fallback.
+	// Explicit final-answer items still stream immediately.
+	if !s.finalItems[itemID] || s.commentaryItems[itemID] {
 		s.stateMu.Unlock()
 		return
 	}

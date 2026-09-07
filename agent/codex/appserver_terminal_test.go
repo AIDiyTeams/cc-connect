@@ -76,6 +76,58 @@ func TestAppServerSession_PublicCommentaryDoesNotLeakReasoningOrEnterFinal(t *te
 	}
 }
 
+func TestAppServerSession_LatePhaseDoesNotStreamCommentaryIntoFinal(t *testing.T) {
+	s := terminalTestSession()
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "progress"})
+	s.handleAgentMessageDelta("progress", "正在生成封面。")
+	if len(s.events) != 0 {
+		t.Fatal("unclassified delta entered final response before phase was known")
+	}
+	s.handleItemCompleted(map[string]any{"type": "agentMessage", "id": "progress", "phase": "commentary", "text": "正在生成封面。"})
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "answer", "phase": "final_answer"})
+	s.handleAgentMessageDelta("answer", "封面已保存。")
+	s.handleItemCompleted(map[string]any{"type": "agentMessage", "id": "answer", "phase": "final_answer", "text": "封面已保存。"})
+	s.completeTurn("turn-1", nil)
+	var progress, final string
+	for len(s.events) > 0 {
+		e := <-s.events
+		if e.Type == core.EventCommentary {
+			progress += e.Content
+		}
+		if e.Type == core.EventText {
+			final += e.Content
+		}
+	}
+	if progress != "正在生成封面。" || final != "封面已保存。" {
+		t.Fatalf("progress=%q final=%q", progress, final)
+	}
+}
+
+func TestAppServerSession_PhaseLessProviderUsesToolBoundaryWithoutFinalLeak(t *testing.T) {
+	s := terminalTestSession()
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "progress"})
+	s.handleAgentMessageDelta("progress", "正在核对资料。")
+	s.handleItemCompleted(map[string]any{"type": "agentMessage", "id": "progress", "text": "正在核对资料。"})
+	s.handleItemStarted(map[string]any{"type": "commandExecution", "id": "tool", "command": "read"})
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "answer"})
+	s.handleAgentMessageDelta("answer", "核对结果。")
+	s.handleItemCompleted(map[string]any{"type": "agentMessage", "id": "answer", "text": "核对结果。"})
+	s.completeTurn("turn-1", nil)
+	var progress, final string
+	for len(s.events) > 0 {
+		e := <-s.events
+		if e.Type == core.EventCommentary {
+			progress += e.Content
+		}
+		if e.Type == core.EventText {
+			final += e.Content
+		}
+	}
+	if progress != "正在核对资料。" || final != "核对结果。" {
+		t.Fatalf("progress=%q final=%q", progress, final)
+	}
+}
+
 func TestAppServerSession_FailedTurnIsNotAnEmptySuccess(t *testing.T) {
 	for _, tc := range []struct{ status, detail, want string }{
 		{"failed", `,"error":{"message":"connection refused"}`, "connection refused"},
