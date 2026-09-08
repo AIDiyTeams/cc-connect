@@ -87,10 +87,10 @@ type InteractionResponseStatus struct {
 }
 
 // MachineReplyChannel is implemented by platforms whose reply contexts are
-// backend machine channels (llm- tasks, cmsg- studio chat): adapters parse
-// replies as Agent deliverables, so system lifecycle notices (session auto
-// reset, graceful close) must ride the typed turn_status lane instead of the
-// business reply stream.
+// backend machine channels (llm- tasks, cmsg- studio chat). The application
+// owns their durable conversation identity, so idle housekeeping must not
+// rotate their transcript. Adapters parse replies as Agent deliverables;
+// lifecycle status belongs on the typed lane, not the business reply stream.
 type MachineReplyChannel interface {
 	IsMachineReplyChannel(replyCtx any) bool
 }

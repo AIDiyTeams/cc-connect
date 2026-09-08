@@ -428,9 +428,9 @@ var (
 )
 
 // IsMachineReplyChannel reports whether the reply context belongs to a backend
-// machine channel (llm- tasks, cmsg- studio chat). System lifecycle notices on
-// these channels must ride the typed turn_status lane; adapters parse replies
-// as Agent deliverables and would store a reset notice as the turn's output.
+// machine channel (llm- tasks, cmsg- studio chat). The backend owns conversation
+// identity, including reset boundaries. Lifecycle status must not become a
+// business reply because adapters persist replies as Agent deliverables.
 func (bp *BridgePlatform) IsMachineReplyChannel(replyCtx any) bool {
 	rc, ok := replyCtx.(*bridgeReplyCtx)
 	if !ok {
