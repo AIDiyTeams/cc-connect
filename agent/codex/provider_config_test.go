@@ -239,6 +239,34 @@ func TestEnsureCodexAuth_OverwritesExisting(t *testing.T) {
 	}
 }
 
+func TestFencedConfigReadFailureDoesNotReuseStalePermissions(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("missing=%v", missing), func(t *testing.T) {
+			globalHome, workspaceHome := t.TempDir(), t.TempDir()
+			t.Setenv("CODEX_HOME", globalHome)
+			if !missing {
+				// A directory produces a read error even when tests run as root.
+				if err := os.Mkdir(filepath.Join(globalHome, "config.toml"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stale := []byte("default_permissions = \"stale\"\n")
+			local := filepath.Join(workspaceHome, "config.toml")
+			if err := os.WriteFile(local, stale, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := ensureCodexHomeInheritedConfig(workspaceHome, "tomako-brand-fence", t.TempDir())
+			if err == nil || !strings.Contains(err.Error(), "read global permission config") {
+				t.Fatalf("must report unreadable authoritative permissions, got %v", err)
+			}
+			got, err := os.ReadFile(local)
+			if err != nil || string(got) != string(stale) {
+				t.Fatal("failed inheritance changed existing workspace config")
+			}
+		})
+	}
+}
+
 func TestEnsureCodexHomeInheritedConfigSyncsPermissionProfiles(t *testing.T) {
 	globalHome := t.TempDir()
 	perWorkspaceHome := filepath.Join(t.TempDir(), ".codex")

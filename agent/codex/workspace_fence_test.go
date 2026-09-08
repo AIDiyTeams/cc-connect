@@ -1,11 +1,32 @@
 package codex
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestFencedSessionStopsBeforeLaunchWhenGlobalPermissionsCannotBeRead(t *testing.T) {
+	globalHome := t.TempDir()
+	t.Setenv("CODEX_HOME", globalHome)
+	if err := os.Mkdir(filepath.Join(globalHome, "config.toml"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	agent := &Agent{workDir: t.TempDir(), backend: "app_server", appServerURL: "ws://127.0.0.1:1",
+		permissionsProfile: "tomako-brand-fence"}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // The broken implementation must not start a real CLI during this test.
+	session, err := agent.StartSession(ctx, "")
+	if err == nil && session != nil {
+		_ = session.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "read global permission config") {
+		t.Fatalf("must stop at permission inheritance, got %v", err)
+	}
+}
 
 func TestNewRejectsPermissionsProfileOnExecBackend(t *testing.T) {
 	_, err := New(map[string]any{
