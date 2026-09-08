@@ -54,8 +54,9 @@ func TestAppServerSession_PublicCommentaryDoesNotLeakReasoningOrEnterFinal(t *te
 	s := terminalTestSession()
 	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "progress", "phase": "commentary"})
 	s.handleAgentMessageDelta("progress", "我会先核对近期公开资料。")
-	if len(s.events) != 0 {
-		t.Fatal("commentary delta entered terminal text")
+	first := <-s.events
+	if first.Type != core.EventCommentary || first.ContentVersion != 1 || first.ContentDone {
+		t.Fatalf("expected immediate public snapshot, got %#v", first)
 	}
 	s.handleItemCompleted(map[string]any{"type": "reasoning", "id": "reason", "summary": []any{map[string]any{"text": "private reasoning"}}})
 	s.handleItemCompleted(map[string]any{"type": "agentMessage", "id": "progress", "phase": "commentary", "text": "我会先核对近期公开资料。"})

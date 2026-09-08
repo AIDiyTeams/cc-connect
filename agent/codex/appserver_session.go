@@ -201,10 +201,11 @@ type appServerSession struct {
 	// streamedItems tracks agentMessage items already delivered live via
 	// item/agentMessage/delta (itemID → accumulated streamed text), so
 	// item/completed does not re-emit or re-classify them as thinking.
-	streamedItems    map[string]string
-	lastStreamedItem string
-	commentaryItems  map[string]bool
-	finalItems       map[string]bool
+	streamedItems     map[string]string
+	lastStreamedItem  string
+	commentaryItems   map[string]bool
+	commentaryStreams map[string]*commentaryStream
+	finalItems        map[string]bool
 
 	runtimeMu             sync.RWMutex
 	usage                 *core.UsageReport
@@ -672,6 +673,7 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.streamedItems = nil
 	s.commentaryItems = nil
+	s.commentaryStreams = nil
 	s.finalItems = nil
 	s.lastStreamedItem = ""
 	s.stateMu.Unlock()
@@ -2122,6 +2124,7 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 			s.pendingMsgs = s.pendingMsgs[:0]
 			s.streamedItems = nil
 			s.commentaryItems = nil
+			s.commentaryStreams = nil
 			s.finalItems = nil
 			s.lastStreamedItem = ""
 			s.stateMu.Unlock()
@@ -2316,10 +2319,7 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 			return
 		}
 		if item["phase"] == "commentary" {
-			s.stateMu.Lock()
-			delete(s.commentaryItems, itemID)
-			s.stateMu.Unlock()
-			s.emit(core.Event{Type: core.EventCommentary, TraceID: itemID, Content: text})
+			s.emitCommentarySnapshot(itemID, text, true)
 			return
 		}
 		if len(s.outputSchema()) > 0 {
@@ -2713,6 +2713,13 @@ func (s *appServerSession) handleAgentMessageDelta(itemID, delta string) {
 	// completion claim private until the structured delivery acknowledgement;
 	// ordinary conversations continue to stream without this business gate.
 	if s.brandCoreAwaitingPublication() {
+		return
+	}
+	s.stateMu.Lock()
+	commentary := itemID != "" && s.commentaryItems[itemID]
+	s.stateMu.Unlock()
+	if commentary {
+		s.emitCommentarySnapshot(itemID, delta, false)
 		return
 	}
 	// Deltas do not carry the final/commentary phase. Structured tasks wait

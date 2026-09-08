@@ -1,0 +1,55 @@
+package codex
+
+import (
+	"time"
+
+	"github.com/chenhg5/cc-connect/core"
+)
+
+type commentaryStream struct {
+	text       string
+	version    int64
+	lastSentAt time.Time
+}
+
+// Only explicitly classified commentary reaches this path. Cumulative snapshots
+// let adapters replace one note rather than append tokens as separate stages.
+// A real delta triggers at most one checkpoint per second; completion always
+// flushes. There is no timer, translation call, or fabricated activity.
+func (s *appServerSession) emitCommentarySnapshot(itemID, text string, done bool) {
+	if itemID == "" {
+		if done {
+			s.emit(core.Event{Type: core.EventCommentary, Content: text})
+		}
+		return
+	}
+	s.stateMu.Lock()
+	if s.commentaryStreams == nil {
+		s.commentaryStreams = make(map[string]*commentaryStream)
+	}
+	stream := s.commentaryStreams[itemID]
+	if stream == nil {
+		stream = &commentaryStream{}
+		s.commentaryStreams[itemID] = stream
+	}
+	if done {
+		stream.text = text
+	} else {
+		stream.text += text
+	}
+	now := time.Now()
+	if !done && !stream.lastSentAt.IsZero() && now.Sub(stream.lastSentAt) < time.Second {
+		s.stateMu.Unlock()
+		return
+	}
+	stream.version++
+	stream.lastSentAt = now
+	event := core.Event{Type: core.EventCommentary, TraceID: itemID, Content: stream.text,
+		ContentVersion: stream.version, ContentDone: done}
+	if done {
+		delete(s.commentaryItems, itemID)
+		delete(s.commentaryStreams, itemID)
+	}
+	s.stateMu.Unlock()
+	s.emit(event)
+}

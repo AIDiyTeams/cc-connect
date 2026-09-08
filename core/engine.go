@@ -4972,6 +4972,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			if event.Type == EventThinking || event.Type == EventCommentary {
 				trace.Content = event.Content
+				trace.ContentVersion = event.ContentVersion
+				trace.ContentDone = event.ContentDone
 			}
 			if trace.Output == "" {
 				trace.Output = event.Content
@@ -5011,7 +5013,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventCommentary:
 			// Public progress must not enter the accumulated terminal answer.
 			// Bridge adapters already received the typed event above.
-			if _, reported := p.(AgentTraceReporter); !reported && strings.TrimSpace(event.Content) != "" {
+			if _, reported := p.(AgentTraceReporter); !reported && (event.ContentVersion == 0 || event.ContentDone) && strings.TrimSpace(event.Content) != "" {
 				sendWorkspace(p, replyCtx, event.Content)
 			}
 		case EventPlanUpdate:

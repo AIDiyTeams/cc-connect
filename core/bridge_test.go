@@ -19,6 +19,46 @@ import (
 
 // helpers ------------------------------------------------------------------
 
+func TestBridge_CommentarySnapshotsRequireChatCapability(t *testing.T) {
+	for _, tc := range []struct {
+		name, reply string
+		stream      bool
+	}{
+		{"supported", "cmsg-test", true}, {"legacy", "cmsg-test", false}, {"task", "llm-test", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bs, wsURL := startTestBridge(t, "")
+			conn := dialWS(t, wsURL, nil)
+			caps := []string{"text", "agent_trace"}
+			if tc.stream {
+				caps = append(caps, "commentary_stream")
+			}
+			register(t, conn, "java-backend", caps)
+			bp := bs.NewPlatform("proj")
+			rc := newBridgeReplyCtx(bs.getAdapter("java-backend"), "session", tc.reply)
+			for n := int64(1); n <= 2; n++ {
+				if err := bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{
+					Type: EventCommentary, TraceID: "note", Content: fmt.Sprintf("snapshot %d", n), ContentVersion: n, ContentDone: n == 2,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			first := readMsg(t, conn)
+			if tc.name == "supported" {
+				if first["content_version"] != float64(1) || first["content_done"] != false {
+					t.Fatalf("missing snapshot metadata: %#v", first)
+				}
+				last := readMsg(t, conn)
+				if last["content_done"] != true || last["trace_id"] != first["trace_id"] {
+					t.Fatalf("missing seal: %#v", last)
+				}
+			} else if first["content"] != "snapshot 2" || first["content_version"] != nil {
+				t.Fatalf("legacy consumer received intermediate snapshot: %#v", first)
+			}
+		})
+	}
+}
+
 func TestBridge_PublicProgressRetainsPhaseAndTurn(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
 	conn := dialWS(t, wsURL, nil)

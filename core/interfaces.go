@@ -36,7 +36,9 @@ type AgentTraceEvent struct {
 	DurationMs     int64
 	// Content carries reasoning or public commentary, identified by Type;
 	// it stays separate from Input/Output, which remain tool-result fields.
-	Content string
+	Content        string
+	ContentVersion int64
+	ContentDone    bool
 }
 
 // AgentStructuredResultReporter transports a validated dynamic-tool result to
