@@ -5,6 +5,12 @@
 
 ## Overview
 
+### Durable backend conversations
+
+Backend machine reply contexts (`cmsg-` chat messages and `llm-` tasks) keep their application-owned session identity across idle periods. `reset_on_idle_mins` applies to human chat channels, not these durable backend conversations. Otherwise an unchanged chat in the UI silently receives a fresh Agent transcript and simple follow-ups must rediscover their own history.
+
+The engine uses the existing `MachineReplyChannel` capability rather than interpreting user text or hardcoding a platform name. Explicit session creation, application-managed compaction, and process/workspace resource cleanup retain their existing behavior. Preserving a session does not itself keep its process alive, and does not reconstruct a transcript already reset by an older runtime.
+
 ### Native constrained output (optional runtime capability)
 
 Successful `register_ack` responses advertise `runtime_capabilities: ["output_schema_v1", "turn_budget_v1"]`.

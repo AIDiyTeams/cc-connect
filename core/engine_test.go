@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -15755,58 +15756,35 @@ func newIdleSessionForReset(t *testing.T, sm *SessionManager, key string) *Sessi
 	return session
 }
 
-func TestMaybeAutoResetSessionOnIdle_MachineChannelReportsTypedStatus(t *testing.T) {
-	e := newTestEngine()
-	e.SetResetOnIdle(30 * time.Minute)
-
-	sm := NewSessionManager(t.TempDir())
-	session := newIdleSessionForReset(t, sm, "user:sk-machine")
-
-	p := &stubMachineChannelPlatform{stubPlatformEngine: stubPlatformEngine{n: "bridge"}, withReporter: true}
-	msg := &Message{SessionKey: "sk-machine", ReplyCtx: "llm-task-1"}
-
-	rotated := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:sk-machine", session)
-	if rotated == nil {
-		t.Fatal("expected idle reset to fire for machine channel")
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if len(p.replies) != 0 {
-		t.Fatalf("machine channel must not receive reset prose replies: %#v", p.replies)
-	}
-	// No interactive state was set up, so the graceful-close notice does not
-	// fire; only the auto-reset notice rides the typed lane.
-	if len(p.turnStatus) != 1 {
-		t.Fatalf("turn_status reports = %d, want 1 (reset notice)", len(p.turnStatus))
-	}
-	if p.turnStatus[0].State != "session_reset" {
-		t.Fatalf("turn_status state = %q, want session_reset", p.turnStatus[0].State)
-	}
-	if p.turnStatus[0].Message == "" {
-		t.Fatal("turn_status message must carry the human-readable notice")
-	}
-}
-
-func TestMaybeAutoResetSessionOnIdle_MachineChannelSilentWithoutReporter(t *testing.T) {
-	e := newTestEngine()
-	e.SetResetOnIdle(30 * time.Minute)
-
-	sm := NewSessionManager(t.TempDir())
-	session := newIdleSessionForReset(t, sm, "user:sk-silent")
-
-	// withReporter=false: the typed lane is unsupported, and the machine
-	// channel must stay silent instead of delivering prose as a reply.
-	p := &stubMachineChannelPlatform{stubPlatformEngine: stubPlatformEngine{n: "bridge"}}
-	msg := &Message{SessionKey: "sk-silent", ReplyCtx: "llm-task-2"}
-
-	rotated := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:sk-silent", session)
-	if rotated == nil {
-		t.Fatal("expected idle reset to fire even without the typed reporter")
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if len(p.replies) != 0 || len(p.turnStatus) != 0 {
-		t.Fatalf("machine channel without reporter must stay silent: replies=%#v status=%#v", p.replies, p.turnStatus)
+// Backend session identity belongs to the application. Idle housekeeping must
+// not discard its Agent transcript while the user still sees the same chat.
+func TestMaybeAutoResetSessionOnIdle_MachineChannelPreservesConversation(t *testing.T) {
+	for _, reporter := range []bool{true, false} {
+		t.Run(fmt.Sprintf("reporter=%v", reporter), func(t *testing.T) {
+			e := newTestEngine()
+			e.SetResetOnIdle(30 * time.Minute)
+			sm := NewSessionManager(filepath.Join(t.TempDir(), "sessions.json"))
+			key := "user:sk-machine"
+			session := newIdleSessionForReset(t, sm, key)
+			beforeID := sm.ActiveSessionID(key)
+			beforeHistory := session.GetHistory(10)
+			p := &stubMachineChannelPlatform{stubPlatformEngine: stubPlatformEngine{n: "bridge"}, withReporter: reporter}
+			msg := &Message{SessionKey: key, ReplyCtx: "cmsg-follow-up"}
+			rotated := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:sk-machine", session)
+			if rotated != nil || sm.ActiveSessionID(key) != beforeID {
+				t.Fatal("idle follow-up must resume the same application conversation")
+			}
+			if session.GetAgentSessionID() != "agent-id" || !reflect.DeepEqual(session.GetHistory(10), beforeHistory) {
+				t.Fatal("idle follow-up must retain the Agent ID and conversation history")
+			}
+			if session.TryLock() {
+				t.Fatal("idle check must not release the active turn lock")
+			}
+			session.UnlockWithoutUpdate()
+			if len(p.replies) != 0 || len(p.turnStatus) != 0 {
+				t.Fatalf("preserved conversation must not announce a reset: replies=%#v status=%#v", p.replies, p.turnStatus)
+			}
+		})
 	}
 }
 
