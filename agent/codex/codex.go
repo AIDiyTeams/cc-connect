@@ -456,6 +456,9 @@ func (a *Agent) StartSessionWithRuntime(ctx context.Context, sessionID string, r
 			sharedSkillsDir = strings.TrimSpace(os.Getenv("SKILLS_OL_DIR"))
 		}
 		if err := ensureCodexHomeInheritedConfig(codexHome, permissionsProfile, sharedSkillsDir); err != nil {
+			if permissionsProfile != "" {
+				return nil, fmt.Errorf("codex: cannot start fenced session: %w", err)
+			}
 			slog.Warn("codex: failed to inherit global config into per-user codex_home", "codex_home", codexHome, "error", err)
 		}
 	}
