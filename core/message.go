@@ -208,6 +208,8 @@ type Message struct {
 // It is never inferred from prompt text and must only be populated by a trusted
 // platform adapter such as the authenticated Tomako Bridge connection.
 type SessionRuntime struct {
+	// Explicit delivery keeps downloaded reference inputs out of generated results.
+	MediaDeliveryMode  string   `json:"media_delivery_mode,omitempty"`
 	Scene              string   `json:"scene,omitempty"`
 	LogicalModel       string   `json:"logical_model,omitempty"`
 	GatewayModel       string   `json:"gateway_model,omitempty"`

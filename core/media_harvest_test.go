@@ -96,3 +96,25 @@ func TestExtractLocalImagePathsFromReply(t *testing.T) {
 		t.Fatalf("remote md image should remain: %q", stripped)
 	}
 }
+
+func TestExplicitMediaDeliveryDoesNotEchoDownloadedInput(t *testing.T) {
+	dir := t.TempDir()
+	before := snapshotMediaFiles(dir)
+	if err := os.WriteFile(filepath.Join(dir, "uploaded.png"), []byte("input-image"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := &stubMediaPlatform{}
+	e := &Engine{attachmentSendEnabled: true}
+	state := &interactiveState{workspaceDir: dir, mediaDeliveryMode: "explicit", mediaSnapshotBefore: before}
+	e.harvestAndSendTurnMedia(state, p, nil, "This is a tomato.")
+	if len(p.images) != 0 {
+		t.Fatalf("input leaked as a result: %v", p.images)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "poster.png"), []byte("generated-image"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	e.harvestAndSendTurnMedia(state, p, nil, "![Poster](poster.png)")
+	if len(p.images) != 1 || p.images[0].FileName != "poster.png" {
+		t.Fatalf("explicit deliverable lost: %v", p.images)
+	}
+}
