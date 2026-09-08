@@ -15632,7 +15632,7 @@ func TestProcessInteractiveEvents_ReportsFullThinkingToTraceReporter(t *testing.
 
 	thinking := "Deliberately long reasoning that must survive untruncated."
 	agentSession.events <- Event{TraceID: "t1", Type: EventThinking, Content: thinking}
-	agentSession.events <- Event{TraceID: "public-1", Type: EventCommentary, Content: "已找到近期公开案例。"}
+	agentSession.events <- Event{TraceID: "public-1", Type: EventCommentary, Content: "已找到近期公开案例。", ContentVersion: 2, ContentDone: true}
 	agentSession.events <- Event{TraceID: "t2", Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"}
 	agentSession.events <- Event{TraceID: "t2", Type: EventToolResult, ToolName: "Bash", ToolStatus: "success"}
 	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
@@ -15642,7 +15642,7 @@ func TestProcessInteractiveEvents_ReportsFullThinkingToTraceReporter(t *testing.
 	for _, tr := range p.traces {
 		switch tr.Type {
 		case EventCommentary:
-			sawCommentary = tr.Content == "已找到近期公开案例。"
+			sawCommentary = tr.Content == "已找到近期公开案例。" && tr.ContentVersion == 2 && tr.ContentDone
 		case EventThinking:
 			sawThinking = true
 			if tr.Content != thinking {
@@ -15656,6 +15656,32 @@ func TestProcessInteractiveEvents_ReportsFullThinkingToTraceReporter(t *testing.
 	}
 	if !sawThinking || !sawToolUse || !sawToolResult || !sawCommentary {
 		t.Fatalf("missing traces: thinking=%v toolUse=%v toolResult=%v (all=%#v)", sawThinking, sawToolUse, sawToolResult, p.traces)
+	}
+}
+
+func TestProcessInteractiveEvents_CommentarySnapshotsDoNotSpamLegacyPlatform(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:public-stream"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-public-stream")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "reply"}
+	e.interactiveStates[sessionKey] = state
+	agentSession.events <- Event{Type: EventCommentary, Content: "Checking", ContentVersion: 1}
+	agentSession.events <- Event{Type: EventCommentary, Content: "Checking sources.", ContentVersion: 2, ContentDone: true}
+	agentSession.events <- Event{Type: EventResult, Content: "Answer", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-public-stream", time.Now(), nil, nil, state.replyCtx)
+	var notes int
+	for _, sent := range p.getSent() {
+		if sent == "Checking" {
+			t.Fatal("legacy platform received an interim snapshot")
+		}
+		if sent == "Checking sources." {
+			notes++
+		}
+	}
+	if notes != 1 {
+		t.Fatalf("completed notes=%d, want 1; sent=%v", notes, p.getSent())
 	}
 }
 

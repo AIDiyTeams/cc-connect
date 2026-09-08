@@ -537,7 +537,12 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 		if !strings.HasPrefix(rc.ReplyCtx, "llm-") && !strings.HasPrefix(rc.ReplyCtx, "cmsg-") {
 			return nil
 		}
-		return bp.server.sendToAdapter(rc.Platform, map[string]any{
+		streamCommentary := event.Type == EventCommentary && event.ContentVersion > 0
+		streamSupported := strings.HasPrefix(rc.ReplyCtx, "cmsg-") && a.capabilities["commentary_stream"]
+		if streamCommentary && !streamSupported && !event.ContentDone {
+			return nil // Older adapters and task consumers retain one completed note.
+		}
+		payload := map[string]any{
 			"type":        "agent_thinking",
 			"session_key": rc.SessionKey,
 			"reply_ctx":   rc.ReplyCtx,
@@ -546,7 +551,12 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 			"phase":       string(event.Type),
 			"content":     truncateBridgeTrace(event.Content, 65536),
 			"occurred_at": now.Format(time.RFC3339Nano),
-		})
+		}
+		if streamCommentary && streamSupported {
+			payload["content_version"] = event.ContentVersion
+			payload["content_done"] = event.ContentDone
+		}
+		return bp.server.sendToAdapter(rc.Platform, payload)
 	}
 	// Chat receives only explicit public receipts. Raw tool arguments/results
 	// remain task-only, including when a public receipt accompanies them.
