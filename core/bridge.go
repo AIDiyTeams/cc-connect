@@ -548,9 +548,10 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 			"occurred_at": now.Format(time.RFC3339Nano),
 		})
 	}
-	// Redacted tool traces stay task-only; chat turns surface tool activity
-	// through the existing progress card instead.
-	if !strings.HasPrefix(rc.ReplyCtx, "llm-") {
+	// Chat receives only explicit public receipts. Raw tool arguments/results
+	// remain task-only, including when a public receipt accompanies them.
+	chatActivity := strings.HasPrefix(rc.ReplyCtx, "cmsg-") && event.PublicActivity != nil
+	if !strings.HasPrefix(rc.ReplyCtx, "llm-") && !chatActivity {
 		return nil
 	}
 	key := rc.ReplyCtx + ":" + event.TraceID
@@ -581,6 +582,14 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 	}
 	if event.Success != nil {
 		payload["success"] = *event.Success
+	}
+	if event.PublicActivity != nil {
+		payload["public_activity"] = event.PublicActivity
+	}
+	if chatActivity {
+		delete(payload, "input")
+		delete(payload, "output")
+		delete(payload, "tool_name")
 	}
 	return bp.server.sendToAdapter(rc.Platform, payload)
 }

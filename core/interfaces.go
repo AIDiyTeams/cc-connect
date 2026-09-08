@@ -24,15 +24,16 @@ type AgentTraceReporter interface {
 }
 
 type AgentTraceEvent struct {
-	TraceID    string
-	Type       EventType
-	ToolName   string
-	Input      string
-	Output     string
-	Status     string
-	ExitCode   *int
-	Success    *bool
-	DurationMs int64
+	PublicActivity *PublicActivity
+	TraceID        string
+	Type           EventType
+	ToolName       string
+	Input          string
+	Output         string
+	Status         string
+	ExitCode       *int
+	Success        *bool
+	DurationMs     int64
 	// Content carries reasoning or public commentary, identified by Type;
 	// it stays separate from Input/Output, which remain tool-result fields.
 	Content string

@@ -2253,7 +2253,8 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 	case "webSearch":
 		query, _ := item["query"].(string)
 		s.noteBrandWebSearchStarted(itemID)
-		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "WebSearch", ToolInput: query})
+		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "WebSearch", ToolInput: query,
+			PublicActivity: webPublicActivity(item, "running")})
 
 	case "dynamicToolCall":
 		tool, _ := item["tool"].(string)
@@ -2364,10 +2365,11 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		query, _ := item["query"].(string)
 		s.noteBrandWebSearchCompleted(itemID)
 		s.emit(core.Event{
-			Type:       core.EventToolResult,
-			TraceID:    itemID,
-			ToolName:   "WebSearch",
-			ToolResult: truncate(strings.TrimSpace(query), 500),
+			Type:           core.EventToolResult,
+			TraceID:        itemID,
+			ToolName:       "WebSearch",
+			ToolResult:     truncate(strings.TrimSpace(query), 500),
+			PublicActivity: webPublicActivity(item, "returned"),
 		})
 
 	case "dynamicToolCall":
