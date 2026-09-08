@@ -36,7 +36,7 @@ func TestAppServerSession_StructuredTurnOnlyReturnsNativeFinalAnswer(t *testing.
 		switch event.Type {
 		case core.EventText:
 			output.WriteString(event.Content)
-		case core.EventThinking:
+		case core.EventCommentary:
 			thinking++
 		case core.EventResult:
 			results++
@@ -47,6 +47,85 @@ func TestAppServerSession_StructuredTurnOnlyReturnsNativeFinalAnswer(t *testing.
 	}
 	if thinking != 2 || results != 1 {
 		t.Fatalf("thinking=%d results=%d, want 2 and 1", thinking, results)
+	}
+}
+
+func TestAppServerSession_PublicCommentaryDoesNotLeakReasoningOrEnterFinal(t *testing.T) {
+	s := terminalTestSession()
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "progress", "phase": "commentary"})
+	s.handleAgentMessageDelta("progress", "我会先核对近期公开资料。")
+	first := <-s.events
+	if first.Type != core.EventCommentary || first.ContentVersion != 1 || first.ContentDone {
+		t.Fatalf("expected immediate public snapshot, got %#v", first)
+	}
+	s.handleItemCompleted(map[string]any{"type": "reasoning", "id": "reason", "summary": []any{map[string]any{"text": "private reasoning"}}})
+	s.handleItemCompleted(map[string]any{"type": "agentMessage", "id": "progress", "phase": "commentary", "text": "我会先核对近期公开资料。"})
+	s.handleItemCompleted(map[string]any{"type": "agentMessage", "id": "final", "phase": "final_answer", "text": "最终建议"})
+	s.completeTurn("turn-1", nil)
+	var public, final string
+	for len(s.events) > 0 {
+		e := <-s.events
+		if e.Type == core.EventCommentary {
+			public += e.Content
+		}
+		if e.Type == core.EventText {
+			final += e.Content
+		}
+	}
+	if public != "我会先核对近期公开资料。" || final != "最终建议" {
+		t.Fatalf("public=%q final=%q", public, final)
+	}
+}
+
+func TestAppServerSession_LatePhaseDoesNotStreamCommentaryIntoFinal(t *testing.T) {
+	s := terminalTestSession()
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "progress"})
+	s.handleAgentMessageDelta("progress", "正在生成封面。")
+	if len(s.events) != 0 {
+		t.Fatal("unclassified delta entered final response before phase was known")
+	}
+	s.handleItemCompleted(map[string]any{"type": "agentMessage", "id": "progress", "phase": "commentary", "text": "正在生成封面。"})
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "answer", "phase": "final_answer"})
+	s.handleAgentMessageDelta("answer", "封面已保存。")
+	s.handleItemCompleted(map[string]any{"type": "agentMessage", "id": "answer", "phase": "final_answer", "text": "封面已保存。"})
+	s.completeTurn("turn-1", nil)
+	var progress, final string
+	for len(s.events) > 0 {
+		e := <-s.events
+		if e.Type == core.EventCommentary {
+			progress += e.Content
+		}
+		if e.Type == core.EventText {
+			final += e.Content
+		}
+	}
+	if progress != "正在生成封面。" || final != "封面已保存。" {
+		t.Fatalf("progress=%q final=%q", progress, final)
+	}
+}
+
+func TestAppServerSession_PhaseLessProviderUsesToolBoundaryWithoutFinalLeak(t *testing.T) {
+	s := terminalTestSession()
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "progress"})
+	s.handleAgentMessageDelta("progress", "正在核对资料。")
+	s.handleItemCompleted(map[string]any{"type": "agentMessage", "id": "progress", "text": "正在核对资料。"})
+	s.handleItemStarted(map[string]any{"type": "commandExecution", "id": "tool", "command": "read"})
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "answer"})
+	s.handleAgentMessageDelta("answer", "核对结果。")
+	s.handleItemCompleted(map[string]any{"type": "agentMessage", "id": "answer", "text": "核对结果。"})
+	s.completeTurn("turn-1", nil)
+	var progress, final string
+	for len(s.events) > 0 {
+		e := <-s.events
+		if e.Type == core.EventCommentary {
+			progress += e.Content
+		}
+		if e.Type == core.EventText {
+			final += e.Content
+		}
+	}
+	if progress != "正在核对资料。" || final != "核对结果。" {
+		t.Fatalf("progress=%q final=%q", progress, final)
 	}
 }
 

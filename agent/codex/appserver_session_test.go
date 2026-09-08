@@ -58,6 +58,41 @@ func TestBrandAnalysisRuntimeRegistersOnlyDedicatedDynamicTools(t *testing.T) {
 	}
 }
 
+func TestBrandCompletionRequiresAcceptedCoreBeforePublicSuccess(t *testing.T) {
+	s := &appServerSession{
+		events: make(chan core.Event, 8), currentTurn: "brand-turn",
+		runtime:     core.SessionRuntime{Scene: "brand_analysis"},
+		brandFlow:   brandAnalysisFlow{evidenceReady: true},
+		pendingMsgs: []string{"Core profile completed."},
+	}
+	s.handleAgentMessageDelta("reply", "Core profile completed.")
+	s.completeTurn("brand-turn", nil)
+	if len(s.events) != 1 {
+		t.Fatalf("unpersisted core leaked success/text events: %d", len(s.events))
+	}
+	if event := <-s.events; event.Type != core.EventError || event.Error == nil {
+		t.Fatalf("missing core was treated as success: %#v", event)
+	}
+}
+
+func TestAcceptedBrandCoreAndOrdinaryDiscussionCanComplete(t *testing.T) {
+	for _, scene := range []string{"brand_analysis", "studio_chat", "kol_creator_discovery"} {
+		s := &appServerSession{
+			events: make(chan core.Event, 8), currentTurn: "turn",
+			runtime:     core.SessionRuntime{Scene: scene},
+			brandFlow:   brandAnalysisFlow{corePublished: scene == "brand_analysis"},
+			pendingMsgs: []string{"Visible reply"},
+		}
+		s.completeTurn("turn", nil)
+		if text := <-s.events; text.Type != core.EventText || text.Content != "Visible reply" {
+			t.Fatalf("%s lost public reply: %#v", scene, text)
+		}
+		if result := <-s.events; result.Type != core.EventResult || !result.Done {
+			t.Fatalf("%s did not complete: %#v", scene, result)
+		}
+	}
+}
+
 func TestBrandAnalysisRuntimeIsAppliedBeforeDeferredThreadCreation(t *testing.T) {
 	s := &appServerSession{workDir: "/srv/tomako"}
 	s.alive.Store(true)
@@ -491,7 +526,7 @@ func TestAppServerSession_FencedTurnKeepsPermissionsProfile(t *testing.T) {
 	}
 	s.alive.Store(true)
 	schema := json.RawMessage(`{"type":"object","properties":{"decision":{"enum":["KEEP","REJECT"]}},"required":["decision"],"additionalProperties":false}`)
-	if err := s.SetSessionRuntime(core.SessionRuntime{OutputSchema: schema, ReasoningEffort: "high"}); err != nil {
+	if err := s.SetSessionRuntime(core.SessionRuntime{OutputSchema: schema, ReasoningEffort: "high", GatewayModel: "test-model", DeveloperInstructions: "Use the user's language for public findings."}); err != nil {
 		t.Fatal(err)
 	}
 	s.threadID.Store("thread-42")
@@ -512,6 +547,15 @@ func TestAppServerSession_FencedTurnKeepsPermissionsProfile(t *testing.T) {
 	}
 	if request.Method != "turn/start" {
 		t.Fatalf("method = %q, want turn/start", request.Method)
+	}
+	mode := request.Params["collaborationMode"].(map[string]any)
+	settings := mode["settings"].(map[string]any)
+	if mode["mode"] != "default" || settings["model"] != "test-model" || settings["reasoning_effort"] != "high" || !strings.Contains(settings["developer_instructions"].(string), "Use the user's language for public findings.") {
+		t.Fatalf("native developer policy/model/effort lost: %#v", mode)
+	}
+	input := request.Params["input"].([]any)[0].(map[string]any)
+	if input["text"] != "update my files" || request.Params["threadId"] != "thread-42" {
+		t.Fatal("developer policy contaminated user input or reset conversation history")
 	}
 	actualSchema, err := json.Marshal(request.Params["outputSchema"])
 	if err != nil {
@@ -719,6 +763,7 @@ func TestAppServerSession_HandleTurnPlanUpdatedEmitsAgentPlan(t *testing.T) {
 
 func TestAppServerSession_AgentMessageDeltaStreamsText(t *testing.T) {
 	s := &appServerSession{events: make(chan core.Event, 8)}
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "msg-1", "phase": "final_answer"})
 
 	s.handleNotification("item/agentMessage/delta",
 		json.RawMessage(`{"threadId":"t1","turnId":"u1","itemId":"msg-1","delta":"你好，"}`))
@@ -770,6 +815,7 @@ func TestAppServerSession_ToolEventsKeepStableTraceID(t *testing.T) {
 
 func TestAppServerSession_AgentMessageDeltaEmitsMissingTailOnCompletion(t *testing.T) {
 	s := &appServerSession{events: make(chan core.Event, 8)}
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "msg-1", "phase": "final_answer"})
 
 	s.handleNotification("item/agentMessage/delta",
 		json.RawMessage(`{"itemId":"msg-1","delta":"部分"}`))
@@ -788,6 +834,8 @@ func TestAppServerSession_AgentMessageDeltaEmitsMissingTailOnCompletion(t *testi
 
 func TestAppServerSession_AgentMessageSeparatorBetweenStreamedItems(t *testing.T) {
 	s := &appServerSession{events: make(chan core.Event, 8)}
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "msg-1", "phase": "final_answer"})
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "msg-2", "phase": "final_answer"})
 
 	s.handleNotification("item/agentMessage/delta",
 		json.RawMessage(`{"itemId":"msg-1","delta":"第一段"}`))

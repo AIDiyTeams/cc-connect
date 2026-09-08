@@ -223,10 +223,12 @@ type SessionRuntime struct {
 	TaskID             string   `json:"task_id,omitempty"`
 	ReasoningEffort    string   `json:"reasoning_effort,omitempty"`
 	TurnNo             int      `json:"turn_no,omitempty"`
-	// Scoped capabilities are control-plane data for the current turn. They are
-	// injected into the Agent prompt by the engine, never exposed to users.
+	// DeveloperInstructions is trusted application policy for this turn, not
+	// user input. Adapters must opt into native developer-role delivery.
+	DeveloperInstructions string `json:"developer_instructions,omitempty"`
 	// Machine authority is delivered on the trusted Bridge runtime lane so it
-	// never enters the model-visible prompt or persisted chat history.
+	// stays outside model-visible prompts for ToolAuthoritySession adapters.
+	// Other adapters retain the legacy prompt-marker compatibility path.
 	MachineCapabilityToken   string `json:"machine_capability_token,omitempty"`
 	ImageCapabilityToken     string `json:"image_capability_token,omitempty"`
 	TaskAuthorityEnvelopeB64 string `json:"task_authority_envelope_b64,omitempty"`
@@ -248,6 +250,7 @@ const (
 	EventError             EventType = "error"              // error occurred
 	EventPermissionRequest EventType = "permission_request" // agent requests permission via stdio protocol
 	EventThinking          EventType = "thinking"           // thinking/processing status
+	EventCommentary        EventType = "commentary"         // public progress, separate from reasoning and final text
 	EventPlanUpdate        EventType = "plan_update"        // agent-authored task plan/status update
 	EventLifecycle         EventType = "lifecycle"          // internal runtime stage timing
 	EventStructuredResult  EventType = "structured_result"  // trusted structured stage result
@@ -272,8 +275,11 @@ type UserQuestionOption struct {
 // Event represents a single piece of agent output streamed back to the engine.
 type Event struct {
 	Type                     EventType
-	TraceID                  string // stable tool/item id used to pair use and result audit events
+	TraceID                  string          // stable tool/item id used to pair use and result audit events
+	PublicActivity           *PublicActivity // optional typed, public execution receipt
 	Content                  string
+	ContentVersion           int64          // cumulative public commentary snapshot; zero is legacy completed prose
+	ContentDone              bool           // seals this commentary item, not the task
 	ToolName                 string         // populated for EventToolUse, EventPermissionRequest
 	ToolInput                string         // human-readable summary of tool input
 	ToolInputRaw             map[string]any // raw tool input (for EventPermissionRequest, used in allow response)

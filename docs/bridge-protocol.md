@@ -5,6 +5,12 @@
 
 ## Overview
 
+### Durable backend conversations
+
+Backend machine reply contexts (`cmsg-` chat messages and `llm-` tasks) keep their application-owned session identity across idle periods. `reset_on_idle_mins` applies to human chat channels, not these durable backend conversations. Otherwise an unchanged chat in the UI silently receives a fresh Agent transcript and simple follow-ups must rediscover their own history.
+
+The engine uses the existing `MachineReplyChannel` capability rather than interpreting user text or hardcoding a platform name. Explicit session creation, application-managed compaction, and process/workspace resource cleanup retain their existing behavior. Preserving a session does not itself keep its process alive, and does not reconstruct a transcript already reset by an older runtime.
+
 ### Native constrained output (optional runtime capability)
 
 Successful `register_ack` responses advertise `runtime_capabilities: ["output_schema_v1", "turn_budget_v1"]`.
@@ -31,6 +37,19 @@ chat defaults. Adapters requiring this budget must refuse an older Bridge.
 The Bridge Protocol allows **external platform adapters** written in any programming language to connect to cc-connect at runtime via WebSocket. This eliminates the requirement to write Go code and recompile the binary for every new platform integration.
 
 ### Architecture
+
+Task authority belongs in the authenticated `runtime` fields
+`machine_capability_token`, `image_capability_token`, `task_authority_envelope_b64`
+and `task_id`. It is never derived from user text. Exact matching legacy markers
+at the beginning of a prompt are removed before Skill routing. Sessions that
+implement `ToolAuthoritySession` pass authority to tools outside model prompts;
+other adapters retain the legacy marker fallback after routing.
+
+Codex app-server sessions bind a protected, initially empty `TOMAKO_TASK_ENV_FILE`
+before their first thread start/resume. Its path stays fixed; each turn atomically
+replaces the contents, and an unscoped turn clears old credentials. Closing the
+session removes the file. Re-resuming an already loaded Codex thread cannot add
+shell config, so delaying this binding until after history recovery is invalid.
 
 ```
 ┌──────────────────────────────────────────────────────┐
@@ -1049,3 +1068,18 @@ The protocol version is declared in the `register` message via `metadata.protoco
   }
 }
 ```
+
+### Structured result persistence receipt
+
+Adapters that persist `agent_structured_result` advertise `structured_result_ack`.
+Each result includes an opaque `ref_id`, `reply_ctx`, and `stage`. The adapter sends
+`{ "type": "structured_result_ack", "ref_id": "...", "reply_ctx": "...", "stage": "...", "status": "persisted" }`
+only after its synchronous domain transaction commits. Exceptions return `status: "rejected"`
+without private database details. A WebSocket write, a mismatched receipt, or a timeout
+never means persistence succeeded. Requests are scoped to the adapter connection and
+removed on completion or cancellation; the bridge waits up to 10 seconds for a receipt.
+Adapters without this capability are rejected before any structured result is sent.
+
+Rollout order: deploy the receipt-capable backend first, then the bridge. The backend
+continues accepting older result envelopes without `ref_id` during rollout. For rollback,
+revert the bridge before removing backend receipt support, using the deployment controller.

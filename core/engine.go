@@ -2940,6 +2940,13 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	if e.resetOnIdle <= 0 || session == nil {
 		return nil
 	}
+	// Backend conversations have an application-owned, durable session key.
+	// Rotating only the bridge transcript breaks follow-ups in the same visible
+	// conversation. The application owns new-session/compaction boundaries;
+	// process and workspace idle cleanup can still release runtime resources.
+	if machine, ok := p.(MachineReplyChannel); ok && machine.IsMachineReplyChannel(msg.ReplyCtx) {
+		return nil
+	}
 
 	hasBackend := session.GetAgentSessionID() != ""
 	hasHistory := len(session.GetHistory(1)) > 0
@@ -2973,32 +2980,11 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	hasAgent := hasState && state != nil && state.agentSession != nil && state.agentSession.Alive()
 	e.interactiveMu.Unlock()
 
-	// System lifecycle notices must never ride the business reply stream on
-	// backend machine channels: adapters parse replies as Agent deliverables,
-	// so a reset notice would be stored as the turn's output. Report through
-	// the typed turn_status lane instead; human chat platforms keep the
-	// courtesy replies.
-	notifySessionLifecycle := func(text string) {
-		if machine, ok := p.(MachineReplyChannel); ok && machine.IsMachineReplyChannel(msg.ReplyCtx) {
-			if reporter, ok := p.(TurnDispatchStatusReporter); ok {
-				if err := reporter.ReportTurnDispatchStatus(e.ctx, msg.ReplyCtx, TurnDispatchStatus{
-					State: "session_reset", Message: text,
-				}); err == nil {
-					return
-				}
-			}
-			// Machine channel without the typed reporter: stay silent rather
-			// than deliver system prose as a business reply.
-			return
-		}
-		e.reply(p, msg.ReplyCtx, text)
-	}
-
 	if hasAgent {
 		// Notify the user before the potentially long close. The close
 		// returns as soon as the process exits (usually seconds), but
 		// Stop hooks can take up to 120s.
-		notifySessionLifecycle(e.i18n.T(MsgSessionClosingGraceful))
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSessionClosingGraceful))
 	}
 
 	e.cleanupInteractiveState(interactiveKey)
@@ -3010,7 +2996,7 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 		return nil
 	}
 
-	notifySessionLifecycle(e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute)))
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute)))
 	return newSession
 }
 
@@ -4714,6 +4700,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		return e.renderOutgoingContentForWorkspace(state.platform, content, workspaceDir)
 	}
 	sendWorkspace := func(p Platform, replyCtx any, content string) {
+		// These are intermediate segment/progress fallbacks. On a machine
+		// channel plain Send is terminal; use previews/typed progress there.
+		if machine, ok := p.(MachineReplyChannel); ok && machine.IsMachineReplyChannel(replyCtx) {
+			return
+		}
 		e.sendForWorkspace(p, replyCtx, content, workspaceDir)
 	}
 	sendWorkspaceWithError := func(p Platform, replyCtx any, content string) error {
@@ -4939,9 +4930,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		// ThinkingMaxLen only govern messaging-platform rendering; user-facing
 		// visibility of thinking is gated by the backend adapter downstream.
 		if reporter, ok := p.(AgentTraceReporter); ok && (event.Type == EventToolUse || event.Type == EventToolResult || event.Type == EventLifecycle ||
-			(event.Type == EventThinking && !isEllipsisOnly(event.Content))) {
+			((event.Type == EventThinking || event.Type == EventCommentary) && !isEllipsisOnly(event.Content))) {
 			trace := AgentTraceEvent{TraceID: event.TraceID, Type: event.Type, ToolName: event.ToolName,
-				Input: event.ToolInput, Output: event.ToolResult, Status: event.ToolStatus,
+				PublicActivity: event.PublicActivity,
+				Input:          event.ToolInput, Output: event.ToolResult, Status: event.ToolStatus,
 				ExitCode: event.ToolExitCode, Success: event.ToolSuccess}
 			if event.Metadata != nil {
 				if duration, ok := event.Metadata["duration_ms"].(int64); ok {
@@ -4950,8 +4942,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					trace.DurationMs = int64(duration)
 				}
 			}
-			if event.Type == EventThinking {
+			if event.Type == EventThinking || event.Type == EventCommentary {
 				trace.Content = event.Content
+				trace.ContentVersion = event.ContentVersion
+				trace.ContentDone = event.ContentDone
 			}
 			if trace.Output == "" {
 				trace.Output = event.Content
@@ -4988,6 +4982,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 
 		switch event.Type {
+		case EventCommentary:
+			// Public progress must not enter the accumulated terminal answer.
+			// Bridge adapters already received the typed event above.
+			if _, reported := p.(AgentTraceReporter); !reported && (event.ContentVersion == 0 || event.ContentDone) && strings.TrimSpace(event.Content) != "" {
+				sendWorkspace(p, replyCtx, event.Content)
+			}
 		case EventPlanUpdate:
 			// The plan comes from Codex update_plan/turn/plan/updated. It is
 			// already user-facing and must replace any runtime inference.
@@ -5227,6 +5227,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
+			// Machine consumers receive tool results on the typed trace lane above.
+			// A standalone display fallback is a terminal reply on these channels,
+			// so it must never finish the task while the Agent is still working.
+			if machine, ok := p.(MachineReplyChannel); ok && machine.IsMachineReplyChannel(replyCtx) {
+				continue
+			}
 			if e.display.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
@@ -5551,10 +5557,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 
 			fullResponse := event.Content
+			machine, machineChannel := p.(MachineReplyChannel)
+			terminalAnswer := machineChannel && machine.IsMachineReplyChannel(replyCtx) && strings.TrimSpace(fullResponse) != ""
 			// When tool progress is hidden, segmentStart stays 0 and textParts
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
-			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
+			// Product consumers already have typed progress. Their durable reply
+			// must keep the terminal answer, not prepend earlier tool narration.
+			if !terminalAnswer && len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
 				fullResponse = strings.Join(textParts, "")
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
@@ -5824,7 +5834,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						return
 					}
 				}
-			} else if toolCount > 0 && segmentStart > 0 {
+			} else if !terminalAnswer && toolCount > 0 && segmentStart > 0 {
 				// When tool calls happened and prior text was already surfaced in segments,
 				// only send the unsent remainder. When tool progress is hidden, tool events don't surface
 				// side-channel messages and segmentStart stays 0, so keep normal finalize flow.
@@ -6323,6 +6333,15 @@ func sendWithSessionRuntime(
 	if runtime.TurnBudgetSeconds < 0 || runtime.TurnBudgetSeconds > 3600 {
 		return fmt.Errorf("invalid runtime turn budget: must be between 0 and 3600 seconds")
 	}
+	if err := ValidateDeveloperInstructions(runtime.DeveloperInstructions); err != nil {
+		return err
+	}
+	if runtime.DeveloperInstructions != "" {
+		capable, ok := session.(NativeDeveloperInstructionsSession)
+		if !ok || !capable.SupportsDeveloperInstructions() {
+			return fmt.Errorf("agent session does not support native developer_instructions")
+		}
+	}
 
 	if len(runtime.OutputSchema) > 0 {
 		if err := ValidateOutputSchema(runtime.OutputSchema); err != nil {
@@ -6341,7 +6360,23 @@ func sendWithSessionRuntime(
 			return fmt.Errorf("configure session runtime: %w", err)
 		}
 	}
+	if capable, ok := session.(ToolAuthoritySession); ok && capable.SupportsToolAuthority() {
+		return session.Send(stripMatchingRuntimeMarkers(runtime, prompt), images, files)
+	}
 	return session.Send(promptWithScopedRuntime(runtime, prompt), images, files)
+}
+
+func stripMatchingRuntimeMarkers(runtime SessionRuntime, prompt string) string {
+	for _, marker := range []struct{ name, value string }{
+		{"MACHINE_CAPABILITY_TOKEN", runtime.MachineCapabilityToken},
+		{"IMAGE_CAPABILITY_TOKEN", runtime.ImageCapabilityToken},
+		{"TASK_AUTHORITY_ENVELOPE_B64", runtime.TaskAuthorityEnvelopeB64},
+	} {
+		if value := strings.TrimSpace(marker.value); value != "" {
+			prompt = strings.TrimPrefix(prompt, "["+marker.name+"="+value+"]\n")
+		}
+	}
+	return prompt
 }
 
 func promptWithScopedRuntime(runtime SessionRuntime, prompt string) string {
@@ -6689,7 +6724,10 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			slog.Info("audit: command_executed",
 				"user_id", msg.UserID, "platform", msg.Platform,
 				"project", e.name, "command", skill.Name, "type", "skill")
-			e.executeSkill(p, msg, skill, args)
+			// Skill input is prose/structured context, not shell argv. Preserve
+			// JSON quotes and line breaks that splitCommandArgs would remove.
+			arguments := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), parts[0]))
+			e.executeSkill(p, msg, skill, []string{arguments})
 			return true
 		}
 		// Not a cc-connect command — notify user, then fall through to agent

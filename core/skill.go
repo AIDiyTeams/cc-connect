@@ -46,7 +46,18 @@ func (r *SkillRegistry) Resolve(name string) *Skill {
 	norm := normalizeCommandName(name)
 	for _, s := range r.ListAll() {
 		if normalizeCommandName(s.Name) == norm {
-			return s
+			// Cache discovery, not executable instructions. Deployments replace
+			// SKILL.md while the bridge stays up; each invocation must see that
+			// file's current contents without mutating shared cached pointers.
+			if s.Source == "" {
+				return s
+			}
+			raw, err := os.ReadFile(filepath.Join(s.Source, "SKILL.md"))
+			if err != nil {
+				slog.Warn("skill instructions unavailable", "skill", s.Name, "error", err)
+				return nil
+			}
+			return parseSkillMD(s.Name, string(raw), s.Source)
 		}
 	}
 	return nil
@@ -283,6 +294,9 @@ func BuildSkillInvocationPrompt(skill *Skill, args []string) string {
 		name = skill.Name
 	}
 	fmt.Fprintf(&sb, "## Skill: %s\n", name)
+	if skill.Source != "" {
+		fmt.Fprintf(&sb, "## Skill directory: %s\nResolve bundled files relative to this directory; these instructions are already loaded.\n", skill.Source)
+	}
 
 	if skill.Description != "" {
 		fmt.Fprintf(&sb, "## Description: %s\n", skill.Description)

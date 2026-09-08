@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -34,6 +35,27 @@ func TestPromptWithScopedRuntimeInjectsCapabilityMarkersOnce(t *testing.T) {
 	}
 	if again := promptWithScopedRuntime(runtime, got); again != got {
 		t.Fatalf("markers duplicated on replay: %q", again)
+	}
+}
+
+func TestSkillCommandPreservesMultilineStructuredContext(t *testing.T) {
+	root := t.TempDir()
+	writeSkillFile(t, filepath.Join(root, "context-check", "SKILL.md"), "Read current state")
+	p := &stubPlatformEngine{n: "plain"}
+	agentSession := newResultAgentSession("ok")
+	e := NewEngine("test", &resultAgent{session: agentSession}, []Platform{p}, "", LangEnglish)
+	defer e.cancel()
+	e.skills.SetDirs([]string{root})
+	arguments := "[Current state]\n{\"notes\":\"two  spaces\",\"revision\":14}\n\n[User request]\nKeep \"quoted words\" and line breaks."
+	msg := &Message{SessionKey: "plain:user1", UserID: "user1", Content: "/context-check " + arguments, ReplyCtx: "ctx"}
+	if !e.handleCommand(p, msg, msg.Content) {
+		t.Fatal("Skill was not routed")
+	}
+	if !strings.Contains(msg.Content, "## User Arguments:\n"+arguments+"\n\n") {
+		t.Fatal("Skill routing rewrote structured state or user text")
+	}
+	if got := waitForSentText(t, p); got != "ok" {
+		t.Fatalf("reply = %q", got)
 	}
 }
 func (a *stubAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) { return nil, nil }
@@ -1619,6 +1641,50 @@ func TestProcessInteractiveEvents_ToolMessagesDisabledSuppressesToolProgressOnly
 	}
 	if sent[len(sent)-1] != "done" {
 		t.Fatalf("final message = %q, want done", sent[len(sent)-1])
+	}
+}
+
+func TestProcessInteractiveEvents_MachineReplyKeepsFinalAnswerWithoutToolNarration(t *testing.T) {
+	p := &stubMachineChannelPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ToolMessages: false})
+	sessionKey := "test:durable-answer"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-1"}
+	e.interactiveStates[sessionKey] = state
+	agentSession.events <- Event{Type: EventText, Content: "I will inspect /private/tool/path.\n\n"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "private command"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "saved"}
+	agentSession.events <- Event{Type: EventText, Content: "Saved Marc's note. Other fields are unchanged."}
+	agentSession.events <- Event{Type: EventResult, Content: "Saved Marc's note. Other fields are unchanged.", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.replies) != 1 || p.replies[0] != "Saved Marc's note. Other fields are unchanged." {
+		t.Fatalf("durable reply = %#v, want only terminal answer", p.replies)
+	}
+}
+
+func TestProcessInteractiveEvents_MachineToolResultDoesNotCompleteTaskWithDisplayEnabled(t *testing.T) {
+	p := &stubMachineChannelPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ToolMessages: true, ToolMaxLen: 500})
+	sessionKey := "test:durable-answer"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-1"}
+	e.interactiveStates[sessionKey] = state
+	agentSession.events <- Event{Type: EventText, Content: "I will inspect /private/tool/path.\n\n"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "private command"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "{\"source\":\"public_reddit_atom_feeds\"}", ToolStatus: "completed"}
+	agentSession.events <- Event{Type: EventText, Content: "Saved Marc's note. Other fields are unchanged."}
+	agentSession.events <- Event{Type: EventResult, Content: "Saved Marc's note. Other fields are unchanged.", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.replies) != 1 || p.replies[0] != "Saved Marc's note. Other fields are unchanged." {
+		t.Fatalf("durable reply = %#v, want only terminal answer", p.replies)
 	}
 }
 
@@ -15567,14 +15633,17 @@ func TestProcessInteractiveEvents_ReportsFullThinkingToTraceReporter(t *testing.
 
 	thinking := "Deliberately long reasoning that must survive untruncated."
 	agentSession.events <- Event{TraceID: "t1", Type: EventThinking, Content: thinking}
+	agentSession.events <- Event{TraceID: "public-1", Type: EventCommentary, Content: "已找到近期公开案例。", ContentVersion: 2, ContentDone: true}
 	agentSession.events <- Event{TraceID: "t2", Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"}
 	agentSession.events <- Event{TraceID: "t2", Type: EventToolResult, ToolName: "Bash", ToolStatus: "success"}
 	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
 	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-trace", time.Now(), nil, nil, state.replyCtx)
 
-	var sawThinking, sawToolUse, sawToolResult bool
+	var sawThinking, sawToolUse, sawToolResult, sawCommentary bool
 	for _, tr := range p.traces {
 		switch tr.Type {
+		case EventCommentary:
+			sawCommentary = tr.Content == "已找到近期公开案例。" && tr.ContentVersion == 2 && tr.ContentDone
 		case EventThinking:
 			sawThinking = true
 			if tr.Content != thinking {
@@ -15586,8 +15655,34 @@ func TestProcessInteractiveEvents_ReportsFullThinkingToTraceReporter(t *testing.
 			sawToolResult = true
 		}
 	}
-	if !sawThinking || !sawToolUse || !sawToolResult {
+	if !sawThinking || !sawToolUse || !sawToolResult || !sawCommentary {
 		t.Fatalf("missing traces: thinking=%v toolUse=%v toolResult=%v (all=%#v)", sawThinking, sawToolUse, sawToolResult, p.traces)
+	}
+}
+
+func TestProcessInteractiveEvents_CommentarySnapshotsDoNotSpamLegacyPlatform(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:public-stream"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-public-stream")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "reply"}
+	e.interactiveStates[sessionKey] = state
+	agentSession.events <- Event{Type: EventCommentary, Content: "Checking", ContentVersion: 1}
+	agentSession.events <- Event{Type: EventCommentary, Content: "Checking sources.", ContentVersion: 2, ContentDone: true}
+	agentSession.events <- Event{Type: EventResult, Content: "Answer", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-public-stream", time.Now(), nil, nil, state.replyCtx)
+	var notes int
+	for _, sent := range p.getSent() {
+		if sent == "Checking" {
+			t.Fatal("legacy platform received an interim snapshot")
+		}
+		if sent == "Checking sources." {
+			notes++
+		}
+	}
+	if notes != 1 {
+		t.Fatalf("completed notes=%d, want 1; sent=%v", notes, p.getSent())
 	}
 }
 
@@ -15619,8 +15714,8 @@ func TestProcessInteractiveEvents_SkipsEllipsisThinkingInTraceReporter(t *testin
 
 type stubMachineChannelPlatform struct {
 	stubPlatformEngine
-	replies     []string
-	turnStatus  []TurnDispatchStatus
+	replies      []string
+	turnStatus   []TurnDispatchStatus
 	withReporter bool
 }
 
@@ -15661,58 +15756,35 @@ func newIdleSessionForReset(t *testing.T, sm *SessionManager, key string) *Sessi
 	return session
 }
 
-func TestMaybeAutoResetSessionOnIdle_MachineChannelReportsTypedStatus(t *testing.T) {
-	e := newTestEngine()
-	e.SetResetOnIdle(30 * time.Minute)
-
-	sm := NewSessionManager(t.TempDir())
-	session := newIdleSessionForReset(t, sm, "user:sk-machine")
-
-	p := &stubMachineChannelPlatform{stubPlatformEngine: stubPlatformEngine{n: "bridge"}, withReporter: true}
-	msg := &Message{SessionKey: "sk-machine", ReplyCtx: "llm-task-1"}
-
-	rotated := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:sk-machine", session)
-	if rotated == nil {
-		t.Fatal("expected idle reset to fire for machine channel")
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if len(p.replies) != 0 {
-		t.Fatalf("machine channel must not receive reset prose replies: %#v", p.replies)
-	}
-	// No interactive state was set up, so the graceful-close notice does not
-	// fire; only the auto-reset notice rides the typed lane.
-	if len(p.turnStatus) != 1 {
-		t.Fatalf("turn_status reports = %d, want 1 (reset notice)", len(p.turnStatus))
-	}
-	if p.turnStatus[0].State != "session_reset" {
-		t.Fatalf("turn_status state = %q, want session_reset", p.turnStatus[0].State)
-	}
-	if p.turnStatus[0].Message == "" {
-		t.Fatal("turn_status message must carry the human-readable notice")
-	}
-}
-
-func TestMaybeAutoResetSessionOnIdle_MachineChannelSilentWithoutReporter(t *testing.T) {
-	e := newTestEngine()
-	e.SetResetOnIdle(30 * time.Minute)
-
-	sm := NewSessionManager(t.TempDir())
-	session := newIdleSessionForReset(t, sm, "user:sk-silent")
-
-	// withReporter=false: the typed lane is unsupported, and the machine
-	// channel must stay silent instead of delivering prose as a reply.
-	p := &stubMachineChannelPlatform{stubPlatformEngine: stubPlatformEngine{n: "bridge"}}
-	msg := &Message{SessionKey: "sk-silent", ReplyCtx: "llm-task-2"}
-
-	rotated := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:sk-silent", session)
-	if rotated == nil {
-		t.Fatal("expected idle reset to fire even without the typed reporter")
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if len(p.replies) != 0 || len(p.turnStatus) != 0 {
-		t.Fatalf("machine channel without reporter must stay silent: replies=%#v status=%#v", p.replies, p.turnStatus)
+// Backend session identity belongs to the application. Idle housekeeping must
+// not discard its Agent transcript while the user still sees the same chat.
+func TestMaybeAutoResetSessionOnIdle_MachineChannelPreservesConversation(t *testing.T) {
+	for _, reporter := range []bool{true, false} {
+		t.Run(fmt.Sprintf("reporter=%v", reporter), func(t *testing.T) {
+			e := newTestEngine()
+			e.SetResetOnIdle(30 * time.Minute)
+			sm := NewSessionManager(filepath.Join(t.TempDir(), "sessions.json"))
+			key := "user:sk-machine"
+			session := newIdleSessionForReset(t, sm, key)
+			beforeID := sm.ActiveSessionID(key)
+			beforeHistory := session.GetHistory(10)
+			p := &stubMachineChannelPlatform{stubPlatformEngine: stubPlatformEngine{n: "bridge"}, withReporter: reporter}
+			msg := &Message{SessionKey: key, ReplyCtx: "cmsg-follow-up"}
+			rotated := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:sk-machine", session)
+			if rotated != nil || sm.ActiveSessionID(key) != beforeID {
+				t.Fatal("idle follow-up must resume the same application conversation")
+			}
+			if session.GetAgentSessionID() != "agent-id" || !reflect.DeepEqual(session.GetHistory(10), beforeHistory) {
+				t.Fatal("idle follow-up must retain the Agent ID and conversation history")
+			}
+			if session.TryLock() {
+				t.Fatal("idle check must not release the active turn lock")
+			}
+			session.UnlockWithoutUpdate()
+			if len(p.replies) != 0 || len(p.turnStatus) != 0 {
+				t.Fatalf("preserved conversation must not announce a reset: replies=%#v status=%#v", p.replies, p.turnStatus)
+			}
+		})
 	}
 }
 

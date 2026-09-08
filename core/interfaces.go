@@ -24,18 +24,21 @@ type AgentTraceReporter interface {
 }
 
 type AgentTraceEvent struct {
-	TraceID    string
-	Type       EventType
-	ToolName   string
-	Input      string
-	Output     string
-	Status     string
-	ExitCode   *int
-	Success    *bool
-	DurationMs int64
-	// Content carries full model thinking text for EventThinking reports;
+	PublicActivity *PublicActivity
+	TraceID        string
+	Type           EventType
+	ToolName       string
+	Input          string
+	Output         string
+	Status         string
+	ExitCode       *int
+	Success        *bool
+	DurationMs     int64
+	// Content carries reasoning or public commentary, identified by Type;
 	// it stays separate from Input/Output, which remain tool-result fields.
-	Content string
+	Content        string
+	ContentVersion int64
+	ContentDone    bool
 }
 
 // AgentStructuredResultReporter transports a validated dynamic-tool result to
@@ -84,10 +87,10 @@ type InteractionResponseStatus struct {
 }
 
 // MachineReplyChannel is implemented by platforms whose reply contexts are
-// backend machine channels (llm- tasks, cmsg- studio chat): adapters parse
-// replies as Agent deliverables, so system lifecycle notices (session auto
-// reset, graceful close) must ride the typed turn_status lane instead of the
-// business reply stream.
+// backend machine channels (llm- tasks, cmsg- studio chat). The application
+// owns their durable conversation identity, so idle housekeeping must not
+// rotate their transcript. Adapters parse replies as Agent deliverables;
+// lifecycle status belongs on the typed lane, not the business reply stream.
 type MachineReplyChannel interface {
 	IsMachineReplyChannel(replyCtx any) bool
 }
@@ -362,9 +365,10 @@ type StreamCompleter interface {
 }
 
 // StreamPreviewTuner is an optional interface for platforms that want tighter
-// streaming flush intervals (e.g. bridge adapters declaring token_stream).
+// streaming flush intervals and length (e.g. adapters declaring token_stream).
+// maxChars=0 is unlimited; a negative value retains the configured limit.
 type StreamPreviewTuner interface {
-	StreamPreviewOverrides() (intervalMs, minDeltaChars int, ok bool)
+	StreamPreviewOverrides() (intervalMs, minDeltaChars, maxChars int, ok bool)
 }
 
 // StatusFooterSender is an optional Platform extension for sending a reply
@@ -530,10 +534,24 @@ type SessionRuntimeConfigurer interface {
 	SetSessionRuntime(runtime SessionRuntime) error
 }
 
+// ToolAuthoritySession delivers the trusted runtime's scoped credentials to
+// tools without embedding them in model-visible prompts or conversation history.
+type ToolAuthoritySession interface {
+	SessionRuntimeConfigurer
+	SupportsToolAuthority() bool
+}
+
 // NativeOutputSchemaSession opts into enforcing Runtime.OutputSchema in the
 // model runtime, rather than treating the schema as instructions in the prompt.
 type NativeOutputSchemaSession interface {
 	SupportsOutputSchema() bool
+}
+
+// NativeDeveloperInstructionsSession keeps trusted application instructions
+// separate from user text, including when a conversation resumes.
+type NativeDeveloperInstructionsSession interface {
+	SessionRuntimeConfigurer
+	SupportsDeveloperInstructions() bool
 }
 
 // PermissionResult represents the user's decision on a permission request.
