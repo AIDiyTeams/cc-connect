@@ -14,7 +14,10 @@ func TestReasoningCapabilityIsBoundToKnownModelAndRequestedEffort(t *testing.T) 
 		{"tomako/gpt-5.6-sol", "high", true},
 		{"gpt-5.6-sol", "medium", true},
 		{"tomako/gpt-5.6-sol", "", false},
-		{"tomako/deepseek-v4-flash", "high", false},
+		{"tomako/deepseek-v4-flash", "high", true},
+		{"deepseek-v4-flash", "medium", true},
+		{"tomako/deepseek-v4-flash", "", false},
+		{"other/deepseek-v4-flash", "high", false},
 		{"other/gpt-5.6-sol", "high", false},
 		{"unknown", "high", false},
 	} {
@@ -35,7 +38,7 @@ func TestReasoningCapabilityIsBoundToKnownModelAndRequestedEffort(t *testing.T) 
 }
 
 func TestAppServerReasoningCapabilityChangesDoNotReuseThreadOverrides(t *testing.T) {
-	s := &appServerSession{model: "tomako/deepseek-v4-flash", effort: "medium"}
+	s := &appServerSession{model: "tomako/unknown-model", effort: "medium"}
 	s.alive.Store(true)
 	s.threadID.Store("previous-default-thread")
 	if err := s.SetSessionRuntime(core.SessionRuntime{GatewayModel: "tomako/gpt-5.6-sol", ReasoningEffort: "high"}); err != nil {
@@ -45,7 +48,7 @@ func TestAppServerReasoningCapabilityChangesDoNotReuseThreadOverrides(t *testing
 		t.Fatal("known model did not acquire its reasoning capability on a new thread")
 	}
 	s.threadID.Store("reasoning-thread")
-	if err := s.SetSessionRuntime(core.SessionRuntime{GatewayModel: "tomako/deepseek-v4-flash", ReasoningEffort: "medium"}); err != nil {
+	if err := s.SetSessionRuntime(core.SessionRuntime{GatewayModel: "tomako/unknown-model", ReasoningEffort: "medium"}); err != nil {
 		t.Fatal(err)
 	}
 	if s.CurrentSessionID() != "" {
