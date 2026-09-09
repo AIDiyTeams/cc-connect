@@ -107,6 +107,7 @@ func TestExplicitMediaDeliveryDoesNotEchoDownloadedInput(t *testing.T) {
 	e := &Engine{attachmentSendEnabled: true}
 	state := &interactiveState{workspaceDir: dir, mediaDeliveryMode: "explicit", mediaSnapshotBefore: before}
 	e.harvestAndSendTurnMedia(state, p, nil, "This is a tomato.")
+	e.harvestAndSendTurnMedia(state, p, nil, "The attachment is `uploaded.png`. Let me view it.\nThis is a tomato.")
 	if len(p.images) != 0 {
 		t.Fatalf("input leaked as a result: %v", p.images)
 	}
