@@ -95,7 +95,40 @@ type bridgeReplyCtx struct {
 	// Preview handles are shallow copies of this context; keep the usage state
 	// shared so completion frames emitted through a preview handle carry the
 	// same usage captured on the original reply context.
-	usage *bridgeTokenUsage `json:"-"`
+	usage          *bridgeTokenUsage     `json:"-"`
+	responseSource *bridgeResponseSource `json:"-"`
+}
+
+// Shared with preview handles. Once unclassified text enters a response, it
+// cannot be promoted to a native final answer by a later classified chunk.
+type bridgeResponseSource struct {
+	mu           sync.Mutex
+	unclassified bool
+	native       bool
+}
+
+func (rc *bridgeReplyCtx) ObserveResponseSource(source string) {
+	if rc.responseSource == nil {
+		rc.responseSource = &bridgeResponseSource{}
+	}
+	rc.responseSource.mu.Lock()
+	defer rc.responseSource.mu.Unlock()
+	if source == "native_final" {
+		rc.responseSource.native = true
+	} else {
+		rc.responseSource.unclassified = true
+	}
+}
+
+func attachResponseSource(payload map[string]any, rc *bridgeReplyCtx) {
+	if rc.responseSource == nil {
+		return
+	}
+	rc.responseSource.mu.Lock()
+	defer rc.responseSource.mu.Unlock()
+	if rc.responseSource.native && !rc.responseSource.unclassified {
+		payload["response_source"] = "native_final"
+	}
 }
 
 type bridgeTokenUsage struct {
@@ -692,6 +725,7 @@ func (bp *BridgePlatform) Reply(ctx context.Context, replyCtx any, content strin
 		}
 	}
 	attachBridgeStatus(payload, rc)
+	attachResponseSource(payload, rc)
 	return bp.server.sendToAdapter(rc.Platform, payload)
 }
 
@@ -816,8 +850,9 @@ func (bp *BridgePlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
 
 func newBridgeReplyCtx(a *bridgeAdapter, sessionKey, replyCtx string) *bridgeReplyCtx {
 	rc := &bridgeReplyCtx{
-		SessionKey: sessionKey,
-		ReplyCtx:   replyCtx,
+		responseSource: &bridgeResponseSource{},
+		SessionKey:     sessionKey,
+		ReplyCtx:       replyCtx,
 	}
 	if a == nil {
 		return rc
@@ -902,6 +937,10 @@ func cloneBridgeReplyCtx(rc *bridgeReplyCtx) *bridgeReplyCtx {
 		rc.usage = &bridgeTokenUsage{}
 	}
 	out := *rc
+	if rc.responseSource == nil {
+		rc.responseSource = &bridgeResponseSource{}
+	}
+	out.responseSource = rc.responseSource
 	return &out
 }
 
@@ -1144,6 +1183,7 @@ func (bp *BridgePlatform) sendReplyStream(rc *bridgeReplyCtx, content string, do
 	if done {
 		attachBridgeStatus(payload, rc)
 	}
+	attachResponseSource(payload, rc)
 	if err := bp.server.sendToAdapter(rc.Platform, payload); err != nil {
 		return err
 	}

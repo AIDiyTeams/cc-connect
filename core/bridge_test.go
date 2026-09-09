@@ -1727,3 +1727,27 @@ func TestNormalizeSessionRuntime_WhitelistsModalitiesAndBoundsOpaqueValues(t *te
 		t.Fatalf("control-character secret was retained: %#v", invalid)
 	}
 }
+
+func TestBridgeReplySourceRequiresEveryChunkToBeNativeAndSurvivesPreviewClone(t *testing.T) {
+	rc := newBridgeReplyCtx(nil, "session", "cmsg-test")
+	preview := cloneBridgeReplyCtx(rc)
+	rc.ObserveResponseSource("native_final")
+	payload := map[string]any{}
+	attachResponseSource(payload, preview)
+	if payload["response_source"] != "native_final" {
+		t.Fatalf("preview lost provenance: %#v", payload)
+	}
+	rc.ObserveResponseSource("")
+	rc.ObserveResponseSource("native_final")
+	payload = map[string]any{}
+	attachResponseSource(payload, preview)
+	if _, ok := payload["response_source"]; ok {
+		t.Fatal("mixed text was promoted to native final")
+	}
+	fresh := newBridgeReplyCtx(nil, "session", "cmsg-next")
+	payload = map[string]any{}
+	attachResponseSource(payload, fresh)
+	if len(payload) != 0 {
+		t.Fatal("provenance leaked to another turn")
+	}
+}
