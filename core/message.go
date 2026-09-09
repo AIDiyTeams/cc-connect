@@ -276,7 +276,9 @@ type UserQuestionOption struct {
 
 // Event represents a single piece of agent output streamed back to the engine.
 type Event struct {
-	Type                     EventType
+	Type EventType
+	// ResponseSource is transport provenance, set by an adapter from native phase metadata.
+	ResponseSource           string
 	TraceID                  string          // stable tool/item id used to pair use and result audit events
 	PublicActivity           *PublicActivity // optional typed, public execution receipt
 	Content                  string

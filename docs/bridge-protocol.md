@@ -1092,3 +1092,16 @@ Adapters without this capability are rejected before any structured result is se
 Rollout order: deploy the receipt-capable backend first, then the bridge. The backend
 continues accepting older result envelopes without `ref_id` during rollout. For rollback,
 revert the bridge before removing backend receipt support, using the deployment controller.
+
+### Native final-answer provenance
+
+`reply` and `reply_stream` may carry `response_source: "native_final"`.
+The adapter sets this from explicit native final-answer phases, never from model
+text. The engine certifies the accumulated response only when every text chunk
+has that provenance; a phase-less chunk permanently removes certification for
+that response. Preview and completion frames share the same state. Commentary,
+reasoning and tool traces remain separate events. Old adapters omit the field.
+
+Consumers may accept certified final prose without an application-specific text
+envelope. This only establishes the reply's source: structured mutation schemas,
+permissions, version checks and execution receipts still apply independently.

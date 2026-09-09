@@ -200,3 +200,33 @@ func TestAppServerSession_StaleTurnOutcomeCannotEndCurrentTurn(t *testing.T) {
 		t.Fatal("stale completion/error ended the current turn")
 	}
 }
+
+func TestAppServerSession_FinalProvenanceSurvivesDeltaAndCompletionTail(t *testing.T) {
+	s := terminalTestSession()
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "answer", "phase": "final_answer"})
+	s.handleAgentMessageDelta("answer", "However, ")
+	s.handleItemCompleted(map[string]any{"type": "agentMessage", "id": "answer", "text": "However, here is the comparison."})
+	s.completeTurn("turn-1", nil)
+	var final string
+	for len(s.events) > 0 {
+		e := <-s.events
+		if e.Type == core.EventText {
+			if e.ResponseSource != "native_final" {
+				t.Fatalf("lost native phase: %#v", e)
+			}
+			final += e.Content
+		}
+	}
+	if final != "However, here is the comparison." {
+		t.Fatalf("duplicated or lost text: %q", final)
+	}
+	s = terminalTestSession()
+	s.handleItemCompleted(map[string]any{"type": "agentMessage", "id": "legacy", "text": "Unclassified final"})
+	s.completeTurn("turn-1", nil)
+	for len(s.events) > 0 {
+		e := <-s.events
+		if e.Type == core.EventText && e.ResponseSource != "" {
+			t.Fatal("phase-less text was certified")
+		}
+	}
+}

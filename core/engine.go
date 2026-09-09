@@ -5283,6 +5283,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventText:
 			if event.Content != "" && !isEllipsisOnly(event.Content) {
+				if receiver, ok := replyCtx.(interface{ ObserveResponseSource(string) }); ok {
+					receiver.ObserveResponseSource(event.ResponseSource)
+				}
 				// Pre-compute silentHold transition including this chunk so the
 				// rich-card path doesn't leak a preview that gets recalled at
 				// end-of-stream when the text resolves to bare NO_REPLY (Lark
