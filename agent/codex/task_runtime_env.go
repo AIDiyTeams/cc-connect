@@ -15,8 +15,9 @@ var taskRuntimeIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}
 func updateTaskRuntimeEnv(existingPath string, runtime core.SessionRuntime) (string, error) {
 	token := strings.TrimSpace(runtime.MachineCapabilityToken)
 	imageToken := strings.TrimSpace(runtime.ImageCapabilityToken)
+	documentToken := strings.TrimSpace(runtime.DocumentCapabilityToken)
 	envelope := strings.TrimSpace(runtime.TaskAuthorityEnvelopeB64)
-	if token == "" && imageToken == "" && envelope == "" {
+	if token == "" && imageToken == "" && documentToken == "" && envelope == "" {
 		if existingPath == "" {
 			return "", nil
 		}
@@ -36,6 +37,7 @@ func updateTaskRuntimeEnv(existingPath string, runtime core.SessionRuntime) (str
 	for label, value := range map[string]string{
 		"machine capability":      token,
 		"image capability":        imageToken,
+		"document capability":     documentToken,
 		"task authority envelope": envelope,
 	} {
 		if strings.ContainsAny(value, "\r\n\x00") {
@@ -51,7 +53,7 @@ func updateTaskRuntimeEnv(existingPath string, runtime core.SessionRuntime) (str
 	if token == "" && (runtime.WorkspaceID == "" || runtime.BrandID == "") {
 		return existingPath, fmt.Errorf("image authority requires workspace and brand scope")
 	}
-	content := strings.Join([]string{
+	lines := []string{
 		"export MACHINE_CAPABILITY_TOKEN=" + shellSingleQuote(token),
 		"export IMAGE_CAPABILITY_TOKEN=" + shellSingleQuote(imageToken),
 		"export TOMAKO_TASK_AUTHORITY_ENVELOPE_B64=" + shellSingleQuote(envelope),
@@ -60,8 +62,11 @@ func updateTaskRuntimeEnv(existingPath string, runtime core.SessionRuntime) (str
 		"export TOMAKO_WORKSPACE_ID=" + shellSingleQuote(runtime.WorkspaceID),
 		"export TOMAKO_BRAND_ID=" + shellSingleQuote(runtime.BrandID),
 		"",
-	}, "\n")
-	return writeTaskRuntimeEnv(existingPath, content)
+	}
+	if documentToken != "" {
+		lines = append(lines, "export DOCUMENT_CAPABILITY_TOKEN="+shellSingleQuote(documentToken))
+	}
+	return writeTaskRuntimeEnv(existingPath, strings.Join(lines, "\n"))
 }
 
 func writeTaskRuntimeEnv(existingPath, content string) (string, error) {

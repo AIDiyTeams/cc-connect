@@ -233,6 +233,7 @@ type SessionRuntime struct {
 	// Other adapters retain the legacy prompt-marker compatibility path.
 	MachineCapabilityToken   string `json:"machine_capability_token,omitempty"`
 	ImageCapabilityToken     string `json:"image_capability_token,omitempty"`
+	DocumentCapabilityToken  string `json:"document_capability_token,omitempty"`
 	TaskAuthorityEnvelopeB64 string `json:"task_authority_envelope_b64,omitempty"`
 	// OutputSchema is supplied by the authenticated control plane, never parsed
 	// from user prose. A session must explicitly support native constrained output.
