@@ -340,7 +340,8 @@ type queuedMessage struct {
 
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
-	turnBudgetSeconds      int // protected by mu; replaced for every foreground/queued turn
+	mediaDeliveryMode      string // protected by mu; scoped to the current turn
+	turnBudgetSeconds      int    // protected by mu; replaced for every foreground/queued turn
 	agentSession           AgentSession
 	platform               Platform
 	replyCtx               any
@@ -3764,6 +3765,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.replyCtx = msg.ReplyCtx
 	state.currentMessageID = msg.MessageID
 	state.turnBudgetSeconds = msg.Runtime.TurnBudgetSeconds
+	state.mediaDeliveryMode = msg.Runtime.MediaDeliveryMode
 	state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
 	state.mu.Unlock()
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
@@ -5953,6 +5955,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.replyCtx = queued.replyCtx
 				state.currentMessageID = queued.messageID
 				state.turnBudgetSeconds = queued.runtime.TurnBudgetSeconds
+				state.mediaDeliveryMode = queued.runtime.MediaDeliveryMode
 				state.fromVoice = queued.fromVoice
 				state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 				state.mu.Unlock()
@@ -6296,6 +6299,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.replyCtx = queued.replyCtx
 		state.currentMessageID = queued.messageID
 		state.turnBudgetSeconds = queued.runtime.TurnBudgetSeconds
+		state.mediaDeliveryMode = queued.runtime.MediaDeliveryMode
 		state.fromVoice = queued.fromVoice
 		state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 		state.mu.Unlock()
@@ -11109,6 +11113,7 @@ func (e *Engine) harvestAndSendTurnMedia(state *interactiveState, p Platform, re
 	}
 	state.mu.Lock()
 	before := state.mediaSnapshotBefore
+	explicit := state.mediaDeliveryMode == "explicit"
 	already := state.mediaSentThisTurn
 	if already == nil {
 		already = make(map[string]bool)
@@ -11119,7 +11124,7 @@ func (e *Engine) harvestAndSendTurnMedia(state *interactiveState, p Platform, re
 	state.mu.Unlock()
 
 	var images []ImageAttachment
-	if workDir != "" {
+	if workDir != "" && !explicit {
 		after := snapshotMediaFiles(workDir)
 		changed := diffNewOrChangedMedia(before, after)
 		images = append(images, loadHarvestImages(workDir, changed, already)...)

@@ -11,6 +11,15 @@ Backend machine reply contexts (`cmsg-` chat messages and `llm-` tasks) keep the
 
 The engine uses the existing `MachineReplyChannel` capability rather than interpreting user text or hardcoding a platform name. Explicit session creation, application-managed compaction, and process/workspace resource cleanup retain their existing behavior. Preserving a session does not itself keep its process alive, and does not reconstruct a transcript already reset by an older runtime.
 
+### Explicit media delivery
+
+Authenticated adapters may set `runtime.media_delivery_mode: "explicit"` per turn.
+The bridge then delivers only images explicitly referenced in the final reply or emitted
+through media events. Newly downloaded reference images are not harvested from workspace
+changes as assistant outputs. Foreground and queued turns each replace this setting;
+omission preserves existing workspace harvesting for other adapters. This field does not
+change tool permissions, image generation, or attachment upload.
+
 ### Native constrained output (optional runtime capability)
 
 Successful `register_ack` responses advertise `runtime_capabilities: ["output_schema_v1", "turn_budget_v1"]`.
