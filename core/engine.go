@@ -11130,7 +11130,7 @@ func (e *Engine) harvestAndSendTurnMedia(state *interactiveState, p Platform, re
 		images = append(images, loadHarvestImages(workDir, changed, already)...)
 	}
 	// Paths cited in the reply (Markdown / backticks), including /tmp.
-	cited := extractLocalImagePaths(replyText, workDir)
+	cited := extractLocalImagePathsWithMentions(replyText, workDir, !explicit)
 	images = append(images, loadImagesFromAbsolutePaths(cited, already)...)
 	if len(images) > mediaHarvestMaxFiles {
 		images = images[:mediaHarvestMaxFiles]
