@@ -208,6 +208,8 @@ type Message struct {
 // It is never inferred from prompt text and must only be populated by a trusted
 // platform adapter such as the authenticated Tomako Bridge connection.
 type SessionRuntime struct {
+	// Explicit delivery keeps downloaded reference inputs out of generated results.
+	MediaDeliveryMode  string   `json:"media_delivery_mode,omitempty"`
 	Scene              string   `json:"scene,omitempty"`
 	LogicalModel       string   `json:"logical_model,omitempty"`
 	GatewayModel       string   `json:"gateway_model,omitempty"`
@@ -231,6 +233,7 @@ type SessionRuntime struct {
 	// Other adapters retain the legacy prompt-marker compatibility path.
 	MachineCapabilityToken   string `json:"machine_capability_token,omitempty"`
 	ImageCapabilityToken     string `json:"image_capability_token,omitempty"`
+	DocumentCapabilityToken  string `json:"document_capability_token,omitempty"`
 	TaskAuthorityEnvelopeB64 string `json:"task_authority_envelope_b64,omitempty"`
 	// OutputSchema is supplied by the authenticated control plane, never parsed
 	// from user prose. A session must explicitly support native constrained output.
@@ -274,7 +277,9 @@ type UserQuestionOption struct {
 
 // Event represents a single piece of agent output streamed back to the engine.
 type Event struct {
-	Type                     EventType
+	Type EventType
+	// ResponseSource is transport provenance, set by an adapter from native phase metadata.
+	ResponseSource           string
 	TraceID                  string          // stable tool/item id used to pair use and result audit events
 	PublicActivity           *PublicActivity // optional typed, public execution receipt
 	Content                  string

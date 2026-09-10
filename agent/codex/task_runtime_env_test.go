@@ -284,3 +284,35 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
 		t.Fatal("closing session did not remove its authority directory")
 	}
 }
+
+func TestDocumentRuntimeCapabilityIsScopedRotatedAndNotInherited(t *testing.T) {
+	runtime := core.SessionRuntime{TaskID: "cmsg-doc", WorkspaceID: "ws-a", BrandID: "brand-a", DocumentCapabilityToken: "doc-current"}
+	path, err := updateTaskRuntimeEnv("", runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { removeTaskRuntimeEnv(path) })
+	body, _ := os.ReadFile(path)
+	if !strings.Contains(string(body), "export DOCUMENT_CAPABILITY_TOKEN='doc-current'") {
+		t.Fatal("document capability missing")
+	}
+	runtime.DocumentCapabilityToken = "doc-invalid\nline"
+	if _, err := updateTaskRuntimeEnv(path, runtime); err == nil {
+		t.Fatal("control characters accepted")
+	}
+	runtime.DocumentCapabilityToken = ""
+	runtime.ImageCapabilityToken = "image-current"
+	if _, err := updateTaskRuntimeEnv(path, runtime); err != nil {
+		t.Fatal(err)
+	}
+	body, _ = os.ReadFile(path)
+	if strings.Contains(string(body), "DOCUMENT_CAPABILITY_TOKEN") {
+		t.Fatal("previous turn document authority retained")
+	}
+	runtime.ImageCapabilityToken = ""
+	runtime.DocumentCapabilityToken = "doc-current"
+	runtime.BrandID = ""
+	if _, err := updateTaskRuntimeEnv(path, runtime); err == nil {
+		t.Fatal("unscoped document capability accepted")
+	}
+}

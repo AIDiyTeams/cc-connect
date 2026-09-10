@@ -2370,16 +2370,21 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 			s.emitCommentarySnapshot(itemID, text, true)
 			return
 		}
-		if len(s.outputSchema()) > 0 {
-			// Schema-constrained progress may also look like JSON. The native
-			// phase, not its shape, identifies the terminal structured answer.
-			switch item["phase"] {
-			case "final_answer":
-				s.flushPendingAsThinking()
-				s.emit(core.Event{Type: core.EventText, Content: text})
-				return
+		s.stateMu.Lock()
+		knownFinal := s.finalItems[itemID]
+		s.stateMu.Unlock()
+		if item["phase"] == "final_answer" || knownFinal {
+			s.flushPendingAsThinking()
+			s.stateMu.Lock()
+			streamed, wasStreamed := s.streamedItems[itemID]
+			delete(s.streamedItems, itemID)
+			s.stateMu.Unlock()
+			if !wasStreamed {
+				s.emit(core.Event{Type: core.EventText, Content: text, ResponseSource: "native_final"})
+			} else if tail, ok := strings.CutPrefix(text, streamed); ok && tail != "" {
+				s.emit(core.Event{Type: core.EventText, Content: tail, ResponseSource: "native_final"})
 			}
-			// Older providers omit phase; retain the tool-boundary fallback.
+			return
 		}
 		itemID, _ := item["id"].(string)
 		s.stateMu.Lock()
@@ -2805,7 +2810,7 @@ func (s *appServerSession) handleAgentMessageDelta(itemID, delta string) {
 	s.streamedItems[itemID] += delta
 	s.lastStreamedItem = itemID
 	s.stateMu.Unlock()
-	s.emit(core.Event{Type: core.EventText, Content: prefix + delta})
+	s.emit(core.Event{Type: core.EventText, Content: prefix + delta, ResponseSource: "native_final"})
 }
 
 func (s *appServerSession) flushPendingAsThinking() {

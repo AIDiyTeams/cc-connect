@@ -27,14 +27,14 @@ var mediaHarvestImageExt = map[string]string{
 }
 
 var mediaHarvestSkipDir = map[string]bool{
-	".git":        true,
-	".cc-connect": true,
+	".git":         true,
+	".cc-connect":  true,
 	"node_modules": true,
-	".codex":      true,
-	".agents":     true,
-	"__pycache__": true,
-	".venv":       true,
-	"venv":        true,
+	".codex":       true,
+	".agents":      true,
+	"__pycache__":  true,
+	".venv":        true,
+	"venv":         true,
 }
 
 // mediaFileMeta is a lightweight workspace file fingerprint used for turn diffs.
@@ -199,6 +199,11 @@ var (
 // extractLocalImagePaths finds filesystem image paths mentioned in assistant text.
 // Resolves relative paths against workDir. Absolute paths under workDir or /tmp are kept.
 func extractLocalImagePaths(text, workDir string) []string {
+	return extractLocalImagePathsWithMentions(text, workDir, true)
+}
+
+// Explicit delivery accepts image markup, not filenames mentioned while inspecting inputs.
+func extractLocalImagePathsWithMentions(text, workDir string, includeMentions bool) []string {
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
@@ -226,9 +231,11 @@ func extractLocalImagePaths(text, workDir string) []string {
 			add(m[1])
 		}
 	}
-	for _, m := range backtickImageRe.FindAllStringSubmatch(text, -1) {
-		if len(m) > 1 {
-			add(m[1])
+	if includeMentions {
+		for _, m := range backtickImageRe.FindAllStringSubmatch(text, -1) {
+			if len(m) > 1 {
+				add(m[1])
+			}
 		}
 	}
 	if len(out) > mediaHarvestMaxFiles {

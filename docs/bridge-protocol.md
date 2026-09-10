@@ -11,6 +11,15 @@ Backend machine reply contexts (`cmsg-` chat messages and `llm-` tasks) keep the
 
 The engine uses the existing `MachineReplyChannel` capability rather than interpreting user text or hardcoding a platform name. Explicit session creation, application-managed compaction, and process/workspace resource cleanup retain their existing behavior. Preserving a session does not itself keep its process alive, and does not reconstruct a transcript already reset by an older runtime.
 
+### Explicit media delivery
+
+Authenticated adapters may set `runtime.media_delivery_mode: "explicit"` per turn.
+The bridge then delivers only images explicitly referenced in the final reply or emitted
+through media events. Newly downloaded reference images are not harvested from workspace
+changes as assistant outputs. Foreground and queued turns each replace this setting;
+omission preserves existing workspace harvesting for other adapters. This field does not
+change tool permissions, image generation, or attachment upload.
+
 ### Native constrained output (optional runtime capability)
 
 Successful `register_ack` responses advertise `runtime_capabilities: ["output_schema_v1", "turn_budget_v1"]`.
@@ -1083,3 +1092,16 @@ Adapters without this capability are rejected before any structured result is se
 Rollout order: deploy the receipt-capable backend first, then the bridge. The backend
 continues accepting older result envelopes without `ref_id` during rollout. For rollback,
 revert the bridge before removing backend receipt support, using the deployment controller.
+
+### Native final-answer provenance
+
+`reply` and `reply_stream` may carry `response_source: "native_final"`.
+The adapter sets this from explicit native final-answer phases, never from model
+text. The engine certifies the accumulated response only when every text chunk
+has that provenance; a phase-less chunk permanently removes certification for
+that response. Preview and completion frames share the same state. Commentary,
+reasoning and tool traces remain separate events. Old adapters omit the field.
+
+Consumers may accept certified final prose without an application-specific text
+envelope. This only establishes the reply's source: structured mutation schemas,
+permissions, version checks and execution receipts still apply independently.
