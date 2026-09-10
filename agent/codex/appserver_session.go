@@ -201,17 +201,14 @@ type appServerSession struct {
 	closeOnce sync.Once
 	wg        sync.WaitGroup
 
-	stateMu     sync.Mutex
-	pendingMsgs []string
-	currentTurn string
-	// streamedItems tracks agentMessage items already delivered live via
-	// item/agentMessage/delta (itemID → accumulated streamed text), so
-	// item/completed does not re-emit or re-classify them as thinking.
-	streamedItems     map[string]string
-	lastStreamedItem  string
-	commentaryItems   map[string]bool
-	commentaryStreams map[string]*commentaryStream
-	finalItems        map[string]bool
+	stateMu               sync.Mutex
+	pendingMsgs           []string
+	currentTurn           string
+	commentaryItems       map[string]bool
+	commentaryStreams     map[string]*commentaryStream
+	finalItems            map[string]bool
+	completedMessageItems map[string]bool
+	lastFinalItem         string
 
 	runtimeMu             sync.RWMutex
 	usage                 *core.UsageReport
@@ -687,11 +684,11 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	s.stateMu.Lock()
 	s.currentTurn = resp.Turn.ID
 	s.pendingMsgs = s.pendingMsgs[:0]
-	s.streamedItems = nil
 	s.commentaryItems = nil
 	s.commentaryStreams = nil
 	s.finalItems = nil
-	s.lastStreamedItem = ""
+	s.completedMessageItems = nil
+	s.lastFinalItem = ""
 	s.stateMu.Unlock()
 
 	return nil
@@ -2165,11 +2162,11 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 			s.stateMu.Lock()
 			s.currentTurn = notif.Turn.ID
 			s.pendingMsgs = s.pendingMsgs[:0]
-			s.streamedItems = nil
 			s.commentaryItems = nil
 			s.commentaryStreams = nil
 			s.finalItems = nil
-			s.lastStreamedItem = ""
+			s.completedMessageItems = nil
+			s.lastFinalItem = ""
 			s.stateMu.Unlock()
 			s.storeContextUsage(nil)
 		}
@@ -2357,6 +2354,18 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		}
 
 	case "agentMessage":
+		s.stateMu.Lock()
+		if itemID != "" && s.completedMessageItems[itemID] {
+			s.stateMu.Unlock()
+			return
+		}
+		if s.completedMessageItems == nil {
+			s.completedMessageItems = make(map[string]bool)
+		}
+		if itemID != "" {
+			s.completedMessageItems[itemID] = true
+		}
+		s.stateMu.Unlock()
 		text, _ := item["text"].(string)
 		if strings.TrimSpace(text) == "" {
 			return
@@ -2367,7 +2376,10 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 			return
 		}
 		if item["phase"] == "commentary" {
-			s.emitCommentarySnapshot(itemID, text, true)
+			s.stateMu.Lock()
+			delete(s.finalItems, itemID)
+			s.stateMu.Unlock()
+			s.emitCommentarySnapshot(itemID, text, true, false)
 			return
 		}
 		s.stateMu.Lock()
@@ -2376,36 +2388,21 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		if item["phase"] == "final_answer" || knownFinal {
 			s.flushPendingAsThinking()
 			s.stateMu.Lock()
-			streamed, wasStreamed := s.streamedItems[itemID]
-			delete(s.streamedItems, itemID)
-			s.stateMu.Unlock()
-			if !wasStreamed {
-				s.emit(core.Event{Type: core.EventText, Content: text, ResponseSource: "native_final"})
-			} else if tail, ok := strings.CutPrefix(text, streamed); ok && tail != "" {
-				s.emit(core.Event{Type: core.EventText, Content: tail, ResponseSource: "native_final"})
+			prefix := ""
+			if s.lastFinalItem != "" && s.lastFinalItem != itemID {
+				prefix = "\n\n"
 			}
+			s.lastFinalItem = itemID
+			delete(s.finalItems, itemID)
+			delete(s.commentaryItems, itemID)
+			delete(s.commentaryStreams, itemID)
+			s.stateMu.Unlock()
+			s.emit(core.Event{Type: core.EventText, TraceID: itemID, Content: prefix + text, ResponseSource: "native_final"})
 			return
 		}
-		itemID, _ := item["id"].(string)
 		s.stateMu.Lock()
-		streamed, wasStreamed := "", false
-		if itemID != "" && s.streamedItems != nil {
-			streamed, wasStreamed = s.streamedItems[itemID]
-			if wasStreamed {
-				delete(s.streamedItems, itemID)
-			}
-		}
-		if !wasStreamed {
-			s.pendingMsgs = append(s.pendingMsgs, text)
-		}
+		s.pendingMsgs = append(s.pendingMsgs, text)
 		s.stateMu.Unlock()
-		if wasStreamed {
-			// The live delta stream already delivered this message; emit only
-			// a missing tail (e.g. the final flush the server may skip).
-			if tail, ok := strings.CutPrefix(text, streamed); ok && tail != "" {
-				s.emit(core.Event{Type: core.EventText, Content: tail})
-			}
-		}
 
 	case "commandExecution":
 		command, _ := item["command"].(string)
@@ -2767,8 +2764,7 @@ func (s *appServerSession) completeTurn(turnID string, turnErr error) {
 }
 
 // handleAgentMessageDelta relays live assistant prose to the user as it is
-// generated. Streamed items are tracked so item/completed neither duplicates
-// them nor demotes them to thinking when a tool call follows.
+// generated. Only item/completed may commit it to final answer history.
 func (s *appServerSession) handleAgentMessageDelta(itemID, delta string) {
 	if delta == "" {
 		return
@@ -2783,7 +2779,7 @@ func (s *appServerSession) handleAgentMessageDelta(itemID, delta string) {
 	commentary := itemID != "" && s.commentaryItems[itemID]
 	s.stateMu.Unlock()
 	if commentary {
-		s.emitCommentarySnapshot(itemID, delta, false)
+		s.emitCommentarySnapshot(itemID, delta, false, false)
 		return
 	}
 	// Deltas do not carry the final/commentary phase. Structured tasks wait
@@ -2791,26 +2787,14 @@ func (s *appServerSession) handleAgentMessageDelta(itemID, delta string) {
 	if len(s.outputSchema()) > 0 {
 		return
 	}
-	prefix := ""
 	s.stateMu.Lock()
-	// Some providers announce phase only on item/completed, or omit it.
-	// Unclassified deltas cannot safely enter the final answer. The complete
-	// item is routed by its phase, or the existing tool/turn boundary fallback.
-	// Explicit final-answer items still stream immediately.
-	if !s.finalItems[itemID] || s.commentaryItems[itemID] {
-		s.stateMu.Unlock()
-		return
-	}
-	if s.streamedItems == nil {
-		s.streamedItems = make(map[string]string)
-	}
-	if _, seen := s.streamedItems[itemID]; !seen && s.lastStreamedItem != "" && s.lastStreamedItem != itemID {
-		prefix = "\n\n"
-	}
-	s.streamedItems[itemID] += delta
-	s.lastStreamedItem = itemID
+	provisional := itemID != "" && s.finalItems[itemID]
 	s.stateMu.Unlock()
-	s.emit(core.Event{Type: core.EventText, Content: prefix + delta, ResponseSource: "native_final"})
+	if provisional {
+		// Some providers label item/started as final_answer, then complete it
+		// as commentary. Keep prose live without committing it to answer history.
+		s.emitCommentarySnapshot(itemID, delta, false, true)
+	}
 }
 
 func (s *appServerSession) flushPendingAsThinking() {

@@ -1751,3 +1751,39 @@ func TestBridgeReplySourceRequiresEveryChunkToBeNativeAndSurvivesPreviewClone(t 
 		t.Fatal("provenance leaked to another turn")
 	}
 }
+
+func TestBridgeProvisionalSnapshotsRequireCapabilityAndFinalIdsSurvivePreview(t *testing.T) {
+	for _, supported := range []bool{false, true} {
+		bs, wsURL := startTestBridge(t, "")
+		conn := dialWS(t, wsURL, nil)
+		caps := []string{"text", "agent_trace", "commentary_stream"}
+		if supported {
+			caps = append(caps, "provisional_messages")
+		}
+		register(t, conn, "java-backend", caps)
+		bp := bs.NewPlatform("proj")
+		rc := newBridgeReplyCtx(bs.getAdapter("java-backend"), "session", "cmsg-test")
+		bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{Type: EventCommentary, TraceID: "answer", Content: "live", ContentVersion: 1, ContentProvisional: true})
+		bp.ReportAgentTrace(context.Background(), rc, AgentTraceEvent{Type: EventCommentary, TraceID: "note", Content: "confirmed", ContentDone: true})
+		first := readMsg(t, conn)
+		if supported {
+			if first["phase"] != "provisional" || first["trace_id"] != "answer" {
+				t.Fatalf("wrong provisional: %#v", first)
+			}
+			first = readMsg(t, conn)
+		}
+		if first["content"] != "confirmed" {
+			t.Fatal("legacy received provisional content")
+		}
+		preview := cloneBridgeReplyCtx(rc)
+		rc.ObserveResponseSource("native_final")
+		rc.ObserveFinalResponseItem("answer")
+		rc.ObserveFinalResponseItem("answer")
+		payload := map[string]any{}
+		attachResponseSource(payload, preview)
+		ids := payload["finalized_item_ids"].([]string)
+		if len(ids) != 1 || ids[0] != "answer" {
+			t.Fatalf("wrong final IDs: %#v", payload)
+		}
+	}
+}

@@ -283,6 +283,7 @@ type Event struct {
 	TraceID                  string          // stable tool/item id used to pair use and result audit events
 	PublicActivity           *PublicActivity // optional typed, public execution receipt
 	Content                  string
+	ContentProvisional       bool           // Native item phase is not final until item/completed.
 	ContentVersion           int64          // cumulative public commentary snapshot; zero is legacy completed prose
 	ContentDone              bool           // seals this commentary item, not the task
 	ToolName                 string         // populated for EventToolUse, EventPermissionRequest
