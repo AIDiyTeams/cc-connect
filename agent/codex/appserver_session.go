@@ -1011,14 +1011,13 @@ func (s *appServerSession) handleRequestUserInput(rawID json.RawMessage, paramsR
 	})
 
 	go func() {
-		timer := time.NewTimer(5 * time.Minute)
-		defer timer.Stop()
+		// The engine keeps a question pending while the user decides. Match
+		// that lifetime: a private timeout would return an empty answer to
+		// Codex while leaving the visible panel able to submit a stale reply.
 		var result core.PermissionResult
 		select {
 		case result = <-ch:
 		case <-s.ctx.Done():
-			result = core.PermissionResult{Behavior: "deny"}
-		case <-timer.C:
 			result = core.PermissionResult{Behavior: "deny"}
 		}
 		s.approvalsMu.Lock()

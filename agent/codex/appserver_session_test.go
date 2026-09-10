@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -893,6 +894,65 @@ func TestMapAppServerRateLimits_PrefersMultiBucketView(t *testing.T) {
 	}
 	if report.Buckets[1].Name != "codex_other" {
 		t.Fatalf("second bucket = %q, want codex_other", report.Buckets[1].Name)
+	}
+}
+
+func TestAppServerSession_RequestUserInputWaitsForUserUntilSessionEnds(t *testing.T) {
+	for _, finish := range []string{"answer", "cancel", "disconnect"} {
+		t.Run(finish, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				stdin := &lockedWriteCloser{}
+				s := &appServerSession{
+					events: make(chan core.Event, 4), ctx: ctx,
+					pendingApprovals: make(map[string]chan core.PermissionResult), stdin: stdin,
+				}
+				s.handleServerRequest(serverRequestProbe(t, `"delayed-question"`, "item/tool/requestUserInput", map[string]any{
+					"questions": []any{map[string]any{
+						"id": "goal", "question": "Which goal?",
+						"options": []any{map[string]any{"label": "Conversion"}},
+					}},
+				}))
+				event := <-s.events
+				// Virtual time reproduces a person returning to the panel after
+				// the former five-minute timeout, without slowing the test suite.
+				time.Sleep(15 * time.Minute)
+				synctest.Wait()
+				if got := stdin.String(); got != "" {
+					t.Fatalf("question answered without user input: %s", got)
+				}
+				switch finish {
+				case "answer":
+					if err := s.RespondPermission(event.RequestID, core.PermissionResult{
+						Behavior: "allow", UpdatedInput: map[string]any{"answers": map[string]any{"goal": "Conversion"}},
+					}); err != nil {
+						t.Fatal(err)
+					}
+				case "cancel":
+					cancel()
+				case "disconnect":
+					s.rejectPendingApprovals(io.EOF)
+				}
+				synctest.Wait()
+				var response struct {
+					Result appServerRequestUserInputResponse `json:"result"`
+				}
+				if err := json.Unmarshal([]byte(stdin.String()), &response); err != nil {
+					t.Fatalf("invalid tool response: %v", err)
+				}
+				if finish == "answer" {
+					if got := response.Result.Answers["goal"].Answers; !reflect.DeepEqual(got, []string{"Conversion"}) {
+						t.Fatalf("lost delayed answer: %#v", got)
+					}
+				} else if len(response.Result.Answers) != 0 {
+					t.Fatalf("session end invented an answer: %#v", response.Result.Answers)
+				}
+				if err := s.RespondPermission(event.RequestID, core.PermissionResult{Behavior: "allow"}); err == nil {
+					t.Fatal("completed question accepted a late or duplicate answer")
+				}
+			})
+		})
 	}
 }
 
