@@ -190,7 +190,13 @@ type appServerSession struct {
 	// created with the brand-analysis dynamic tool set. Dynamic tools are a
 	// thread-start capability, so a reused thread must be replaced when a turn
 	// crosses the brand-analysis boundary.
-	threadBrandTools bool
+	threadBrandTools   bool
+	threadArchiveTools bool
+	threadVoiceTools   bool
+	archiveMu          sync.Mutex
+	archiveUsed        bool
+	archiveTaskID      string
+	voiceSubmission    userVoiceSubmission
 
 	closeOnce sync.Once
 	wg        sync.WaitGroup
@@ -439,6 +445,8 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 		s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 		s.threadID.Store(resp.Thread.ID)
 		s.threadBrandTools = s.isBrandAnalysisRuntime()
+		s.threadArchiveTools = s.isUserVoiceArchiveRuntime()
+		s.threadVoiceTools = s.isUserVoiceJudgmentRuntime()
 		slog.Info("codex app-server thread resumed", "thread_id", resp.Thread.ID)
 		s.emitLifecycle("agent_thread_ready", time.Since(startedAt))
 		return nil
@@ -454,6 +462,8 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 	s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 	s.threadID.Store(resp.Thread.ID)
 	s.threadBrandTools = s.isBrandAnalysisRuntime()
+	s.threadArchiveTools = s.isUserVoiceArchiveRuntime()
+	s.threadVoiceTools = s.isUserVoiceJudgmentRuntime()
 	slog.Info("codex app-server thread started", "thread_id", resp.Thread.ID)
 	s.emitLifecycle("agent_thread_ready", time.Since(startedAt))
 	return nil
@@ -507,6 +517,12 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	}
 	if s.isBrandAnalysisRuntime() {
 		params["dynamicTools"] = brandAnalysisDynamicTools()
+	}
+	if s.isUserVoiceArchiveRuntime() {
+		params["dynamicTools"] = userVoiceArchiveDynamicTools()
+	}
+	if s.isUserVoiceJudgmentRuntime() {
+		params["dynamicTools"] = s.userVoiceJudgmentTools()
 	}
 	if profile := strings.TrimSpace(s.permissionsProfile); profile != "" {
 		params["permissions"] = profile
@@ -645,7 +661,7 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	if collaborationMode := s.turnDeveloperInstructions(); collaborationMode != nil {
 		params["collaborationMode"] = collaborationMode
 	}
-	if schema := s.outputSchema(); len(schema) > 0 {
+	if schema := s.outputSchema(); len(schema) > 0 && !s.isUserVoiceJudgmentRuntime() {
 		params["outputSchema"] = schema
 	}
 	if metadata := s.responsesAPIClientMetadata(); len(metadata) > 0 {
@@ -726,13 +742,21 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	s.brandFlowMu.Lock()
 	s.brandFlow = brandAnalysisFlow{}
 	s.brandFlowMu.Unlock()
+	s.resetUserVoiceSubmission(runtime.TaskID)
 
 	// App-server dynamic tools are fixed at thread/start (or thread/resume), not
 	// turn/start. Replace a reused thread when entering or leaving the dedicated
 	// brand-analysis tool mode so the model sees exactly the tools for this turn.
 	wantsBrandTools := strings.EqualFold(strings.TrimSpace(runtime.Scene), "brand_analysis")
+	wantsArchiveTools := s.isUserVoiceArchiveRuntime()
+	s.archiveMu.Lock()
+	if s.archiveTaskID != runtime.TaskID {
+		s.archiveUsed = false
+		s.archiveTaskID = runtime.TaskID
+	}
+	s.archiveMu.Unlock()
 	s.threadMu.Lock()
-	if s.CurrentSessionID() != "" && (s.threadBrandTools != wantsBrandTools || searchChanged || reasoningCapabilityChanged) {
+	if s.CurrentSessionID() != "" && (s.threadBrandTools != wantsBrandTools || s.threadArchiveTools != wantsArchiveTools || s.threadVoiceTools || s.isUserVoiceJudgmentRuntime() || searchChanged || reasoningCapabilityChanged) {
 		s.threadID.Store("")
 		s.resumeID = ""
 	}
@@ -1076,6 +1100,25 @@ func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRa
 	}
 	if err := json.Unmarshal(paramsRaw, &params); err != nil {
 		s.writeDynamicToolResponse(rawID, false, "invalid tool arguments")
+		return
+	}
+	if s.isUserVoiceArchiveRuntime() && params.Tool == "search_reddit_archive" {
+		go func() {
+			result, err := s.collectUserVoiceArchive(params.Arguments)
+			if err != nil {
+				s.writeDynamicToolResponse(rawID, false, err.Error())
+				return
+			}
+			s.writeDynamicToolResponse(rawID, true, result)
+		}()
+		return
+	}
+	if s.isUserVoiceJudgmentRuntime() && params.Tool == "submit_reviewed_user_voice_judgments" {
+		if err := s.recordUserVoiceJudgment(params.Arguments); err != nil {
+			s.writeDynamicToolResponse(rawID, false, err.Error())
+		} else {
+			s.writeDynamicToolResponse(rawID, true, "Submission recorded for Portal validation. Finish now; do not repeat the JSON or submit again.")
+		}
 		return
 	}
 	if !s.isBrandAnalysisRuntime() {
@@ -2318,6 +2361,11 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		if strings.TrimSpace(text) == "" {
 			return
 		}
+		if s.isUserVoiceJudgmentRuntime() {
+			// Prose can never replace or contaminate the tool submission.
+			s.emit(core.Event{Type: core.EventThinking, Content: text})
+			return
+		}
 		if item["phase"] == "commentary" {
 			s.emitCommentarySnapshot(itemID, text, true)
 			return
@@ -2406,12 +2454,16 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		tool, _ := item["tool"].(string)
 		status, _ := item["status"].(string)
 		result := appServerDynamicToolText(item["contentItems"])
+		publicResult := truncate(strings.TrimSpace(result), 500)
+		if tool == "search_reddit_archive" {
+			publicResult = archiveExecutionReceipt(result)
+		}
 		success := appServerToolSuccess(status, nil)
 		s.emit(core.Event{
 			Type:        core.EventToolResult,
 			TraceID:     itemID,
 			ToolName:    tool,
-			ToolResult:  truncate(strings.TrimSpace(result), 500),
+			ToolResult:  publicResult,
 			ToolStatus:  strings.TrimSpace(status),
 			ToolSuccess: &success,
 		})
@@ -2681,6 +2733,10 @@ func rpcIDToInt64(v any) (int64, bool) {
 }
 
 func (s *appServerSession) completeTurn(turnID string, turnErr error) {
+	voiceResult := ""
+	if turnErr == nil && s.isUserVoiceJudgmentRuntime() {
+		voiceResult, turnErr = s.userVoiceJudgmentResult()
+	}
 	if turnErr == nil && s.brandCoreAwaitingPublication() {
 		turnErr = fmt.Errorf("brand analysis ended before the core profile was accepted for persistence")
 	}
@@ -2699,6 +2755,9 @@ func (s *appServerSession) completeTurn(turnID string, turnErr error) {
 		return
 	}
 	s.flushPendingAsText()
+	if voiceResult != "" {
+		s.emit(core.Event{Type: core.EventText, Content: voiceResult})
+	}
 	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
 }
 

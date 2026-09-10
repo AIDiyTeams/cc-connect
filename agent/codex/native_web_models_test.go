@@ -11,6 +11,38 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+func TestDeepSeekNativeWebCatalog_PreservesOfficialCapabilities(t *testing.T) {
+	for _, scene := range []string{"growth_opportunity_user_voice_plan", "growth_opportunity_user_voice_search", "growth_opportunity_user_voice_judge"} {
+		if !needsNativeWebModelCatalog(core.SessionRuntime{Scene: scene, GatewayModel: "tomako/deepseek-v4-flash-vision-exp", WebSearch: "live"}) {
+			t.Fatalf("missing DeepSeek catalog for %s", scene)
+		}
+	}
+	file, err := writeNativeWebModelCatalog(filepath.Join(t.TempDir(), "env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var catalog struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &catalog); err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Models) != 2 {
+		t.Fatalf("expected both model descriptors, got %d", len(catalog.Models))
+	}
+	model := catalog.Models[1]
+	if model["truncation_policy"].(map[string]any)["limit"] != float64(128000) {
+		t.Fatal("archive batch would be truncated by the default tool-output budget")
+	}
+	if model["slug"] != "tomako/deepseek-v4-flash-vision-exp" || model["context_window"] != float64(1048576) || model["default_reasoning_level"] != "high" || model["use_responses_lite"] != false || model["supports_search_tool"] != true || model["base_instructions"] == "" {
+		t.Fatal("DeepSeek capability descriptor changed")
+	}
+}
+
 func TestNativeWebResponsesLite_StartupCatalogScopeAndCleanup(t *testing.T) {
 	for _, scene := range []string{"growth_opportunity_user_voice_plan", "growth_opportunity_user_voice_search", "growth_opportunity_user_voice_judge"} {
 		r := core.SessionRuntime{Scene: scene, GatewayModel: "tomako/gpt-5.6-sol", WebSearch: "live", ReasoningEffort: "high"}

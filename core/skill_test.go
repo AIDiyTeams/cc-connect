@@ -24,7 +24,7 @@ func TestSkillRegistryResolve_SeesDeployedInstructionsWithoutRestart(t *testing.
 	if first.Prompt != "Prompt body" || second.Prompt != "new instructions" {
 		t.Fatalf("resolved prompts: first=%q, second=%q", first.Prompt, second.Prompt)
 	}
-	if prompt := BuildSkillInvocationPrompt(second, ""); !strings.Contains(prompt, filepath.Dir(path)) {
+	if prompt := BuildSkillInvocationPrompt(second, nil); !strings.Contains(prompt, filepath.Dir(path)) {
 		t.Fatalf("invocation is missing the deployed skill directory: %s", prompt)
 	}
 	if err := os.Remove(path); err != nil {
