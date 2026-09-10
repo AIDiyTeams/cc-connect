@@ -12,11 +12,11 @@ type commentaryStream struct {
 	lastSentAt time.Time
 }
 
-// Only explicitly classified commentary reaches this path. Cumulative snapshots
+// Native public prose streams here until its completed phase is known. Cumulative snapshots
 // let adapters replace one note rather than append tokens as separate stages.
 // A real delta triggers at most one checkpoint per second; completion always
 // flushes. There is no timer, translation call, or fabricated activity.
-func (s *appServerSession) emitCommentarySnapshot(itemID, text string, done bool) {
+func (s *appServerSession) emitCommentarySnapshot(itemID, text string, done, provisional bool) {
 	if itemID == "" {
 		if done {
 			s.emit(core.Event{Type: core.EventCommentary, Content: text})
@@ -45,7 +45,8 @@ func (s *appServerSession) emitCommentarySnapshot(itemID, text string, done bool
 	stream.version++
 	stream.lastSentAt = now
 	event := core.Event{Type: core.EventCommentary, TraceID: itemID, Content: stream.text,
-		ContentVersion: stream.version, ContentDone: done}
+		ContentVersion: stream.version, ContentDone: done,
+		ContentProvisional: provisional}
 	if done {
 		delete(s.commentaryItems, itemID)
 		delete(s.commentaryStreams, itemID)

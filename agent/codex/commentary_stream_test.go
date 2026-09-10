@@ -36,3 +36,27 @@ func TestCommentaryStreamsOneNoteBeforeCompletionAndFlushesThrottledTail(t *test
 		t.Fatal("unclassified or late text leaked")
 	}
 }
+
+// A real provider can revise final_answer to commentary on completion.
+func TestProvisionalFinalPhaseNeverContaminatesAnswer(t *testing.T) {
+	s := terminalTestSession()
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "changing", "phase": "final_answer"})
+	s.handleAgentMessageDelta("changing", "正在比较公开资料。")
+	first := <-s.events
+	if first.Type != core.EventCommentary || first.TraceID != "changing" {
+		t.Fatalf("provisional prose must be immediately visible as progress: %#v", first)
+	}
+	s.handleItemCompleted(map[string]any{"type": "agentMessage", "id": "changing", "phase": "commentary", "text": "正在比较公开资料。"})
+	s.handleItemCompleted(map[string]any{"type": "agentMessage", "id": "answer", "phase": "final_answer", "text": "建议先集中一个账号。"})
+	s.completeTurn("turn-1", nil)
+	var final string
+	for len(s.events) > 0 {
+		e := <-s.events
+		if e.Type == core.EventText {
+			final += e.Content
+		}
+	}
+	if final != "建议先集中一个账号。" {
+		t.Fatalf("contaminated answer: %q", final)
+	}
+}

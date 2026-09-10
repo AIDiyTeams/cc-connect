@@ -1105,3 +1105,33 @@ reasoning and tool traces remain separate events. Old adapters omit the field.
 Consumers may accept certified final prose without an application-specific text
 envelope. This only establishes the reply's source: structured mutation schemas,
 permissions, version checks and execution receipts still apply independently.
+
+
+### Provisional public message display
+
+Chat adapters may advertise `provisional_messages` together with `commentary_stream`.
+For these adapters, `agent_thinking` with `phase: "provisional"` carries public
+agentMessage prose whose item/started phase was final_answer but may still change.
+`trace_id`, `content_version` and cumulative `content` identify one replaceable note.
+This is public assistant prose, never a reasoning delta. Structured task consumers
+and adapters lacking the capability do not receive provisional frames.
+
+Only item/completed commits text to answer history. The answer's `reply` and
+`reply_stream` frames carry `finalized_item_ids`, the cumulative native IDs now
+included in that response. Preview handles share this metadata. The backend must
+persist the replacement answer (or its document delivery) before retiring the
+matching provisional notes. It retains identity tombstones in its existing progress
+snapshot so delayed frames cannot resurrect retired notes after restart. Equal text
+with a different ID is retained. Stop/failure before classification keeps the last
+persisted provisional note; it does not manufacture a final answer.
+
+Ownership: cc-connect adapts native phases and transports identities; Java owns
+conversation/progress persistence, document validation and public protocol parsing;
+the frontend renders the existing versioned progress snapshot. No extra model call,
+intent classifier, translation, database table or timer is introduced. Document
+frames continue through the existing scoped document writer during provisional
+streaming; provisional prose itself never becomes answer history.
+
+Roll out the backward-compatible backend receiver before the bridge sender. Revert
+the sender before removing receiver support. Existing clients continue consuming
+the same public progress schema and old stored conversations remain readable.

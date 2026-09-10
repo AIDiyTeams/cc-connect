@@ -65,7 +65,7 @@ func TestAppServerSession_PublicCommentaryDoesNotLeakReasoningOrEnterFinal(t *te
 	var public, final string
 	for len(s.events) > 0 {
 		e := <-s.events
-		if e.Type == core.EventCommentary {
+		if e.Type == core.EventCommentary && !e.ContentProvisional {
 			public += e.Content
 		}
 		if e.Type == core.EventText {
@@ -92,7 +92,7 @@ func TestAppServerSession_LatePhaseDoesNotStreamCommentaryIntoFinal(t *testing.T
 	var progress, final string
 	for len(s.events) > 0 {
 		e := <-s.events
-		if e.Type == core.EventCommentary {
+		if e.Type == core.EventCommentary && !e.ContentProvisional {
 			progress += e.Content
 		}
 		if e.Type == core.EventText {
@@ -117,7 +117,7 @@ func TestAppServerSession_PhaseLessProviderUsesToolBoundaryWithoutFinalLeak(t *t
 	var progress, final string
 	for len(s.events) > 0 {
 		e := <-s.events
-		if e.Type == core.EventCommentary {
+		if e.Type == core.EventCommentary && !e.ContentProvisional {
 			progress += e.Content
 		}
 		if e.Type == core.EventText {

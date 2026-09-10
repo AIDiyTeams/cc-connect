@@ -105,6 +105,7 @@ type bridgeResponseSource struct {
 	mu           sync.Mutex
 	unclassified bool
 	native       bool
+	finalItems   []string
 }
 
 func (rc *bridgeReplyCtx) ObserveResponseSource(source string) {
@@ -120,12 +121,31 @@ func (rc *bridgeReplyCtx) ObserveResponseSource(source string) {
 	}
 }
 
+// Final item IDs travel with the answer snapshot, so the receiver retires a
+// provisional note only when it also receives the answer that replaces it.
+func (rc *bridgeReplyCtx) ObserveFinalResponseItem(id string) {
+	if rc.responseSource == nil {
+		rc.responseSource = &bridgeResponseSource{}
+	}
+	rc.responseSource.mu.Lock()
+	defer rc.responseSource.mu.Unlock()
+	for _, existing := range rc.responseSource.finalItems {
+		if existing == id {
+			return
+		}
+	}
+	rc.responseSource.finalItems = append(rc.responseSource.finalItems, id)
+}
+
 func attachResponseSource(payload map[string]any, rc *bridgeReplyCtx) {
 	if rc.responseSource == nil {
 		return
 	}
 	rc.responseSource.mu.Lock()
 	defer rc.responseSource.mu.Unlock()
+	if len(rc.responseSource.finalItems) > 0 {
+		payload["finalized_item_ids"] = append([]string(nil), rc.responseSource.finalItems...)
+	}
 	if rc.responseSource.native && !rc.responseSource.unclassified {
 		payload["response_source"] = "native_final"
 	}
@@ -570,6 +590,9 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 		if !strings.HasPrefix(rc.ReplyCtx, "llm-") && !strings.HasPrefix(rc.ReplyCtx, "cmsg-") {
 			return nil
 		}
+		if event.ContentProvisional && (!strings.HasPrefix(rc.ReplyCtx, "cmsg-") || !a.capabilities["provisional_messages"]) {
+			return nil
+		}
 		streamCommentary := event.Type == EventCommentary && event.ContentVersion > 0
 		streamSupported := strings.HasPrefix(rc.ReplyCtx, "cmsg-") && a.capabilities["commentary_stream"]
 		if streamCommentary && !streamSupported && !event.ContentDone {
@@ -584,6 +607,9 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 			"phase":       string(event.Type),
 			"content":     truncateBridgeTrace(event.Content, 65536),
 			"occurred_at": now.Format(time.RFC3339Nano),
+		}
+		if event.ContentProvisional {
+			payload["phase"] = "provisional"
 		}
 		if streamCommentary && streamSupported {
 			payload["content_version"] = event.ContentVersion

@@ -4948,6 +4948,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				trace.Content = event.Content
 				trace.ContentVersion = event.ContentVersion
 				trace.ContentDone = event.ContentDone
+				trace.ContentProvisional = event.ContentProvisional
 			}
 			if trace.Output == "" {
 				trace.Output = event.Content
@@ -5285,6 +5286,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if event.Content != "" && !isEllipsisOnly(event.Content) {
 				if receiver, ok := replyCtx.(interface{ ObserveResponseSource(string) }); ok {
 					receiver.ObserveResponseSource(event.ResponseSource)
+				}
+				if event.ResponseSource == "native_final" && event.TraceID != "" {
+					if receiver, ok := replyCtx.(interface{ ObserveFinalResponseItem(string) }); ok {
+						receiver.ObserveFinalResponseItem(event.TraceID)
+					}
 				}
 				// Pre-compute silentHold transition including this chunk so the
 				// rich-card path doesn't leak a preview that gets recalled at
