@@ -394,6 +394,10 @@ func (a *Agent) SetSessionEnv(env []string) {
 }
 
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
+	return a.StartSessionWithRuntime(ctx, sessionID, core.SessionRuntime{})
+}
+
+func (a *Agent) StartSessionWithRuntime(ctx context.Context, sessionID string, runtime core.SessionRuntime) (core.AgentSession, error) {
 	a.mu.Lock()
 	mode := a.mode
 	model := a.model
@@ -452,6 +456,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 			sharedSkillsDir = strings.TrimSpace(os.Getenv("SKILLS_OL_DIR"))
 		}
 		if err := ensureCodexHomeInheritedConfig(codexHome, permissionsProfile, sharedSkillsDir); err != nil {
+			if permissionsProfile != "" {
+				return nil, fmt.Errorf("codex: cannot start fenced session: %w", err)
+			}
 			slog.Warn("codex: failed to inherit global config into per-user codex_home", "codex_home", codexHome, "error", err)
 		}
 	}
@@ -466,7 +473,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, permissionsProfile, sessionID, baseURL, provName, extraEnv, codexHome)
+		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, permissionsProfile, sessionID, baseURL, provName, extraEnv, codexHome, runtime)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)

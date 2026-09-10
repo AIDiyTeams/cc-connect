@@ -13196,6 +13196,11 @@ func TestExecuteCronJob_ExpandsSlashSkillPrompt(t *testing.T) {
 			wantContains: []string{"## Skill:", "daily-brief", "Prompt body"},
 		},
 		{
+			name:         "structured skill input keeps quotes and whitespace",
+			prompt:       "/daily-brief {\"query\":\"\\\"exact phrase\\\"  two spaces\",\"body\":\"line1\\nline2\"}\n\nPreserve\tformatting.",
+			wantContains: []string{"{\"query\":\"\\\"exact phrase\\\"  two spaces\",\"body\":\"line1\\nline2\"}\n\nPreserve\tformatting."},
+		},
+		{
 			name:          "unknown slash command passes through literally",
 			prompt:        "/no-such-skill arg",
 			wantContains:  []string{"/no-such-skill arg"},

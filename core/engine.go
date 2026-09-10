@@ -1431,7 +1431,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		if len(parts) > 0 {
 			cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
 			if skill := e.skills.Resolve(cmd); skill != nil {
-				content = BuildSkillInvocationPrompt(skill, parts[1:])
+				content = buildSkillInvocationPrompt(skill, skillCommandArguments(content))
 			}
 		}
 	}
@@ -1634,7 +1634,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		if len(parts) > 0 {
 			cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
 			if skill := e.skills.Resolve(cmd); skill != nil {
-				content = BuildSkillInvocationPrompt(skill, parts[1:])
+				content = buildSkillInvocationPrompt(skill, skillCommandArguments(content))
 			}
 		}
 	}
@@ -3750,7 +3750,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if agent != e.agent {
 		agentOverride = agent
 	}
-	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey, msg.Runtime)
 
 	// Set workspaceDir on the state for idle reaper identification
 	if workspaceDir != "" {
@@ -4015,9 +4015,20 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 	existing.mu.Unlock()
 }
 
+func startSessionWithRuntime(ctx context.Context, agent Agent, sessionID string, runtime SessionRuntime) (AgentSession, error) {
+	if starter, ok := agent.(SessionRuntimeStarter); ok {
+		return starter.StartSessionWithRuntime(ctx, sessionID, runtime)
+	}
+	return agent.StartSession(ctx, sessionID)
+}
+
 // When agentOverride is non-nil it is used instead of e.agent to start the session.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
-func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
+func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string, startupRuntime ...SessionRuntime) *interactiveState {
+	var runtime SessionRuntime
+	if len(startupRuntime) > 0 {
+		runtime = startupRuntime[0]
+	}
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 
@@ -4035,6 +4046,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		// If wantID is empty (/new, cleared session) but the process already has
 		// a concrete ID, reusing would keep --resume context — recycle (#238).
 		needRecycle := currentID != "" && (wantID == "" || wantID != currentID)
+		if compatible, ok := state.agentSession.(SessionRuntimeCompatibility); ok && !compatible.SupportsSessionRuntime(runtime) {
+			needRecycle = true
+		}
 		if !needRecycle {
 			return state
 		}
@@ -4134,7 +4148,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 	isResume := startSessionID != ""
 	startAt := time.Now()
-	agentSession, err := agent.StartSession(e.ctx, startSessionID)
+	agentSession, err := startSessionWithRuntime(e.ctx, agent, startSessionID, runtime)
 	startElapsed := time.Since(startAt)
 	if err != nil {
 		// If resume/continue failed, try a fresh session as fallback.
@@ -4147,7 +4161,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			session.SetAgentSessionID("", agent.Name())
 			sessions.Save()
 			startAt = time.Now()
-			agentSession, err = agent.StartSession(e.ctx, "")
+			agentSession, err = startSessionWithRuntime(e.ctx, agent, "", runtime)
 			startElapsed = time.Since(startAt)
 			if err == nil {
 				slog.Info("fresh session started after resume failure",
@@ -6737,10 +6751,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			slog.Info("audit: command_executed",
 				"user_id", msg.UserID, "platform", msg.Platform,
 				"project", e.name, "command", skill.Name, "type", "skill")
-			// Skill input is prose/structured context, not shell argv. Preserve
-			// JSON quotes and line breaks that splitCommandArgs would remove.
-			arguments := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), parts[0]))
-			e.executeSkill(p, msg, skill, []string{arguments})
+			// Skill arguments are structured prose; preserve quotes and line breaks.
+			e.executeSkill(p, msg, skill, skillCommandArguments(raw))
 			return true
 		}
 		// Not a cc-connect command — notify user, then fall through to agent
@@ -14621,8 +14633,8 @@ func (e *Engine) cmdCommandsDel(p Platform, msg *Message, args []string) {
 // Skill discovery & execution
 // ──────────────────────────────────────────────────────────────
 
-func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, args []string) {
-	prompt := BuildSkillInvocationPrompt(skill, args)
+func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, arguments string) {
+	prompt := buildSkillInvocationPrompt(skill, arguments)
 	_, _, _, err := e.commandContext(p, msg)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))

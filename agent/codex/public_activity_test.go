@@ -1,8 +1,10 @@
 package codex
 
 import (
-	"github.com/chenhg5/cc-connect/core"
+	"strings"
 	"testing"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 func TestAppServerWebActivityReachesBothExecutionEvents(t *testing.T) {
@@ -14,6 +16,11 @@ func TestAppServerWebActivityReachesBothExecutionEvents(t *testing.T) {
 	end := <-s.events
 	if start.PublicActivity == nil || end.PublicActivity == nil || start.PublicActivity.Status != "running" || end.PublicActivity.Status != "returned" || start.TraceID != end.TraceID {
 		t.Fatalf("public activity dropped at runtime: start=%#v end=%#v", start, end)
+	}
+	for _, recorded := range []string{start.ToolInput, end.ToolResult} {
+		if !strings.Contains(recorded, "openPage") || !strings.Contains(recorded, "https://example.com/article") {
+			t.Fatalf("native action lost when adding public progress: %q", recorded)
+		}
 	}
 }
 

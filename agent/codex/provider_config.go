@@ -122,7 +122,13 @@ func ensureCodexHomeInheritedConfig(codexHome, permissionsProfile, sharedSkillsD
 	// preserving per-user [projects.*] trust entries.
 	perUserConfig := filepath.Join(home, "config.toml")
 	globalConfig := filepath.Join(globalHome, "config.toml")
-	if globalData, err := os.ReadFile(globalConfig); err == nil {
+	globalData, readErr := os.ReadFile(globalConfig)
+	if readErr != nil && strings.TrimSpace(permissionsProfile) != "" {
+		// A fenced task must not silently keep a stale workspace policy when
+		// its authoritative configuration is missing or unreadable.
+		return fmt.Errorf("codex: read global permission config %q: %w", globalConfig, readErr)
+	}
+	if readErr == nil {
 		providerCfg := extractProviderConfig(string(globalData))
 		providerCfg = addPermissionReadPath(providerCfg, permissionsProfile, sharedSkillsDir)
 		if strings.TrimSpace(providerCfg) != "" {
@@ -144,6 +150,8 @@ func ensureCodexHomeInheritedConfig(codexHome, permissionsProfile, sharedSkillsD
 					return fmt.Errorf("codex: sync provider config: %w", werr)
 				}
 				slog.Debug("codex: synced global provider config into per-user config.toml", "dst", perUserConfig)
+			default:
+				return fmt.Errorf("codex: read workspace config %q: %w", perUserConfig, perr)
 			}
 		}
 	}

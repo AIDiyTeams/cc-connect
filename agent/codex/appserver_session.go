@@ -190,7 +190,13 @@ type appServerSession struct {
 	// created with the brand-analysis dynamic tool set. Dynamic tools are a
 	// thread-start capability, so a reused thread must be replaced when a turn
 	// crosses the brand-analysis boundary.
-	threadBrandTools bool
+	threadBrandTools   bool
+	threadArchiveTools bool
+	threadVoiceTools   bool
+	archiveMu          sync.Mutex
+	archiveUsed        bool
+	archiveTaskID      string
+	voiceSubmission    userVoiceSubmission
 
 	closeOnce sync.Once
 	wg        sync.WaitGroup
@@ -204,11 +210,12 @@ type appServerSession struct {
 	completedMessageItems map[string]bool
 	lastFinalItem         string
 
-	runtimeMu          sync.RWMutex
-	usage              *core.UsageReport
-	context            *core.ContextUsage
-	runtime            core.SessionRuntime
-	taskRuntimeEnvFile string
+	runtimeMu             sync.RWMutex
+	usage                 *core.UsageReport
+	context               *core.ContextUsage
+	runtime               core.SessionRuntime
+	taskRuntimeEnvFile    string
+	nativeWebModelCatalog string
 	// Resumed threads may retain a previous turn's collaboration instructions.
 	// A later unscoped turn must explicitly restore Codex's built-in default.
 	developerInstructionsManaged bool
@@ -234,7 +241,7 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, permissionsProfile, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, permissionsProfile, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, startupRuntime ...core.SessionRuntime) (*appServerSession, error) {
 	sessionStartedAt := time.Now()
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
@@ -265,6 +272,23 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 	if err != nil {
 		cancel()
 		return nil, err
+	}
+
+	if len(startupRuntime) > 0 {
+		runtime := startupRuntime[0]
+		if err := s.SetSessionRuntime(runtime); err != nil {
+			removeTaskRuntimeEnv(s.taskRuntimeEnvFile)
+			cancel()
+			return nil, err
+		}
+		if needsNativeWebModelCatalog(runtime) {
+			s.nativeWebModelCatalog, err = writeNativeWebModelCatalog(s.taskRuntimeEnvFile)
+			if err != nil {
+				removeTaskRuntimeEnv(s.taskRuntimeEnvFile)
+				cancel()
+				return nil, err
+			}
+		}
 	}
 
 	connectStartedAt := time.Now()
@@ -300,7 +324,7 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 	return s, nil
 }
 
-func (s *appServerSession) connect() error {
+func (s *appServerSession) startupArgs() []string {
 	args := []string{"app-server"}
 	if strings.TrimSpace(s.url) != "" {
 		args = append(args, "--listen", strings.TrimSpace(s.url))
@@ -317,7 +341,14 @@ func (s *appServerSession) connect() error {
 	if baseURL := strings.TrimSpace(s.baseURL); baseURL != "" {
 		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", baseURL))
 	}
-	cmd := exec.CommandContext(s.ctx, "codex", args...)
+	if s.nativeWebModelCatalog != "" {
+		args = append(args, "-c", fmt.Sprintf("model_catalog_json=%q", s.nativeWebModelCatalog))
+	}
+	return args
+}
+
+func (s *appServerSession) connect() error {
+	cmd := exec.CommandContext(s.ctx, "codex", s.startupArgs()...)
 	cmd.Dir = s.workDir
 	env := append([]string(nil), s.extraEnv...)
 	// Node/MCP child tools inherit the app-server environment, not the shell
@@ -411,6 +442,8 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 		s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 		s.threadID.Store(resp.Thread.ID)
 		s.threadBrandTools = s.isBrandAnalysisRuntime()
+		s.threadArchiveTools = s.isUserVoiceArchiveRuntime()
+		s.threadVoiceTools = s.isUserVoiceJudgmentRuntime()
 		slog.Info("codex app-server thread resumed", "thread_id", resp.Thread.ID)
 		s.emitLifecycle("agent_thread_ready", time.Since(startedAt))
 		return nil
@@ -426,6 +459,8 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 	s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 	s.threadID.Store(resp.Thread.ID)
 	s.threadBrandTools = s.isBrandAnalysisRuntime()
+	s.threadArchiveTools = s.isUserVoiceArchiveRuntime()
+	s.threadVoiceTools = s.isUserVoiceJudgmentRuntime()
 	slog.Info("codex app-server thread started", "thread_id", resp.Thread.ID)
 	s.emitLifecycle("agent_thread_ready", time.Since(startedAt))
 	return nil
@@ -472,8 +507,19 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	if effort := s.GetReasoningEffort(); effort != "" {
 		config["model_reasoning_effort"] = effort
 	}
+	// Thread overrides must also work when the process started with a different
+	// default model, before the trusted task runtime arrived.
+	if needsReasoningCapability(s.GetModel(), s.GetReasoningEffort()) {
+		config["model_supports_reasoning_summaries"] = true
+	}
 	if s.isBrandAnalysisRuntime() {
 		params["dynamicTools"] = brandAnalysisDynamicTools()
+	}
+	if s.isUserVoiceArchiveRuntime() {
+		params["dynamicTools"] = userVoiceArchiveDynamicTools()
+	}
+	if s.isUserVoiceJudgmentRuntime() {
+		params["dynamicTools"] = s.userVoiceJudgmentTools()
 	}
 	// Application-managed conversations replace the coding-assistant preamble
 	// guidance at the base-instruction level; see public_conversation_base.go.
@@ -617,7 +663,7 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	if collaborationMode := s.turnDeveloperInstructions(); collaborationMode != nil {
 		params["collaborationMode"] = collaborationMode
 	}
-	if schema := s.outputSchema(); len(schema) > 0 {
+	if schema := s.outputSchema(); len(schema) > 0 && !s.isUserVoiceJudgmentRuntime() {
 		params["outputSchema"] = schema
 	}
 	if metadata := s.responsesAPIClientMetadata(); len(metadata) > 0 {
@@ -675,6 +721,7 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	}
 	s.taskRuntimeEnvFile = envFile
 	searchChanged := s.webSearch != normalizeWebSearch(runtime.WebSearch)
+	previousReasoningCapability := needsReasoningCapability(s.model, s.effort)
 	s.runtime = runtime
 	if runtime.DeveloperInstructions != "" {
 		s.developerInstructionsManaged = true
@@ -686,6 +733,7 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 		s.effort = normalizeRuntimeReasoningEffort(effort)
 	}
 	s.webSearch = normalizeWebSearch(runtime.WebSearch)
+	reasoningCapabilityChanged := previousReasoningCapability != needsReasoningCapability(s.model, s.effort)
 	s.runtimeMu.Unlock()
 
 	// The thread retains its original shell policy. Only the protected file's
@@ -696,13 +744,21 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	s.brandFlowMu.Lock()
 	s.brandFlow = brandAnalysisFlow{}
 	s.brandFlowMu.Unlock()
+	s.resetUserVoiceSubmission(runtime.TaskID)
 
 	// App-server dynamic tools are fixed at thread/start (or thread/resume), not
 	// turn/start. Replace a reused thread when entering or leaving the dedicated
 	// brand-analysis tool mode so the model sees exactly the tools for this turn.
 	wantsBrandTools := strings.EqualFold(strings.TrimSpace(runtime.Scene), "brand_analysis")
+	wantsArchiveTools := s.isUserVoiceArchiveRuntime()
+	s.archiveMu.Lock()
+	if s.archiveTaskID != runtime.TaskID {
+		s.archiveUsed = false
+		s.archiveTaskID = runtime.TaskID
+	}
+	s.archiveMu.Unlock()
 	s.threadMu.Lock()
-	if s.CurrentSessionID() != "" && (s.threadBrandTools != wantsBrandTools || searchChanged) {
+	if s.CurrentSessionID() != "" && (s.threadBrandTools != wantsBrandTools || s.threadArchiveTools != wantsArchiveTools || s.threadVoiceTools || s.isUserVoiceJudgmentRuntime() || searchChanged || reasoningCapabilityChanged) {
 		s.threadID.Store("")
 		s.resumeID = ""
 	}
@@ -1045,6 +1101,25 @@ func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRa
 	}
 	if err := json.Unmarshal(paramsRaw, &params); err != nil {
 		s.writeDynamicToolResponse(rawID, false, "invalid tool arguments")
+		return
+	}
+	if s.isUserVoiceArchiveRuntime() && params.Tool == "search_reddit_archive" {
+		go func() {
+			result, err := s.collectUserVoiceArchive(params.Arguments)
+			if err != nil {
+				s.writeDynamicToolResponse(rawID, false, err.Error())
+				return
+			}
+			s.writeDynamicToolResponse(rawID, true, result)
+		}()
+		return
+	}
+	if s.isUserVoiceJudgmentRuntime() && params.Tool == "submit_reviewed_user_voice_judgments" {
+		if err := s.recordUserVoiceJudgment(params.Arguments); err != nil {
+			s.writeDynamicToolResponse(rawID, false, err.Error())
+		} else {
+			s.writeDynamicToolResponse(rawID, true, "Submission recorded for Portal validation. Finish now; do not repeat the JSON or submit again.")
+		}
 		return
 	}
 	if !s.isBrandAnalysisRuntime() {
@@ -2255,9 +2330,8 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "MCP", ToolInput: name + "\n" + appServerJSON(item["arguments"])})
 
 	case "webSearch":
-		query, _ := item["query"].(string)
 		s.noteBrandWebSearchStarted(itemID)
-		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "WebSearch", ToolInput: query,
+		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "WebSearch", ToolInput: appServerWebAction(item),
 			PublicActivity: webPublicActivity(item, "running")})
 
 	case "dynamicToolCall":
@@ -2298,6 +2372,11 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		s.stateMu.Unlock()
 		text, _ := item["text"].(string)
 		if strings.TrimSpace(text) == "" {
+			return
+		}
+		if s.isUserVoiceJudgmentRuntime() {
+			// Prose can never replace or contaminate the tool submission.
+			s.emit(core.Event{Type: core.EventThinking, Content: text})
 			return
 		}
 		if item["phase"] == "commentary" {
@@ -2368,13 +2447,12 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		})
 
 	case "webSearch":
-		query, _ := item["query"].(string)
 		s.noteBrandWebSearchCompleted(itemID)
 		s.emit(core.Event{
 			Type:           core.EventToolResult,
 			TraceID:        itemID,
 			ToolName:       "WebSearch",
-			ToolResult:     truncate(strings.TrimSpace(query), 500),
+			ToolResult:     appServerWebAction(item),
 			PublicActivity: webPublicActivity(item, "returned"),
 		})
 
@@ -2382,12 +2460,16 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		tool, _ := item["tool"].(string)
 		status, _ := item["status"].(string)
 		result := appServerDynamicToolText(item["contentItems"])
+		publicResult := truncate(strings.TrimSpace(result), 500)
+		if tool == "search_reddit_archive" {
+			publicResult = archiveExecutionReceipt(result)
+		}
 		success := appServerToolSuccess(status, nil)
 		s.emit(core.Event{
 			Type:        core.EventToolResult,
 			TraceID:     itemID,
 			ToolName:    tool,
-			ToolResult:  truncate(strings.TrimSpace(result), 500),
+			ToolResult:  publicResult,
 			ToolStatus:  strings.TrimSpace(status),
 			ToolSuccess: &success,
 		})
@@ -2577,6 +2659,38 @@ func stringValue(v *string) string {
 	return strings.TrimSpace(*v)
 }
 
+// Native web actions carry page URLs and batched queries in action, while the
+// legacy query field may be empty. Expose only the public tool arguments, never
+// the whole item or arbitrary future metadata.
+func appServerWebAction(item map[string]any) string {
+	if action, ok := item["action"].(map[string]any); ok {
+		kind, _ := action["type"].(string)
+		switch kind {
+		case "search", "openPage", "findInPage", "open_page", "find_in_page":
+			visible := map[string]any{"type": kind}
+			for _, key := range []string{"query", "url", "pattern"} {
+				if value, ok := action[key].(string); ok && value != "" {
+					visible[key] = value
+				}
+			}
+			if values, ok := action["queries"].([]any); ok {
+				queries := make([]string, 0, len(values))
+				for _, value := range values {
+					if query, ok := value.(string); ok {
+						queries = append(queries, query)
+					}
+				}
+				if len(queries) > 0 {
+					visible["queries"] = queries
+				}
+			}
+			return truncate(appServerJSON(visible), 4096)
+		}
+	}
+	query, _ := item["query"].(string)
+	return truncate(strings.TrimSpace(query), 4096)
+}
+
 func appServerJSON(v any) string {
 	if v == nil {
 		return ""
@@ -2625,6 +2739,10 @@ func rpcIDToInt64(v any) (int64, bool) {
 }
 
 func (s *appServerSession) completeTurn(turnID string, turnErr error) {
+	voiceResult := ""
+	if turnErr == nil && s.isUserVoiceJudgmentRuntime() {
+		voiceResult, turnErr = s.userVoiceJudgmentResult()
+	}
 	if turnErr == nil && s.brandCoreAwaitingPublication() {
 		turnErr = fmt.Errorf("brand analysis ended before the core profile was accepted for persistence")
 	}
@@ -2643,6 +2761,9 @@ func (s *appServerSession) completeTurn(turnID string, turnErr error) {
 		return
 	}
 	s.flushPendingAsText()
+	if voiceResult != "" {
+		s.emit(core.Event{Type: core.EventText, Content: voiceResult})
+	}
 	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
 }
 
