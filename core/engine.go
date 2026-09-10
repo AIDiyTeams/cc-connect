@@ -6738,6 +6738,7 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 			slog.Info("audit: command_executed",
 				"user_id", msg.UserID, "platform", msg.Platform,
 				"project", e.name, "command", skill.Name, "type", "skill")
+			// Skill arguments are structured prose; preserve quotes and line breaks.
 			e.executeSkill(p, msg, skill, skillCommandArguments(raw))
 			return true
 		}
