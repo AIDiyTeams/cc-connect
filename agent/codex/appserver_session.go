@@ -475,6 +475,11 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	if s.isBrandAnalysisRuntime() {
 		params["dynamicTools"] = brandAnalysisDynamicTools()
 	}
+	// Application-managed conversations replace the coding-assistant preamble
+	// guidance at the base-instruction level; see public_conversation_base.go.
+	if base := s.baseInstructionsOverride(); base != "" {
+		params["baseInstructions"] = base
+	}
 	if profile := strings.TrimSpace(s.permissionsProfile); profile != "" {
 		params["permissions"] = profile
 		params["approvalPolicy"] = "never"

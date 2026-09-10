@@ -1,5 +1,26 @@
 # Public progress event boundary
 
+## Base-instruction override for application conversations
+
+Codex's built-in base prompt is written for a terminal coding assistant. Its
+"Preamble messages" and "Sharing progress updates" sections instruct the model
+to announce the next tool call ("now checking the API route definitions") on
+the system/instructions channel, which outranks the application's
+developer-role policy on providers that map `developer` to `user`. For
+conversations the trusted control plane manages (the runtime lane carries
+`developer_instructions` before the thread is created), the app-server adapter
+passes `baseInstructions` on `thread/start`: the vendored Codex 0.153.4 base
+prompt (`agent/codex/assets/codex-default-base-instructions.md`) with only
+those two sections replaced by `publicConversationSection` in
+`agent/codex/public_conversation_base.go`. The first message of a turn must
+confirm the user's need and the deliverable in the user's language; messages
+between tool calls carry findings, decisions or limitations, never tool,
+file, credential or format narration. Tool, sandbox, planning and final-answer
+guidance stay byte-identical, and the unit test pins the vendored checksum so
+a Codex upgrade on the bridge host refreshes the file deliberately. Plain
+bridge sessions without runtime developer instructions keep the native prompt.
+Resumed threads keep the base prompt they were created with.
+
 The Codex app-server adapter maps `agentMessage.phase=commentary` to `EventCommentary`; reasoning stays `EventThinking`, and final answers stay terminal text. Commentary deltas are withheld from terminal streaming when the native item starts with the commentary phase. Non-final buffered public messages are emitted at tool boundaries as commentary.
 
 The engine reports commentary through `AgentTraceReporter` without accumulating it into final text. The bridge keeps its backwards-compatible `agent_thinking` envelope and adds `phase` plus the trusted dispatch `turn_no` from `SessionRuntime`. The backend owns persistence, authorization and visibility; the bridge does not infer business-specific progress, translate text or summarize reasoning.
