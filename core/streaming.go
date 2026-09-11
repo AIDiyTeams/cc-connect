@@ -407,6 +407,25 @@ func (sp *streamPreview) finish(finalText, statusFooter string) bool {
 	if sp.transform != nil {
 		finalText = sp.transform(finalText)
 	}
+	// A lost or degraded preview must not turn a complete machine answer into
+	// multiple IM-sized replies. The final frame carries the whole answer.
+	if sender, ok := sp.platform.(FinalStreamSender); ok && finalText != "" {
+		handle := sp.previewMsgID
+		if handle == nil {
+			handle = sp.replyCtx
+		}
+		if sp.pendingStatus != "" {
+			if updater, ok := sp.platform.(PreviewStatusUpdater); ok {
+				updater.SetPreviewStatus(handle, sp.pendingStatus)
+			}
+		}
+		if err := sender.FinishStream(sp.ctx, handle, finalText, statusFooter); err == nil {
+			return true
+		} else if err != ErrNotSupported {
+			slog.Warn("stream final delivery failed", "error", err)
+			return false
+		}
+	}
 	if sp.previewMsgID == nil || sp.degraded {
 		if sp.previewMsgID != nil && sp.degraded {
 			// Try to recover degraded preview via UpdateMessage before falling back to delete

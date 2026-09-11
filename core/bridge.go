@@ -462,6 +462,7 @@ var (
 	_ StatusFooterSender                = (*BridgePlatform)(nil)
 	_ StatusFooterUpdater               = (*BridgePlatform)(nil)
 	_ StreamCompleter                   = (*BridgePlatform)(nil)
+	_ FinalStreamSender                 = (*BridgePlatform)(nil)
 	_ PreviewStarter                    = (*BridgePlatform)(nil)
 	_ PreviewCleaner                    = (*BridgePlatform)(nil)
 	_ PreviewFinishPreference           = (*BridgePlatform)(nil)
@@ -1174,6 +1175,38 @@ func (bp *BridgePlatform) CompleteStream(ctx context.Context, replyCtx any, cont
 	return bp.sendReplyStream(rc, content, true)
 }
 
+// FinishStream retains the completed token-stream answer through a short
+// backend restart. No model request is replayed. This also covers an outage
+// before the first preview, where the normal fallback would split stage JSON.
+func (bp *BridgePlatform) FinishStream(ctx context.Context, replyCtx any, content, statusFooter string) error {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok || !rc.tokenStream {
+		return ErrNotSupported
+	}
+	if statusFooter != "" {
+		rc.status = parseBridgeStatusFooter(statusFooter)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	payload := replyStreamPayload(rc, content, true)
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("bridge: final delivery interrupted: %w", err)
+		}
+		if err := bp.server.sendFinalToAdapter(ctx, rc.Platform, payload); err == nil {
+			rc.lastStreamText = content
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("bridge: final delivery interrupted: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
 // KeepPreviewOnFinish keeps the streaming message; Java adapters render the
 // done frame in-place instead of deleting the preview and sending a fresh reply.
 func (bp *BridgePlatform) KeepPreviewOnFinish() bool { return true }
@@ -1188,6 +1221,14 @@ func (rc *bridgeReplyCtx) StreamPreviewOverrides() (intervalMs, minDeltaChars, m
 }
 
 func (bp *BridgePlatform) sendReplyStream(rc *bridgeReplyCtx, content string, done bool) error {
+	if err := bp.server.sendToAdapter(rc.Platform, replyStreamPayload(rc, content, done)); err != nil {
+		return err
+	}
+	rc.lastStreamText = content
+	return nil
+}
+
+func replyStreamPayload(rc *bridgeReplyCtx, content string, done bool) map[string]any {
 	delta := content
 	if strings.HasPrefix(content, rc.lastStreamText) {
 		delta = content[len(rc.lastStreamText):]
@@ -1216,10 +1257,36 @@ func (bp *BridgePlatform) sendReplyStream(rc *bridgeReplyCtx, content string, do
 		attachBridgeStatus(payload, rc)
 	}
 	attachResponseSource(payload, rc)
-	if err := bp.server.sendToAdapter(rc.Platform, payload); err != nil {
+	return payload
+}
+
+// Final delivery never waits indefinitely behind a stalled writer or socket.
+// A failed socket is retired so the next attempt uses the registered replacement.
+func (bs *BridgeServer) sendFinalToAdapter(ctx context.Context, platform string, payload map[string]any) error {
+	a := bs.getAdapter(platform)
+	if a == nil {
+		return fmt.Errorf("bridge: adapter %q not connected", platform)
+	}
+	if !a.writeMu.TryLock() {
+		return fmt.Errorf("bridge: adapter writer busy")
+	}
+	defer a.writeMu.Unlock()
+	deadline := time.Now().Add(10 * time.Second)
+	if limit, ok := ctx.Deadline(); ok && limit.Before(deadline) {
+		deadline = limit
+	}
+	if err := a.conn.SetWriteDeadline(deadline); err != nil {
 		return err
 	}
-	rc.lastStreamText = content
+	if err := a.conn.WriteJSON(payload); err != nil {
+		_ = a.conn.Close()
+		return err
+	}
+	// The frame has already been written: a deadline-reset failure must not
+	// turn a successful send into another delivery of the same terminal frame.
+	if err := a.conn.SetWriteDeadline(time.Time{}); err != nil {
+		_ = a.conn.Close()
+	}
 	return nil
 }
 

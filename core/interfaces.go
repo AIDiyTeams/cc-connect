@@ -366,6 +366,13 @@ type StreamCompleter interface {
 	CompleteStream(ctx context.Context, replyCtx any, content string) error
 }
 
+// FinalStreamSender delivers a complete answer independently of a preview. It
+// may wait for a temporary transport outage within ctx's deadline. Returning nil
+// means the final frame was sent; ErrNotSupported keeps the normal preview path.
+type FinalStreamSender interface {
+	FinishStream(ctx context.Context, replyCtx any, content, statusFooter string) error
+}
+
 // StreamPreviewTuner is an optional interface for platforms that want tighter
 // streaming flush intervals and length (e.g. adapters declaring token_stream).
 // maxChars=0 is unlimited; a negative value retains the configured limit.
