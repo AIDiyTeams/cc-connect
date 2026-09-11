@@ -72,8 +72,14 @@ func commandPublicActivity(command, status string) *core.PublicActivity {
 				return &core.PublicActivity{Kind: "search", Status: status, Query: truncate(query, 120)}
 			}
 		}
-		parsed.RawQuery, parsed.Fragment, parsed.RawFragment = "", "", ""
-		return &core.PublicActivity{Kind: "open_page", Status: status, URL: parsed.String()}
+		activity := &core.PublicActivity{Kind: "open_page", Status: status, Label: host}
+		// A link is offered only when the address is a plain page: an API endpoint or a
+		// query-bearing URL would open an error page or leak parameters once stripped.
+		if parsed.RawQuery == "" && !apiLikePath(parsed.Path) {
+			parsed.Fragment, parsed.RawFragment = "", ""
+			activity.URL = parsed.String()
+		}
+		return activity
 	}
 	if strings.TrimSpace(command) == "" {
 		return nil
@@ -104,4 +110,10 @@ func trimCommandURL(raw string) string {
 		raw = strings.TrimSuffix(raw, "]")
 	}
 	return raw
+}
+
+var apiPathPattern = regexp.MustCompile(`(?i)\.(fcgi|cgi|php|aspx?|jsp|json|xml)$|/api/|/v\d+/`)
+
+func apiLikePath(path string) bool {
+	return apiPathPattern.MatchString(path)
 }

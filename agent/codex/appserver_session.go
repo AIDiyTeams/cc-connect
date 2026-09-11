@@ -2360,7 +2360,7 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 	case "reasoning":
 		text := appServerReasoningText(item)
 		if text != "" {
-			s.emit(core.Event{Type: core.EventThinking, Content: text})
+			s.emit(core.Event{Type: core.EventThinking, Content: text, ContentKind: reasoningKind(item)})
 		}
 
 	case "agentMessage":
@@ -2491,6 +2491,15 @@ func appServerReasoningText(item map[string]any) string {
 		parts = appServerReasoningParts(item["content"])
 	}
 	return strings.Join(parts, "\n")
+}
+
+// reasoningKind tells the application whether a completed reasoning item carries a
+// provider-written summary (safe to show as-is) or only raw reasoning text.
+func reasoningKind(item map[string]any) string {
+	if len(appServerReasoningParts(item["summary"])) > 0 {
+		return "summary"
+	}
+	return "raw"
 }
 
 func appServerReasoningParts(raw any) []string {

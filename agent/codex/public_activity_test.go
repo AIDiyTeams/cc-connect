@@ -54,8 +54,8 @@ func TestCommandPublicActivityExposesOnlySearchQueriesAndPageHosts(t *testing.T)
 		t.Fatalf("pubmed receipt = %+v", pubmed)
 	}
 	page := commandPublicActivity(`cd /tmp && curl -sL -A "Mozilla/5.0" "https://www.fda.gov/medical-devices/general-wellness?token=secret#top" -o page.html`, "running")
-	if page == nil || page.Kind != "open_page" || page.URL != "https://www.fda.gov/medical-devices/general-wellness" || page.Query != "" {
-		t.Fatalf("page receipt = %+v", page)
+	if page == nil || page.Kind != "open_page" || page.URL != "" || page.Label != "www.fda.gov" || page.Query != "" {
+		t.Fatalf("query-bearing page keeps only its host: %+v", page)
 	}
 	if got := commandPublicActivity(`curl -s http://127.0.0.1:11446/v1/models`, "running"); got == nil || got.Kind != "command" || got.URL != "" {
 		t.Fatalf("loopback address must not leak: %+v", got)
@@ -94,5 +94,29 @@ func TestCommandPublicActivityKeepsParenthesesAndDropsShellContinuations(t *test
 	page := commandPublicActivity("for u in https://www.who.int/publications/i/item/9789240029200 ; do curl -s \"$u\"; done", "returned")
 	if page == nil || page.URL != "https://www.who.int/publications/i/item/9789240029200" {
 		t.Fatalf("page receipt = %+v", page)
+	}
+}
+
+func TestCommandPublicActivityLinksOnlyPlainPages(t *testing.T) {
+	api := commandPublicActivity(`curl -s "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=333"`, "returned")
+	if api == nil || api.Kind != "open_page" || api.URL != "" || api.Label != "eutils.ncbi.nlm.nih.gov" {
+		t.Fatalf("API endpoints carry a host label and no link: %+v", api)
+	}
+	page := commandPublicActivity(`curl -sL "https://www.fda.gov/medical-devices/general-wellness"`, "returned")
+	if page == nil || page.URL != "https://www.fda.gov/medical-devices/general-wellness" || page.Label != "www.fda.gov" {
+		t.Fatalf("plain pages keep their link: %+v", page)
+	}
+	withQuery := commandPublicActivity(`curl -s "https://www.who.int/publications?type=report&token=abc"`, "returned")
+	if withQuery == nil || withQuery.URL != "" || withQuery.Label != "www.who.int" {
+		t.Fatalf("query-bearing pages must not be linked: %+v", withQuery)
+	}
+}
+
+func TestReasoningCompletionMarksSummaryVersusRaw(t *testing.T) {
+	if k := reasoningKind(map[string]any{"summary": []any{"short"}, "content": []any{"long"}}); k != "summary" {
+		t.Fatalf("summary parts mark the block as summary: %q", k)
+	}
+	if k := reasoningKind(map[string]any{"summary": []any{}, "content": []any{map[string]any{"type": "reasoning_text", "text": "long"}}}); k != "raw" {
+		t.Fatalf("content-only blocks are raw: %q", k)
 	}
 }

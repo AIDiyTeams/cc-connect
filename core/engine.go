@@ -4963,6 +4963,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				trace.ContentVersion = event.ContentVersion
 				trace.ContentDone = event.ContentDone
 				trace.ContentProvisional = event.ContentProvisional
+				trace.ContentKind = event.ContentKind
 			}
 			if trace.Output == "" {
 				trace.Output = event.Content

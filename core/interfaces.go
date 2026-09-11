@@ -40,6 +40,7 @@ type AgentTraceEvent struct {
 	ContentProvisional bool // Native item phase is not final until item/completed.
 	ContentVersion     int64
 	ContentDone        bool
+	ContentKind        string // Thinking only: "summary" or "raw"; the backend shows summaries and summarizes raw text.
 }
 
 // AgentStructuredResultReporter transports a validated dynamic-tool result to
