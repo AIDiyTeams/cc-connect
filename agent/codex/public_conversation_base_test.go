@@ -50,6 +50,7 @@ func TestPublicConversationBaseReplacesOnlyTheCodingAssistantNarrationGuidance(t
 		"Exploring the environment is silent",
 		"Delivery mechanics are silent too",
 		"acknowledgement of the request has already been shown",
+		"never drift",
 		"Do not end it with what you will look at, check or confirm first.",
 		"## Planning",
 		"## Task execution",
