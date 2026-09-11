@@ -210,6 +210,7 @@ type appServerSession struct {
 	completedMessageItems map[string]bool
 	lastFinalItem         string
 	lastCommentary        recentCommentary
+	turnCommentaryCount   int
 
 	runtimeMu             sync.RWMutex
 	usage                 *core.UsageReport
@@ -700,6 +701,8 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	s.finalItems = nil
 	s.completedMessageItems = nil
 	s.lastFinalItem = ""
+	s.lastCommentary = recentCommentary{}
+	s.turnCommentaryCount = 0
 	s.stateMu.Unlock()
 
 	return nil
