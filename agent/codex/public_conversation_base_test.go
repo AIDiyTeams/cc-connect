@@ -48,6 +48,8 @@ func TestPublicConversationBaseReplacesOnlyTheCodingAssistantNarrationGuidance(t
 		"language of the user's latest message",
 		"Never mention the workspace, capabilities, skills, instructions, credentials",
 		"Exploring the environment is silent",
+		"names what this step achieves for the user",
+		"publish a plan of three to five steps",
 		"Delivery mechanics are silent too",
 		"never drift",
 		"Do not end it with what you will look at, check or confirm first.",

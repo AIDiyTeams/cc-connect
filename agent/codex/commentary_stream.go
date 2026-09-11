@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"strings"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -50,7 +51,42 @@ func (s *appServerSession) emitCommentarySnapshot(itemID, text string, done, pro
 	if done {
 		delete(s.commentaryItems, itemID)
 		delete(s.commentaryStreams, itemID)
+		if !provisional {
+			s.lastCommentary = recentCommentary{itemID: itemID, text: stream.text, version: stream.version, at: now}
+		}
 	}
 	s.stateMu.Unlock()
 	s.emit(event)
+}
+
+// recentCommentary is the last completed public note; when a tool call follows
+// it within a few seconds, it was the Agent's purpose line for that action.
+type recentCommentary struct {
+	itemID  string
+	text    string
+	version int64
+	at      time.Time
+	tagged  bool
+}
+
+// stepCaptionWindow bounds how long after a note a tool call may start for the
+// note to count as that action's caption. Findings the Agent states and then
+// keeps thinking about stay ordinary notes.
+const stepCaptionWindow = 4 * time.Second
+
+// tagRecentCommentaryAsStep re-sends the last completed note as a step caption
+// when an action starts right after it. Same trace id, next version, so the
+// application updates the existing entry instead of adding a second one.
+func (s *appServerSession) tagRecentCommentaryAsStep() {
+	s.stateMu.Lock()
+	last := s.lastCommentary
+	if last.itemID == "" || last.tagged || time.Since(last.at) > stepCaptionWindow ||
+		len([]rune(strings.TrimSpace(last.text))) > 80 {
+		s.stateMu.Unlock()
+		return
+	}
+	s.lastCommentary.tagged = true
+	s.stateMu.Unlock()
+	s.emit(core.Event{Type: core.EventCommentary, TraceID: last.itemID, Content: last.text,
+		ContentVersion: last.version + 1, ContentDone: true, ContentKind: "step"})
 }

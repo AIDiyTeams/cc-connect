@@ -614,6 +614,9 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 		if event.Type == EventThinking && event.ContentKind != "" {
 			payload["reasoning_kind"] = event.ContentKind
 		}
+		if event.Type == EventCommentary && event.ContentKind != "" {
+			payload["commentary_kind"] = event.ContentKind
+		}
 		if streamCommentary && streamSupported {
 			payload["content_version"] = event.ContentVersion
 			payload["content_done"] = event.ContentDone

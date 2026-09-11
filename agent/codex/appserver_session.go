@@ -209,6 +209,7 @@ type appServerSession struct {
 	finalItems            map[string]bool
 	completedMessageItems map[string]bool
 	lastFinalItem         string
+	lastCommentary        recentCommentary
 
 	runtimeMu             sync.RWMutex
 	usage                 *core.UsageReport
@@ -2322,6 +2323,7 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 	}
 
 	s.flushPendingAsThinking()
+	s.tagRecentCommentaryAsStep()
 
 	switch itemType {
 	case "commandExecution":
