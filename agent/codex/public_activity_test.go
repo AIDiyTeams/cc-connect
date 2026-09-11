@@ -71,3 +71,28 @@ func TestCommandPublicActivityExposesOnlySearchQueriesAndPageHosts(t *testing.T)
 		t.Fatal("empty command produces no receipt")
 	}
 }
+
+func TestReasoningTextAcceptsRawContentParts(t *testing.T) {
+	item := map[string]any{"type": "reasoning", "summary": []any{},
+		"content": []any{map[string]any{"type": "reasoning_text", "text": "比较两家定价"}, map[string]any{"type": "reasoning_text", "text": "核对席位规则"}}}
+	if got := appServerReasoningText(item); got != "比较两家定价\n核对席位规则" {
+		t.Fatalf("raw reasoning parts must be read: %q", got)
+	}
+	if got := appServerReasoningText(map[string]any{"summary": []any{"summary line"}, "content": []any{"raw"}}); got != "summary line" {
+		t.Fatalf("summaries take precedence: %q", got)
+	}
+	if got := appServerReasoningText(map[string]any{"summary": []any{}, "content": nil}); got != "" {
+		t.Fatalf("no text yields empty: %q", got)
+	}
+}
+
+func TestCommandPublicActivityKeepsParenthesesAndDropsShellContinuations(t *testing.T) {
+	search := commandPublicActivity(`curl -s "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=(remote+photoplethysmography)+AND+(heart+rate)" \`, "running")
+	if search == nil || search.Query != "(remote photoplethysmography) AND (heart rate)" {
+		t.Fatalf("query must survive parentheses and lose the continuation: %+v", search)
+	}
+	page := commandPublicActivity("for u in https://www.who.int/publications/i/item/9789240029200 ; do curl -s \"$u\"; done", "returned")
+	if page == nil || page.URL != "https://www.who.int/publications/i/item/9789240029200" {
+		t.Fatalf("page receipt = %+v", page)
+	}
+}

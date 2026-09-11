@@ -525,6 +525,11 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	// guidance at the base-instruction level; see public_conversation_base.go.
 	if base := s.baseInstructionsOverride(); base != "" {
 		params["baseInstructions"] = base
+		// Codex omits raw reasoning from completed items unless asked. The
+		// application summarizes each block for the user and never shows the
+		// raw text; without this, providers that have no reasoning summaries
+		// (DeepSeek) would leave the conversation with no thinking signal at all.
+		config["show_raw_agent_reasoning"] = true
 	}
 	if profile := strings.TrimSpace(s.permissionsProfile); profile != "" {
 		params["permissions"] = profile
@@ -2479,24 +2484,34 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 }
 
 func appServerReasoningText(item map[string]any) string {
+	parts := appServerReasoningParts(item["summary"])
+	if len(parts) == 0 {
+		// Providers without reasoning summaries (DeepSeek) deliver only raw
+		// content, as plain strings or as {type: "reasoning_text", text} parts.
+		parts = appServerReasoningParts(item["content"])
+	}
+	return strings.Join(parts, "\n")
+}
+
+func appServerReasoningParts(raw any) []string {
+	entries, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
 	var parts []string
-	if summary, ok := item["summary"].([]any); ok {
-		for _, entry := range summary {
-			if text, ok := entry.(string); ok && strings.TrimSpace(text) != "" {
+	for _, entry := range entries {
+		switch value := entry.(type) {
+		case string:
+			if strings.TrimSpace(value) != "" {
+				parts = append(parts, value)
+			}
+		case map[string]any:
+			if text, ok := value["text"].(string); ok && strings.TrimSpace(text) != "" {
 				parts = append(parts, text)
 			}
 		}
 	}
-	if len(parts) == 0 {
-		if content, ok := item["content"].([]any); ok {
-			for _, entry := range content {
-				if text, ok := entry.(string); ok && strings.TrimSpace(text) != "" {
-					parts = append(parts, text)
-				}
-			}
-		}
-	}
-	return strings.Join(parts, "\n")
+	return parts
 }
 
 func appServerDynamicToolText(raw any) string {

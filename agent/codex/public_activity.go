@@ -47,7 +47,7 @@ var searchQueryParams = map[string]string{
 	"reddit.com":              "q",
 }
 
-var commandURLPattern = regexp.MustCompile(`https?://[^\s"'<>\)\]]+`)
+var commandURLPattern = regexp.MustCompile(`https?://[^\s"'<>]+`)
 
 // commandPublicActivity turns a shell command into an allowlisted receipt for
 // the conversation view: the first web address it fetches becomes a search
@@ -57,7 +57,7 @@ var commandURLPattern = regexp.MustCompile(`https?://[^\s"'<>\)\]]+`)
 // text itself never leaves the bridge.
 func commandPublicActivity(command, status string) *core.PublicActivity {
 	for _, raw := range commandURLPattern.FindAllString(command, 8) {
-		raw = strings.TrimRight(raw, `.,;:"'`)
+		raw = trimCommandURL(raw)
 		parsed, err := url.Parse(raw)
 		if err != nil || parsed.User != nil || parsed.Hostname() == "" {
 			continue
@@ -68,7 +68,8 @@ func commandPublicActivity(command, status string) *core.PublicActivity {
 		}
 		if param := searchParamFor(host); param != "" {
 			if query := strings.TrimSpace(parsed.Query().Get(param)); query != "" {
-				return &core.PublicActivity{Kind: "search", Status: status, Query: truncate(strings.Join(strings.Fields(query), " "), 120)}
+				query = strings.TrimRight(strings.Join(strings.Fields(query), " "), "\\")
+				return &core.PublicActivity{Kind: "search", Status: status, Query: truncate(query, 120)}
 			}
 		}
 		parsed.RawQuery, parsed.Fragment, parsed.RawFragment = "", "", ""
@@ -90,4 +91,17 @@ func searchParamFor(host string) string {
 		return "q"
 	}
 	return ""
+}
+
+// trimCommandURL drops shell punctuation glued to a URL while keeping brackets
+// that belong to it, such as PubMed boolean groups in a query string.
+func trimCommandURL(raw string) string {
+	raw = strings.TrimRight(raw, ".,;:\"'\\`")
+	for strings.HasSuffix(raw, ")") && strings.Count(raw, ")") > strings.Count(raw, "(") {
+		raw = strings.TrimSuffix(raw, ")")
+	}
+	for strings.HasSuffix(raw, "]") && strings.Count(raw, "]") > strings.Count(raw, "[") {
+		raw = strings.TrimSuffix(raw, "]")
+	}
+	return raw
 }

@@ -115,4 +115,12 @@ func TestThreadParamsOverrideBaseInstructionsOnlyForApplicationManagedConversati
 	if strings.Contains(got, "### Preamble messages") {
 		t.Fatal("override still carries the coding-assistant preamble guidance")
 	}
+	managedConfig, _ := managed.threadRequestParams()["config"].(map[string]any)
+	if managedConfig["show_raw_agent_reasoning"] != true {
+		t.Fatal("managed conversations must receive raw reasoning items for the backend summarizer")
+	}
+	plainConfig, _ := plain.threadRequestParams()["config"].(map[string]any)
+	if _, ok := plainConfig["show_raw_agent_reasoning"]; ok {
+		t.Fatal("plain bridge sessions keep Codex's default reasoning visibility")
+	}
 }
