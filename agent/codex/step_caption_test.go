@@ -9,6 +9,12 @@ import (
 
 func TestNoteRightBeforeAnActionBecomesAStepCaption(t *testing.T) {
 	s := &appServerSession{events: make(chan core.Event, 8)}
+	s.emitCommentarySnapshot("note-0", "你想知道三款应用的定价和功能差异，我先核实再对比。", true, false)
+	<-s.events
+	s.handleItemStarted(map[string]any{"type": "commandExecution", "id": "cmd-0", "command": "ls"})
+	if ev := <-s.events; ev.Type != core.EventToolUse {
+		t.Fatalf("the opening sentence of a turn stays prose: %+v", ev)
+	}
 	s.emitCommentarySnapshot("note-1", "核实近三年心率测量的公开证据", true, false)
 	first := <-s.events
 	if first.Type != core.EventCommentary || first.ContentKind != "" || first.ContentVersion != 1 {

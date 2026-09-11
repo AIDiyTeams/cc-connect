@@ -52,7 +52,9 @@ func (s *appServerSession) emitCommentarySnapshot(itemID, text string, done, pro
 		delete(s.commentaryItems, itemID)
 		delete(s.commentaryStreams, itemID)
 		if !provisional {
-			s.lastCommentary = recentCommentary{itemID: itemID, text: stream.text, version: stream.version, at: now}
+			s.turnCommentaryCount++
+			s.lastCommentary = recentCommentary{itemID: itemID, text: stream.text, version: stream.version, at: now,
+				opening: s.turnCommentaryCount == 1}
 		}
 	}
 	s.stateMu.Unlock()
@@ -67,6 +69,9 @@ type recentCommentary struct {
 	version int64
 	at      time.Time
 	tagged  bool
+	// opening marks the first note of a turn: the sentence that confirms the
+	// user's request. It reads as prose even when an action follows at once.
+	opening bool
 }
 
 // stepCaptionWindow bounds how long after a note a tool call may start for the
@@ -80,7 +85,7 @@ const stepCaptionWindow = 4 * time.Second
 func (s *appServerSession) tagRecentCommentaryAsStep() {
 	s.stateMu.Lock()
 	last := s.lastCommentary
-	if last.itemID == "" || last.tagged || time.Since(last.at) > stepCaptionWindow ||
+	if last.itemID == "" || last.tagged || last.opening || time.Since(last.at) > stepCaptionWindow ||
 		len([]rune(strings.TrimSpace(last.text))) > 80 {
 		s.stateMu.Unlock()
 		return
