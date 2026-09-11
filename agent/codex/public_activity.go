@@ -84,7 +84,7 @@ func commandPublicActivity(command, status string) *core.PublicActivity {
 	if strings.TrimSpace(command) == "" {
 		return nil
 	}
-	return &core.PublicActivity{Kind: "command", Status: status}
+	return &core.PublicActivity{Kind: "command", Status: status, Label: commandActivityLabel(command)}
 }
 
 func searchParamFor(host string) string {

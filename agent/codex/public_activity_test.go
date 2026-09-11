@@ -64,8 +64,11 @@ func TestCommandPublicActivityExposesOnlySearchQueriesAndPageHosts(t *testing.T)
 		t.Fatalf("credentialed URL must not leak: %+v", got)
 	}
 	step := commandPublicActivity(`cd /home/ubuntu/workspaces/test && node /home/ubuntu/Skills-OL-test/tomako-document.mjs --title x`, "running")
-	if step == nil || step.Kind != "command" || step.URL != "" || step.Query != "" || step.Label != "" {
-		t.Fatalf("plain command receipt must carry no details: %+v", step)
+	if step == nil || step.Kind != "command" || step.URL != "" || step.Query != "" || step.Label != "document" {
+		t.Fatalf("command receipt carries only its category: %+v", step)
+	}
+	if plain := commandPublicActivity(`mkdir -p out && cp a.txt out/`, "running"); plain == nil || plain.Label != "" || plain.URL != "" {
+		t.Fatalf("unknown commands stay anonymous: %+v", plain)
 	}
 	if commandPublicActivity("   ", "running") != nil {
 		t.Fatal("empty command produces no receipt")
