@@ -123,3 +123,10 @@ func TestReasoningCompletionMarksSummaryVersusRaw(t *testing.T) {
 		t.Fatalf("content-only blocks are raw: %q", k)
 	}
 }
+
+func TestCommandPublicActivityDropsUnexpandedShellVariablesFromQueries(t *testing.T) {
+	got := commandPublicActivity(`for q in a b; do curl -s "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${q}+AND+review"; done`, "returned")
+	if got == nil || got.Kind != "search" || got.Query != "" {
+		t.Fatalf("shell variables must not be shown as search text: %+v", got)
+	}
+}

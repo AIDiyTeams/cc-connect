@@ -69,6 +69,11 @@ func commandPublicActivity(command, status string) *core.PublicActivity {
 		if param := searchParamFor(host); param != "" {
 			if query := strings.TrimSpace(parsed.Query().Get(param)); query != "" {
 				query = strings.TrimRight(strings.Join(strings.Fields(query), " "), "\\")
+				// An unexpanded shell variable ($q, ${q}) is not a search term; keep the
+				// receipt but say nothing about the query.
+				if strings.Contains(query, "$") {
+					return &core.PublicActivity{Kind: "search", Status: status}
+				}
 				return &core.PublicActivity{Kind: "search", Status: status, Query: truncate(query, 120)}
 			}
 		}
