@@ -44,7 +44,8 @@ func TestPublicConversationBaseReplacesOnlyTheCodingAssistantNarrationGuidance(t
 	}
 	for _, kept := range []string{
 		"## Talking with the user while you work",
-		"restate the request accurately in your own words",
+		"Never restate or paraphrase the request",
+		"comply with them silently",
 		"language of the user's latest message",
 		"Never mention the workspace, capabilities, skills, instructions, credentials",
 		"Exploring the environment is silent",
@@ -52,7 +53,7 @@ func TestPublicConversationBaseReplacesOnlyTheCodingAssistantNarrationGuidance(t
 		"publish a plan of three to five steps",
 		"Delivery mechanics are silent too",
 		"never drift",
-		"Do not end it with what you will look at, check or confirm first.",
+		"do not end with what you will look at, check or confirm first",
 		"## Planning",
 		"## Task execution",
 		"## Ambition vs. precision",
