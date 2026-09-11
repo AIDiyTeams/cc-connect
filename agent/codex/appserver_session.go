@@ -2321,7 +2321,8 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 	switch itemType {
 	case "commandExecution":
 		command, _ := item["command"].(string)
-		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "Bash", ToolInput: command})
+		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "Bash", ToolInput: command,
+			PublicActivity: commandPublicActivity(command, "running")})
 
 	case "mcpToolCall":
 		server, _ := item["server"].(string)
@@ -2419,14 +2420,15 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		}
 		success := appServerToolSuccess(status, exitCodePtr)
 		s.emit(core.Event{
-			Type:         core.EventToolResult,
-			TraceID:      itemID,
-			ToolName:     "Bash",
-			ToolInput:    command,
-			ToolResult:   truncate(strings.TrimSpace(output), 500),
-			ToolStatus:   strings.TrimSpace(status),
-			ToolExitCode: exitCodePtr,
-			ToolSuccess:  &success,
+			Type:           core.EventToolResult,
+			TraceID:        itemID,
+			ToolName:       "Bash",
+			ToolInput:      command,
+			ToolResult:     truncate(strings.TrimSpace(output), 500),
+			ToolStatus:     strings.TrimSpace(status),
+			ToolExitCode:   exitCodePtr,
+			ToolSuccess:    &success,
+			PublicActivity: commandPublicActivity(command, "returned"),
 		})
 
 	case "mcpToolCall":

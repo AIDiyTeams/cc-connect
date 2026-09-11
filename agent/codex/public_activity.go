@@ -1,7 +1,9 @@
 package codex
 
 import (
+	"net"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -32,4 +34,60 @@ func webPublicActivity(item map[string]any, status string) *core.PublicActivity 
 		}
 	}
 	return activity
+}
+
+// searchQueryParams lists, per host suffix, the query parameter that carries a
+// human search string. Anything else on the URL is dropped.
+var searchQueryParams = map[string]string{
+	"duckduckgo.com":          "q",
+	"google.com":              "q",
+	"bing.com":                "q",
+	"search.brave.com":        "q",
+	"eutils.ncbi.nlm.nih.gov": "term",
+	"reddit.com":              "q",
+}
+
+var commandURLPattern = regexp.MustCompile(`https?://[^\s"'<>\)\]]+`)
+
+// commandPublicActivity turns a shell command into an allowlisted receipt for
+// the conversation view: the first web address it fetches becomes a search
+// (decoded query only) or a page read (scheme and host, path kept, query and
+// fragment dropped). Commands without a web address are reported only as an
+// anonymous step so the user still sees that work is happening. The command
+// text itself never leaves the bridge.
+func commandPublicActivity(command, status string) *core.PublicActivity {
+	for _, raw := range commandURLPattern.FindAllString(command, 8) {
+		raw = strings.TrimRight(raw, `.,;:"'`)
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.User != nil || parsed.Hostname() == "" {
+			continue
+		}
+		host := strings.ToLower(parsed.Hostname())
+		if host == "localhost" || strings.HasSuffix(host, ".local") || net.ParseIP(host) != nil || !strings.Contains(host, ".") {
+			continue
+		}
+		if param := searchParamFor(host); param != "" {
+			if query := strings.TrimSpace(parsed.Query().Get(param)); query != "" {
+				return &core.PublicActivity{Kind: "search", Status: status, Query: truncate(strings.Join(strings.Fields(query), " "), 120)}
+			}
+		}
+		parsed.RawQuery, parsed.Fragment, parsed.RawFragment = "", "", ""
+		return &core.PublicActivity{Kind: "open_page", Status: status, URL: parsed.String()}
+	}
+	if strings.TrimSpace(command) == "" {
+		return nil
+	}
+	return &core.PublicActivity{Kind: "command", Status: status}
+}
+
+func searchParamFor(host string) string {
+	for suffix, param := range searchQueryParams {
+		if host == suffix || strings.HasSuffix(host, "."+suffix) {
+			return param
+		}
+	}
+	if strings.Contains(host, "redlib") || strings.Contains(host, "libreddit") {
+		return "q"
+	}
+	return ""
 }

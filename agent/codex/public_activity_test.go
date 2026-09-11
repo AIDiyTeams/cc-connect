@@ -43,3 +43,31 @@ func TestWebPublicActivityUsesTypedActionOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestCommandPublicActivityExposesOnlySearchQueriesAndPageHosts(t *testing.T) {
+	search := commandPublicActivity(`curl -s -m 20 "https://html.duckduckgo.com/html/?q=rPPG+remote+photoplethysmography&kl=us-en" | head -c 4000`, "running")
+	if search == nil || search.Kind != "search" || search.Query != "rPPG remote photoplethysmography" || search.URL != "" {
+		t.Fatalf("search receipt = %+v", search)
+	}
+	pubmed := commandPublicActivity(`curl -s "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=facial+video+heart+rate&retmax=5"`, "returned")
+	if pubmed == nil || pubmed.Kind != "search" || pubmed.Query != "facial video heart rate" || pubmed.Status != "returned" {
+		t.Fatalf("pubmed receipt = %+v", pubmed)
+	}
+	page := commandPublicActivity(`cd /tmp && curl -sL -A "Mozilla/5.0" "https://www.fda.gov/medical-devices/general-wellness?token=secret#top" -o page.html`, "running")
+	if page == nil || page.Kind != "open_page" || page.URL != "https://www.fda.gov/medical-devices/general-wellness" || page.Query != "" {
+		t.Fatalf("page receipt = %+v", page)
+	}
+	if got := commandPublicActivity(`curl -s http://127.0.0.1:11446/v1/models`, "running"); got == nil || got.Kind != "command" || got.URL != "" {
+		t.Fatalf("loopback address must not leak: %+v", got)
+	}
+	if got := commandPublicActivity(`curl -s "https://user:pass@example.com/private?x=1"`, "running"); got == nil || got.Kind != "command" || got.URL != "" {
+		t.Fatalf("credentialed URL must not leak: %+v", got)
+	}
+	step := commandPublicActivity(`cd /home/ubuntu/workspaces/test && node /home/ubuntu/Skills-OL-test/tomako-document.mjs --title x`, "running")
+	if step == nil || step.Kind != "command" || step.URL != "" || step.Query != "" || step.Label != "" {
+		t.Fatalf("plain command receipt must carry no details: %+v", step)
+	}
+	if commandPublicActivity("   ", "running") != nil {
+		t.Fatal("empty command produces no receipt")
+	}
+}
