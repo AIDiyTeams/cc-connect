@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -43,12 +45,13 @@ func imageDynamicTools() []map[string]any {
 	positive := map[string]any{"type": "integer", "minimum": 1}
 	return []map[string]any{
 		{"type": "function", "name": "tomako_generate_image", "deferLoading": false,
-			"description": "Preferred Tomako image generation/edit entry. Follow the shared image policy and edit-image skill; supply the brief and actual hosted source URL(s), without inspecting scripts or assembling shell commands. One call submits one image and waits for its result. Put the edited source first; preserve the requested scope and framing. Discussion does not authorize generation. A failed, pending or unconfirmed result does not authorize another submission. For local-only sources, compositing or other unsupported options use the existing shared image helper. This tool does not attach an image to a document.",
+			"description": "Preferred Tomako image generation/edit entry. Follow the shared image policy and edit-image skill; supply the brief and actual selected source references without inspecting scripts or assembling shell commands. One call submits one image and waits for its result. Put the edited source first; preserve the requested scope and framing. Discussion does not authorize generation. A failed, pending or unconfirmed result does not authorize another submission. For compositing or other unsupported options use the existing shared image helper. This tool does not attach an image to a document.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false,
-				"required": []string{"operation", "prompt", "referenceImageUrls"}, "properties": map[string]any{
+				"required": []string{"operation", "prompt"}, "properties": map[string]any{
 					"operation":          map[string]any{"type": "string", "enum": []string{"create", "edit", "variation"}},
 					"prompt":             text,
 					"referenceImageUrls": map[string]any{"type": "array", "items": map[string]any{"type": "string", "description": "Actual http(s) image URL from current conversation or relevant brand assets. Never invent a URL."}},
+					"referenceImages":    map[string]any{"type": "array", "maxItems": 16, "description": "Ordered selected references, each with exactly one url or absolute path in the current workspace. Put the edited source first. Use this or referenceImageUrls, never both.", "items": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{"url": text, "path": text}, "minProperties": 1, "maxProperties": 1}},
 					"size":               map[string]any{"type": "string", "description": "Optional provider generation size. Omit to retain the existing default; exact delivered dimensions belong in targetWidth/targetHeight."},
 					"targetWidth":        positive, "targetHeight": positive,
 					"resizeMode": map[string]any{"type": "string", "enum": []string{"cover", "contain"}},
@@ -84,6 +87,20 @@ func (s *appServerSession) prepareImageTool(tool string, arguments map[string]an
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	// Work on a private copy: RPC inputs and later turns retain their original paths.
+	var call map[string]any
+	_ = json.Unmarshal(encoded, &call)
+	if args, ok := call["arguments"].(map[string]any); ok {
+		if err := snapshotImageReferences(s.workDir, filepath.Dir(path), args); err != nil {
+			removeTaskRuntimeEnv(path)
+			return nil, nil, nil, err
+		}
+	}
+	encoded, _ = json.Marshal(call)
+	if len(encoded) > 64*1024 {
+		removeTaskRuntimeEnv(path)
+		return nil, nil, nil, fmt.Errorf("staged image arguments exceed size limit")
+	}
 	ctx := s.ctx
 	if ctx == nil {
 		ctx = context.Background()
@@ -98,7 +115,7 @@ func (s *appServerSession) prepareImageTool(tool string, arguments map[string]an
 
 // The adapter emits the accepted receipt immediately, then a final receipt.
 // Retain the former even if waiting is interrupted; never turn a lost wait into
-// a new generation. No model-selected local paths are read outside Codex's fence.
+// a new generation. Local references are confined by os.Root before this command.
 func runImageToolCommand(cmd *exec.Cmd) (string, error) {
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -123,4 +140,72 @@ func runImageToolCommand(cmd *exec.Cmd) (string, error) {
 	}
 	result, _ := json.Marshal(last)
 	return string(result), nil
+}
+
+// os.Root prevents traversal and symlink escapes, including concurrent symlink
+// replacement. Copy bounded regular files to the private task snapshot so the
+// existing Node uploader never opens an unconfined model-selected path.
+func snapshotImageReferences(workDir, snapshotDir string, args map[string]any) error {
+	value, exists := args["referenceImages"]
+	if !exists {
+		return nil
+	}
+	refs, ok := value.([]any)
+	if !ok || len(refs) > 16 {
+		return fmt.Errorf("referenceImages must contain at most 16 selected references")
+	}
+	if _, mixed := args["referenceImageUrls"]; mixed {
+		return fmt.Errorf("select only one reference input format")
+	}
+	root, err := os.OpenRoot(workDir)
+	if err != nil {
+		return fmt.Errorf("current image workspace unavailable")
+	}
+	defer root.Close()
+	for i, value := range refs {
+		ref, ok := value.(map[string]any)
+		if !ok || len(ref) != 1 {
+			return fmt.Errorf("each reference must have exactly one url or path")
+		}
+		input, local := ref["path"]
+		if !local {
+			continue
+		}
+		source, ok := input.(string)
+		if !ok || !filepath.IsAbs(source) {
+			return fmt.Errorf("image source must be an absolute workspace path")
+		}
+		rel, err := filepath.Rel(workDir, source)
+		if err != nil {
+			return fmt.Errorf("image source is outside the current workspace")
+		}
+		data, err := readWorkspaceImage(root, rel)
+		if err != nil {
+			return err
+		}
+		dest := filepath.Join(snapshotDir, fmt.Sprintf("reference-%d.image", i))
+		if err := os.WriteFile(dest, data, 0600); err != nil {
+			return fmt.Errorf("stage selected image: %w", err)
+		}
+		ref["path"] = dest
+	}
+	return nil
+}
+
+func readWorkspaceImage(root *os.Root, path string) ([]byte, error) {
+	file, err := root.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, fmt.Errorf("selected image is unavailable or outside the current workspace")
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	const maxBytes = 12 * 1024 * 1024
+	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > maxBytes {
+		return nil, fmt.Errorf("selected image must be a nonempty regular file no larger than 12 MiB")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil || len(data) == 0 || len(data) > maxBytes {
+		return nil, fmt.Errorf("selected image changed or could not be read")
+	}
+	return data, nil
 }

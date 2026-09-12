@@ -157,3 +157,51 @@ setTimeout(()=>{},30000);`)
 		t.Fatal("stop left image adapter running")
 	}
 }
+
+func TestImageToolLocalReferencesStayWithinWorkspaceAndPreserveOrder(t *testing.T) {
+	s := imageToolTestSession(t, "")
+	source := filepath.Join(s.workDir, "source.png")
+	if err := os.WriteFile(source, []byte("selected image bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	args := map[string]any{"referenceImages": []any{map[string]any{"path": source}, map[string]any{"url": "https://example.com/style.png"}}}
+	cmd, cancel, cleanup, err := s.prepareImageTool("tomako_generate_image", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	defer cleanup()
+	var call map[string]any
+	input, _ := io.ReadAll(cmd.Stdin)
+	if json.Unmarshal(input, &call) != nil {
+		t.Fatal("invalid input")
+	}
+	refs := call["arguments"].(map[string]any)["referenceImages"].([]any)
+	staged := refs[0].(map[string]any)["path"].(string)
+	if staged == source || !strings.Contains(staged, "cc-connect-task-runtime-") {
+		t.Fatal("source was not privately staged")
+	}
+	data, err := os.ReadFile(staged)
+	if err != nil || string(data) != "selected image bytes" {
+		t.Fatal("source bytes changed")
+	}
+	if refs[1].(map[string]any)["url"] != "https://example.com/style.png" {
+		t.Fatal("reference order changed")
+	}
+	if args["referenceImages"].([]any)[0].(map[string]any)["path"] != source {
+		t.Fatal("mutated RPC arguments")
+	}
+	outside := filepath.Join(t.TempDir(), "other.png")
+	if err := os.WriteFile(outside, []byte("other brand"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(s.workDir, "escape.png")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{outside, link, s.workDir} {
+		if _, _, _, err := s.prepareImageTool("tomako_generate_image", map[string]any{"referenceImages": []any{map[string]any{"path": path}}}); err == nil {
+			t.Fatalf("accepted invalid or escaping source %s", path)
+		}
+	}
+}
