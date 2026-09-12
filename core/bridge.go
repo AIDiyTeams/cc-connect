@@ -263,7 +263,8 @@ type bridgePreviewAck struct {
 
 type bridgeImageData struct {
 	MimeType string `json:"mime_type"`
-	Data     string `json:"data"` // base64
+	Data     string `json:"data"`          // base64
+	URL      string `json:"url,omitempty"` // object URL; fetched when data is absent
 	FileName string `json:"file_name,omitempty"`
 }
 
@@ -1775,10 +1776,24 @@ func (a *bridgeAdapter) handleMessage(raw json.RawMessage) {
 	msg.Content = stripMatchingRuntimeMarkers(msg.Runtime, msg.Content)
 
 	for _, img := range m.Images {
-		data, err := base64.StdEncoding.DecodeString(img.Data)
-		if err != nil {
-			slog.Debug("bridge: invalid image base64", "error", err)
-			continue
+		var data []byte
+		var err error
+		if strings.TrimSpace(img.URL) != "" {
+			// URL-form attachments are canonical-sized object URLs published by the
+			// control plane; fetching them here lets the image enter the turn as a
+			// real image block instead of the agent spending tool rounds on it.
+			data, err = fetchBridgeImage(img.URL)
+			if err != nil {
+				slog.Warn("bridge: image url fetch failed", "error", err, "file", img.FileName)
+				msg.Content += "\n[image attachment failed to load: " + img.FileName + "]"
+				continue
+			}
+		} else {
+			data, err = base64.StdEncoding.DecodeString(img.Data)
+			if err != nil {
+				slog.Debug("bridge: invalid image base64", "error", err)
+				continue
+			}
 		}
 		msg.Images = append(msg.Images, ImageAttachment{
 			MimeType: img.MimeType, Data: data, FileName: img.FileName,
