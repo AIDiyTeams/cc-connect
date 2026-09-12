@@ -44,37 +44,6 @@ func TestWebPublicActivityUsesTypedActionOnly(t *testing.T) {
 	}
 }
 
-func TestCommandPublicActivityExposesOnlySearchQueriesAndPageHosts(t *testing.T) {
-	search := commandPublicActivity(`curl -s -m 20 "https://html.duckduckgo.com/html/?q=rPPG+remote+photoplethysmography&kl=us-en" | head -c 4000`, "running")
-	if search == nil || search.Kind != "search" || search.Query != "rPPG remote photoplethysmography" || search.URL != "" {
-		t.Fatalf("search receipt = %+v", search)
-	}
-	pubmed := commandPublicActivity(`curl -s "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=facial+video+heart+rate&retmax=5"`, "returned")
-	if pubmed == nil || pubmed.Kind != "search" || pubmed.Query != "facial video heart rate" || pubmed.Status != "returned" {
-		t.Fatalf("pubmed receipt = %+v", pubmed)
-	}
-	page := commandPublicActivity(`cd /tmp && curl -sL -A "Mozilla/5.0" "https://www.fda.gov/medical-devices/general-wellness?token=secret#top" -o page.html`, "running")
-	if page == nil || page.Kind != "open_page" || page.URL != "" || page.Label != "www.fda.gov" || page.Query != "" {
-		t.Fatalf("query-bearing page keeps only its host: %+v", page)
-	}
-	if got := commandPublicActivity(`curl -s http://127.0.0.1:11446/v1/models`, "running"); got == nil || got.Kind != "command" || got.URL != "" {
-		t.Fatalf("loopback address must not leak: %+v", got)
-	}
-	if got := commandPublicActivity(`curl -s "https://user:pass@example.com/private?x=1"`, "running"); got == nil || got.Kind != "command" || got.URL != "" {
-		t.Fatalf("credentialed URL must not leak: %+v", got)
-	}
-	step := commandPublicActivity(`cd /home/ubuntu/workspaces/test && node /home/ubuntu/Skills-OL-test/tomako-document.mjs --title x`, "running")
-	if step == nil || step.Kind != "command" || step.URL != "" || step.Query != "" || step.Label != "document" {
-		t.Fatalf("command receipt carries only its category: %+v", step)
-	}
-	if plain := commandPublicActivity(`mkdir -p out && cp a.txt out/`, "running"); plain == nil || plain.Label != "" || plain.URL != "" {
-		t.Fatalf("unknown commands stay anonymous: %+v", plain)
-	}
-	if commandPublicActivity("   ", "running") != nil {
-		t.Fatal("empty command produces no receipt")
-	}
-}
-
 func TestReasoningTextAcceptsRawContentParts(t *testing.T) {
 	item := map[string]any{"type": "reasoning", "summary": []any{},
 		"content": []any{map[string]any{"type": "reasoning_text", "text": "比较两家定价"}, map[string]any{"type": "reasoning_text", "text": "核对席位规则"}}}
@@ -89,32 +58,6 @@ func TestReasoningTextAcceptsRawContentParts(t *testing.T) {
 	}
 }
 
-func TestCommandPublicActivityKeepsParenthesesAndDropsShellContinuations(t *testing.T) {
-	search := commandPublicActivity(`curl -s "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=(remote+photoplethysmography)+AND+(heart+rate)" \`, "running")
-	if search == nil || search.Query != "(remote photoplethysmography) AND (heart rate)" {
-		t.Fatalf("query must survive parentheses and lose the continuation: %+v", search)
-	}
-	page := commandPublicActivity("for u in https://www.who.int/publications/i/item/9789240029200 ; do curl -s \"$u\"; done", "returned")
-	if page == nil || page.URL != "https://www.who.int/publications/i/item/9789240029200" {
-		t.Fatalf("page receipt = %+v", page)
-	}
-}
-
-func TestCommandPublicActivityLinksOnlyPlainPages(t *testing.T) {
-	api := commandPublicActivity(`curl -s "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=333"`, "returned")
-	if api == nil || api.Kind != "open_page" || api.URL != "" || api.Label != "eutils.ncbi.nlm.nih.gov" {
-		t.Fatalf("API endpoints carry a host label and no link: %+v", api)
-	}
-	page := commandPublicActivity(`curl -sL "https://www.fda.gov/medical-devices/general-wellness"`, "returned")
-	if page == nil || page.URL != "https://www.fda.gov/medical-devices/general-wellness" || page.Label != "www.fda.gov" {
-		t.Fatalf("plain pages keep their link: %+v", page)
-	}
-	withQuery := commandPublicActivity(`curl -s "https://www.who.int/publications?type=report&token=abc"`, "returned")
-	if withQuery == nil || withQuery.URL != "" || withQuery.Label != "www.who.int" {
-		t.Fatalf("query-bearing pages must not be linked: %+v", withQuery)
-	}
-}
-
 func TestReasoningCompletionMarksSummaryVersusRaw(t *testing.T) {
 	if k := reasoningKind(map[string]any{"summary": []any{"short"}, "content": []any{"long"}}); k != "summary" {
 		t.Fatalf("summary parts mark the block as summary: %q", k)
@@ -124,9 +67,55 @@ func TestReasoningCompletionMarksSummaryVersusRaw(t *testing.T) {
 	}
 }
 
-func TestCommandPublicActivityDropsUnexpandedShellVariablesFromQueries(t *testing.T) {
-	got := commandPublicActivity(`for q in a b; do curl -s "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${q}+AND+review"; done`, "returned")
-	if got == nil || got.Kind != "search" || got.Query != "" {
-		t.Fatalf("shell variables must not be shown as search text: %+v", got)
+func TestCommandPublicActivity_URLArgumentsNeverClaimWebAccess(t *testing.T) {
+	commands := []string{
+		`curl -s -o ./_verify_out.png "https://test.tomako.ai/media/oss/generated-images/2026/09/12/result.png"; file ./_verify_out.png`,
+		`curl -s "https://api.example.com/v1/images"`,
+		`curl -s "https://example.com/download?token=secret"`,
+		`curl -s "http://127.0.0.1:11446/v1/models"`,
+		`curl -s "https://user:pass@example.com/private"`,
+		`curl -s "https://html.duckduckgo.com/html/?q=private+search+text"`,
+		`printf '%s' 'https://example.com/article' > sources.txt`,
+		`python inspect_image.py --reference https://example.com/reference.png`,
+	}
+	for _, command := range commands {
+		for _, status := range []string{"running", "returned"} {
+			got := commandPublicActivity(command, status)
+			if got == nil || got.Kind != "command" || got.Status != status || got.URL != "" || got.Query != "" || got.Label != "" {
+				t.Fatalf("URL arguments must stay an anonymous command receipt: %+v", got)
+			}
+		}
+	}
+	if commandPublicActivity("  ", "running") != nil {
+		t.Fatal("empty command must not produce a receipt")
+	}
+}
+
+func TestCommandPublicActivity_URLDoesNotOverrideDeclaredCategory(t *testing.T) {
+	got := commandPublicActivity(`node /home/ubuntu/Skills-OL-test/tomako-document.mjs --source https://example.com/article`, "returned")
+	if got == nil || got.Kind != "command" || got.Label != "document" || got.URL != "" || got.Query != "" {
+		t.Fatalf("a declared operation keeps its category without exposing its arguments: %+v", got)
+	}
+}
+
+func TestAppServerImageDownload_PublicReceiptRetainsExecutionLifecycle(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 4)}
+	command := `curl -s -o result.png https://test.tomako.ai/media/oss/generated-images/result.png`
+	item := map[string]any{"id": "download-1", "type": "commandExecution", "command": command}
+	s.handleItemStarted(item)
+	start := <-s.events
+	item["status"], item["exitCode"] = "completed", 0
+	s.handleItemCompleted(item)
+	end := <-s.events
+	for _, event := range []core.Event{start, end} {
+		if event.PublicActivity == nil || event.PublicActivity.Kind != "command" || event.PublicActivity.URL != "" || event.PublicActivity.Label != "" {
+			t.Fatalf("image download was misreported as webpage access: %+v", event)
+		}
+		if event.TraceID != "download-1" || event.ToolInput != command {
+			t.Fatalf("private execution evidence must remain intact: %+v", event)
+		}
+	}
+	if start.PublicActivity.Status != "running" || end.PublicActivity.Status != "returned" || end.ToolSuccess == nil || !*end.ToolSuccess {
+		t.Fatalf("execution lifecycle lost: start=%+v end=%+v", start, end)
 	}
 }

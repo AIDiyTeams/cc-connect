@@ -36,3 +36,19 @@ reasoning is never reclassified. Older adapters, task consumers and messaging
 platforms receive only the completed note. No translation/model call is added.
 
 Connections that negotiate `token_stream` use 50 ms / 1-character preview updates without the 2,000-character IM preview cap, so long final answers keep growing before the terminal frame. Consumers without that capability retain their configured cadence and length limit. This changes transport previews only: commentary and unclassified native items still cannot enter final-answer streaming, and a preview does not confirm business completion.
+
+## Command receipts and image delivery (2026-09-13)
+
+Only structured native web actions produce search/page-read receipts. Shell
+commands retain their actual execution lifecycle and declared script/skill
+category; URLs in their arguments never become public website links, search
+queries or page-read counts. This covers image downloads, API requests and
+commands that only write a URL. The original command remains in the existing
+private execution evidence. Older persisted receipts are not rewritten.
+
+Image delivery remains Java-owned: the image service persists its ready URL and
+publishes image progress before the Agent finishes any optional inspection.
+The shared conversation renderer displays and enables download of ready images
+while the parent Agent turn is still running, including when another image slot
+is pending or failed. The bridge does not delay image events or declare the
+parent turn complete merely because an image is ready.

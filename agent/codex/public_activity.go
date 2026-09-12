@@ -1,9 +1,7 @@
 package codex
 
 import (
-	"net"
 	"net/url"
-	"regexp"
 	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -36,89 +34,13 @@ func webPublicActivity(item map[string]any, status string) *core.PublicActivity 
 	return activity
 }
 
-// searchQueryParams lists, per host suffix, the query parameter that carries a
-// human search string. Anything else on the URL is dropped.
-var searchQueryParams = map[string]string{
-	"duckduckgo.com":          "q",
-	"google.com":              "q",
-	"bing.com":                "q",
-	"search.brave.com":        "q",
-	"eutils.ncbi.nlm.nih.gov": "term",
-	"reddit.com":              "q",
-}
-
-var commandURLPattern = regexp.MustCompile(`https?://[^\s"'<>]+`)
-
-// commandPublicActivity turns a shell command into an allowlisted receipt for
-// the conversation view: the first web address it fetches becomes a search
-// (decoded query only) or a page read (scheme and host, path kept, query and
-// fragment dropped). Commands without a web address are reported only as an
-// anonymous step so the user still sees that work is happening. The command
-// text itself never leaves the bridge.
+// commandPublicActivity reports only the execution type and a declared script or
+// skill category. A URL in command arguments is not evidence of a page read:
+// it may be an image download, an API request, or text being written to a file.
+// Web receipts come from the structured web tool action in webPublicActivity.
 func commandPublicActivity(command, status string) *core.PublicActivity {
-	for _, raw := range commandURLPattern.FindAllString(command, 8) {
-		raw = trimCommandURL(raw)
-		parsed, err := url.Parse(raw)
-		if err != nil || parsed.User != nil || parsed.Hostname() == "" {
-			continue
-		}
-		host := strings.ToLower(parsed.Hostname())
-		if host == "localhost" || strings.HasSuffix(host, ".local") || net.ParseIP(host) != nil || !strings.Contains(host, ".") {
-			continue
-		}
-		if param := searchParamFor(host); param != "" {
-			if query := strings.TrimSpace(parsed.Query().Get(param)); query != "" {
-				query = strings.TrimRight(strings.Join(strings.Fields(query), " "), "\\")
-				// An unexpanded shell variable ($q, ${q}) is not a search term; keep the
-				// receipt but say nothing about the query.
-				if strings.Contains(query, "$") {
-					return &core.PublicActivity{Kind: "search", Status: status}
-				}
-				return &core.PublicActivity{Kind: "search", Status: status, Query: truncate(query, 120)}
-			}
-		}
-		activity := &core.PublicActivity{Kind: "open_page", Status: status, Label: host}
-		// A link is offered only when the address is a plain page: an API endpoint or a
-		// query-bearing URL would open an error page or leak parameters once stripped.
-		if parsed.RawQuery == "" && !apiLikePath(parsed.Path) {
-			parsed.Fragment, parsed.RawFragment = "", ""
-			activity.URL = parsed.String()
-		}
-		return activity
-	}
 	if strings.TrimSpace(command) == "" {
 		return nil
 	}
 	return &core.PublicActivity{Kind: "command", Status: status, Label: commandActivityLabel(command)}
-}
-
-func searchParamFor(host string) string {
-	for suffix, param := range searchQueryParams {
-		if host == suffix || strings.HasSuffix(host, "."+suffix) {
-			return param
-		}
-	}
-	if strings.Contains(host, "redlib") || strings.Contains(host, "libreddit") {
-		return "q"
-	}
-	return ""
-}
-
-// trimCommandURL drops shell punctuation glued to a URL while keeping brackets
-// that belong to it, such as PubMed boolean groups in a query string.
-func trimCommandURL(raw string) string {
-	raw = strings.TrimRight(raw, ".,;:\"'\\`")
-	for strings.HasSuffix(raw, ")") && strings.Count(raw, ")") > strings.Count(raw, "(") {
-		raw = strings.TrimSuffix(raw, ")")
-	}
-	for strings.HasSuffix(raw, "]") && strings.Count(raw, "]") > strings.Count(raw, "[") {
-		raw = strings.TrimSuffix(raw, "]")
-	}
-	return raw
-}
-
-var apiPathPattern = regexp.MustCompile(`(?i)\.(fcgi|cgi|php|aspx?|jsp|json|xml)$|/api/|/v\d+/`)
-
-func apiLikePath(path string) bool {
-	return apiPathPattern.MatchString(path)
 }
