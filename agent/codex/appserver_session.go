@@ -523,6 +523,11 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	if s.isUserVoiceJudgmentRuntime() {
 		params["dynamicTools"] = s.userVoiceJudgmentTools()
 	}
+	// Add the image adapter only to ordinary authorized tasks. Dedicated
+	// analysis workflows retain their existing tool sets and permissions.
+	if params["dynamicTools"] == nil && s.imageToolsAvailable() {
+		params["dynamicTools"] = imageDynamicTools()
+	}
 	// Application-managed conversations replace the coding-assistant preamble
 	// guidance at the base-instruction level; see public_conversation_base.go.
 	if base := s.baseInstructionsOverride(); base != "" {
@@ -1112,6 +1117,25 @@ func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRa
 		s.writeDynamicToolResponse(rawID, false, "invalid tool arguments")
 		return
 	}
+	if params.Tool == "tomako_generate_image" || params.Tool == "tomako_image_status" {
+		cmd, cancel, cleanup, err := s.prepareImageTool(params.Tool, params.Arguments)
+		if err != nil {
+			s.writeDynamicToolResponse(rawID, false, err.Error())
+			return
+		}
+		go func() {
+			defer cancel()
+			defer cleanup()
+			result, err := runImageToolCommand(cmd)
+			if err != nil {
+				s.writeDynamicToolResponse(rawID, false, err.Error())
+				return
+			}
+			s.writeDynamicToolResponse(rawID, true, result)
+		}()
+		return
+	}
+
 	if s.isUserVoiceArchiveRuntime() && params.Tool == "search_reddit_archive" {
 		go func() {
 			result, err := s.collectUserVoiceArchive(params.Arguments)
