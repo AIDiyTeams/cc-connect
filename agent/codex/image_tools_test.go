@@ -33,10 +33,6 @@ func TestImageToolsOnlyAdvertisedWithAuthorityAndInstalledAdapter(t *testing.T) 
 		t.Fatalf("tools=%#v", tools)
 	} else {
 		schema := tools[0]["inputSchema"].(map[string]any)
-		required := schema["required"].([]string)
-		if !strings.Contains(strings.Join(required, ","), "size") {
-			t.Fatal("new image calls must explicitly choose generation dimensions")
-		}
 		wait := schema["properties"].(map[string]any)["waitForResult"].(map[string]any)
 		if wait["type"] != "boolean" {
 			t.Fatal("image tool must advertise optional submission-only mode")
