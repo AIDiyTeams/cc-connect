@@ -31,6 +31,12 @@ func TestImageToolsOnlyAdvertisedWithAuthorityAndInstalledAdapter(t *testing.T) 
 	s := imageToolTestSession(t, "")
 	if tools, ok := s.threadRequestParams()["dynamicTools"].([]map[string]any); !ok || len(tools) != 2 {
 		t.Fatalf("tools=%#v", tools)
+	} else {
+		schema := tools[0]["inputSchema"].(map[string]any)
+		wait := schema["properties"].(map[string]any)["waitForResult"].(map[string]any)
+		if wait["type"] != "boolean" {
+			t.Fatal("image tool must advertise optional submission-only mode")
+		}
 	}
 	s.runtime.ImageCapabilityToken = ""
 	if s.threadRequestParams()["dynamicTools"] != nil {
@@ -55,7 +61,7 @@ func TestImageToolsOnlyAdvertisedWithAuthorityAndInstalledAdapter(t *testing.T) 
 func TestImageToolSnapshotsAuthorityAndTreatsPromptAsData(t *testing.T) {
 	s := imageToolTestSession(t, "")
 	prompt := "只改这一行\n'$(touch must-not-exist)`literal`"
-	cmd, cancel, cleanup, err := s.prepareImageTool("tomako_generate_image", map[string]any{"prompt": prompt})
+	cmd, cancel, cleanup, err := s.prepareImageTool("tomako_generate_image", map[string]any{"prompt": prompt, "waitForResult": false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,6 +89,9 @@ func TestImageToolSnapshotsAuthorityAndTreatsPromptAsData(t *testing.T) {
 	}
 	if call["arguments"].(map[string]any)["prompt"] != prompt {
 		t.Fatal("prompt changed during command construction")
+	}
+	if call["arguments"].(map[string]any)["waitForResult"] != false {
+		t.Fatal("submission-only request changed during command construction")
 	}
 	if strings.Contains(string(input), "image-a") || strings.Contains(string(input), "cmsg-a") {
 		t.Fatal("authority exposed in arguments")
