@@ -285,3 +285,14 @@ Available tags: `no_acp`, `no_claudecode`, `no_codex`, `no_copilot`, `no_cursor`
 6. Optionally implement `AgentDoctorInfo` for `cc-connect doctor` support
 7. Add config example in `config.example.toml`
 8. Add unit tests
+
+# 贡献者本地开发分支约束
+
+日常开发分支以本机 `.tomako/development-branch.md` 的 `development_branch` 声明为准；该目录被
+gitignore，属每位贡献者的本地配置，不得在任何共享文档中写死团队统一分支名（`eren` 只属于
+Eren，不是团队默认值）。工作区 `.tomako/state.json` 的 `developmentBranch` 是统一脚本使用的
+机器状态，由 `--development-branch` 写入，不是分支选择的权威来源。
+
+产品功能、修复、重构、文档和联调改动都落在该分支；`test` 与 `main` 只用于负责人明确发起的
+发测、上线或回合，不作为日常功能开发分支。为单个需求创建 `feature/*`、`fix/*`、
+`integration/*` 分支或新 worktree 前，必须先取得负责人明确要求。
