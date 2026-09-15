@@ -1880,6 +1880,7 @@ func normalizeSessionRuntime(runtime SessionRuntime) SessionRuntime {
 	runtime.MachineCapabilityToken = boundedSecretValue(runtime.MachineCapabilityToken, 16*1024)
 	runtime.ImageCapabilityToken = boundedSecretValue(runtime.ImageCapabilityToken, 16*1024)
 	runtime.DocumentCapabilityToken = boundedSecretValue(runtime.DocumentCapabilityToken, 16*1024)
+	runtime.EmployeeCommandCapabilityToken = boundedSecretValue(runtime.EmployeeCommandCapabilityToken, 16*1024)
 	runtime.TaskAuthorityEnvelopeB64 = boundedSecretValue(runtime.TaskAuthorityEnvelopeB64, 192*1024)
 	switch strings.ToLower(strings.TrimSpace(runtime.ReasoningEffort)) {
 	case "low", "medium", "high", "xhigh":

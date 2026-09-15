@@ -16,8 +16,9 @@ func updateTaskRuntimeEnv(existingPath string, runtime core.SessionRuntime) (str
 	token := strings.TrimSpace(runtime.MachineCapabilityToken)
 	imageToken := strings.TrimSpace(runtime.ImageCapabilityToken)
 	documentToken := strings.TrimSpace(runtime.DocumentCapabilityToken)
+	employeeToken := strings.TrimSpace(runtime.EmployeeCommandCapabilityToken)
 	envelope := strings.TrimSpace(runtime.TaskAuthorityEnvelopeB64)
-	if token == "" && imageToken == "" && documentToken == "" && envelope == "" {
+	if token == "" && imageToken == "" && documentToken == "" && employeeToken == "" && envelope == "" {
 		if existingPath == "" {
 			return "", nil
 		}
@@ -35,10 +36,11 @@ func updateTaskRuntimeEnv(existingPath string, runtime core.SessionRuntime) (str
 		return existingPath, fmt.Errorf("valid task id is required for machine authority")
 	}
 	for label, value := range map[string]string{
-		"machine capability":      token,
-		"image capability":        imageToken,
-		"document capability":     documentToken,
-		"task authority envelope": envelope,
+		"machine capability":          token,
+		"image capability":            imageToken,
+		"document capability":         documentToken,
+		"employee command capability": employeeToken,
+		"task authority envelope":     envelope,
 	} {
 		if strings.ContainsAny(value, "\r\n\x00") {
 			return existingPath, fmt.Errorf("%s contains forbidden control characters", label)
@@ -62,6 +64,9 @@ func updateTaskRuntimeEnv(existingPath string, runtime core.SessionRuntime) (str
 		"export TOMAKO_WORKSPACE_ID=" + shellSingleQuote(runtime.WorkspaceID),
 		"export TOMAKO_BRAND_ID=" + shellSingleQuote(runtime.BrandID),
 		"",
+	}
+	if employeeToken != "" {
+		lines = append(lines, "export EMPLOYEE_COMMAND_CAPABILITY_TOKEN="+shellSingleQuote(employeeToken))
 	}
 	if documentToken != "" {
 		lines = append(lines, "export DOCUMENT_CAPABILITY_TOKEN="+shellSingleQuote(documentToken))

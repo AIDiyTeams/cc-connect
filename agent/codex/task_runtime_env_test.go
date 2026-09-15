@@ -316,3 +316,29 @@ func TestDocumentRuntimeCapabilityIsScopedRotatedAndNotInherited(t *testing.T) {
 		t.Fatal("unscoped document capability accepted")
 	}
 }
+
+func TestEmployeeCommandAuthorityRotatesAndRevokesWithoutPromptCopy(t *testing.T) {
+	runtime := core.SessionRuntime{TaskID: "cmsg-one", WorkspaceID: "w", BrandID: "b", EmployeeCommandCapabilityToken: "current-employee"}
+	path, err := updateTaskRuntimeEnv("", runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { removeTaskRuntimeEnv(path) })
+	for _, token := range []string{"current-employee", "next-employee", ""} {
+		runtime.EmployeeCommandCapabilityToken = token
+		runtime.ImageCapabilityToken = "image-only"
+		if _, err = updateTaskRuntimeEnv(path, runtime); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if token == "" && strings.Contains(string(data), "EMPLOYEE_COMMAND_CAPABILITY_TOKEN") {
+			t.Fatal("stale employee authority retained")
+		}
+		if token != "" && !strings.Contains(string(data), "export EMPLOYEE_COMMAND_CAPABILITY_TOKEN='"+token+"'") {
+			t.Fatal("current employee authority missing")
+		}
+	}
+}
