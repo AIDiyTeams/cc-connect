@@ -3470,9 +3470,17 @@ func (e *Engine) hasPendingInteraction(sessionKey, interactionID string) bool {
 
 const interactionSkippedAnswer = "__tomako_skipped__"
 
+// interactionSkippedAnswerText is what the model reads when the user skips a
+// question. A bare "Skipped" left the meaning open and models filled the gap by
+// choosing a value themselves (e.g. a date range the user never picked). The
+// text states the fact and its consequence; it is not a task-specific rule.
+const interactionSkippedAnswerText = "Skipped by user: the user declined to answer this question. " +
+	"Do not choose a value on their behalf. If the task cannot proceed correctly without this answer, " +
+	"stop and report what is missing instead of proceeding with an assumption."
+
 func interactionAnswerText(question UserQuestion, values []string) string {
 	if len(values) == 1 && strings.TrimSpace(values[0]) == interactionSkippedAnswer {
-		return "Skipped by user"
+		return interactionSkippedAnswerText
 	}
 	labels := make([]string, 0, len(values))
 	for _, value := range values {

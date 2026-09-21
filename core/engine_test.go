@@ -6831,8 +6831,10 @@ func TestRespondInteractionMapsAnExplicitSkipForTheNativeAgent(t *testing.T) {
 		t.Fatalf("RespondInteraction() error = %v", err)
 	}
 	answers, ok := rec.lastResult.UpdatedInput["answers"].(map[string]any)
-	if !ok || answers["database"] != "Skipped by user" {
-		t.Fatalf("answers = %#v, want database=Skipped by user", rec.lastResult.UpdatedInput["answers"])
+	got, _ := answers["database"].(string)
+	if !ok || got != interactionSkippedAnswerText || !strings.HasPrefix(got, "Skipped by user") ||
+		!strings.Contains(got, "Do not choose a value on their behalf") {
+		t.Fatalf("answers = %#v, want the skipped-answer text with its consequence", rec.lastResult.UpdatedInput["answers"])
 	}
 }
 
