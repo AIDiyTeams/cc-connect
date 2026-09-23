@@ -27,6 +27,22 @@ func imageToolTestSession(t *testing.T, script string) *appServerSession {
 	return s
 }
 
+func TestImageToolFramingDoesNotImplyCropping(t *testing.T) {
+	schema := imageDynamicTools()[0]["inputSchema"].(map[string]any)
+	properties := schema["properties"].(map[string]any)
+	size := properties["size"].(map[string]any)["description"].(string)
+	mode := properties["resizeMode"].(map[string]any)["description"].(string)
+	if strings.Contains(size, "exact delivered dimensions belong") || !strings.Contains(size, "actual provider image") {
+		t.Fatal("generation dimensions must not direct ordinary results into fixed canvas cropping")
+	}
+	if !strings.Contains(mode, "explicitly requested fixed canvas") || !strings.Contains(mode, "cover crops") {
+		t.Fatal("image tool must explain explicit resizing and its effect")
+	}
+	if strings.Contains(strings.Join(schema["required"].([]string), ","), "size") {
+		t.Fatal("supplier-specific size must not be mandatory in the bridge")
+	}
+}
+
 func TestImageToolsOnlyAdvertisedWithAuthorityAndInstalledAdapter(t *testing.T) {
 	s := imageToolTestSession(t, "")
 	if tools, ok := s.threadRequestParams()["dynamicTools"].([]map[string]any); !ok || len(tools) != 2 {
