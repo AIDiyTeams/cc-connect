@@ -40,12 +40,15 @@ func (s *appServerSession) imageToolsAvailable() bool {
 	return authorized && s.imageToolScript() != ""
 }
 
+// Shared by tool schemas and per-turn instructions so resumed conversations receive current semantics.
+const imageFramingInstructions = "Tomako image framing: when the user specifies an aspect ratio, express it in size or paired targetWidth/targetHeight pixel dimensions; prompt text alone does not set generation dimensions. Preserving the original result does not mean omitting generation dimensions. Omit resizeMode for complete provider output without cropping or padding; use contain/cover only for an explicitly requested fixed canvas."
+
 func imageDynamicTools() []map[string]any {
 	text := map[string]any{"type": "string", "minLength": 1}
 	positive := map[string]any{"type": "integer", "minimum": 1}
 	return []map[string]any{
 		{"type": "function", "name": "tomako_generate_image", "deferLoading": false,
-			"description": "Preferred Tomako image generation/edit entry. Follow the shared image policy and edit-image skill; supply the brief and actual selected source references without inspecting scripts or assembling shell commands. One call submits one image. For multiple independent images, set waitForResult=false on each and submit them before waiting with tomako_image_status. If an image depends on a previous result, wait for that result before submitting it. Put the edited source first; preserve the requested scope and framing. When the user specifies an aspect ratio, express it in size or paired targetWidth/targetHeight; prompt text alone does not set generation dimensions. Preserving the original result does not mean omitting generation dimensions; omit resizeMode to avoid post-processing. Discussion does not authorize generation. A failed, pending or unconfirmed result does not authorize resubmitting that image. For compositing or other unsupported options use the existing shared image helper. This tool does not attach an image to a document.",
+			"description": "Preferred Tomako image generation/edit entry. Follow the shared image policy and edit-image skill; supply the brief and actual selected source references without inspecting scripts or assembling shell commands. One call submits one image. For multiple independent images, set waitForResult=false on each and submit them before waiting with tomako_image_status. If an image depends on a previous result, wait for that result before submitting it. Put the edited source first; preserve the requested scope and framing. Discussion does not authorize generation. A failed, pending or unconfirmed result does not authorize resubmitting that image. For compositing or other unsupported options use the existing shared image helper. This tool does not attach an image to a document. " + imageFramingInstructions,
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false,
 				"required": []string{"operation", "prompt"}, "properties": map[string]any{
 					"operation":          map[string]any{"type": "string", "enum": []string{"create", "edit", "variation"}},

@@ -801,7 +801,11 @@ func (s *appServerSession) turnDeveloperInstructions() map[string]any {
 		return nil
 	}
 	var instructions any
-	if s.runtime.DeveloperInstructions != "" {
+	policy := s.runtime.DeveloperInstructions
+	if imageRuntimeAuthorized(s.runtime) {
+		policy = imageFramingInstructions + "\n\n" + policy
+	}
+	if policy != "" {
 		prefix := "You are in Default mode. The following current application instructions replace earlier application instructions in this collaboration-mode block and remain in effect until replaced by later collaboration instructions.\n\n"
 		// Describe only the directory prepared for this fenced workspace. A
 		// resumed thread may report another cwd; never advertise its old path.
@@ -809,7 +813,7 @@ func (s *appServerSession) turnDeveloperInstructions() map[string]any {
 			filepath.IsAbs(s.workDir) && tmpDir == filepath.Join(s.workDir, ".tmp") {
 			prefix += fmt.Sprintf("Current execution environment: for scratch files, use unique files or subdirectories under %q, the prepared workspace temporary directory. Keep user deliverables in their intended locations; existing filesystem permissions remain in force.\n\n", tmpDir)
 		}
-		instructions = prefix + s.runtime.DeveloperInstructions
+		instructions = prefix + policy
 	}
 	var effort any
 	if s.effort != "" {

@@ -94,3 +94,24 @@ func TestResumedThreadExplicitlyClearsPreviousRuntimePolicy(t *testing.T) {
 		t.Fatal("resumed thread retained stale collaboration instructions")
 	}
 }
+
+func TestImageFramingPolicyReachesResumedTurnsWithoutResettingConversation(t *testing.T) {
+	s := &appServerSession{model: "unchanged", effort: "high", developerInstructionsManaged: true,
+		runtime: core.SessionRuntime{TaskID: "message", WorkspaceID: "workspace", BrandID: "brand", ImageCapabilityToken: "secret", DeveloperInstructions: "Current application policy"}}
+	s.threadID.Store("resumed-conversation")
+	for range 2 {
+		settings := s.turnDeveloperInstructions()["settings"].(map[string]any)
+		policy := settings["developer_instructions"].(string)
+		if strings.Count(policy, imageFramingInstructions) != 1 || !strings.HasSuffix(policy, "Current application policy") || strings.Contains(policy, "secret") {
+			t.Fatal("current framing guidance must be scoped, non-duplicated and preserve the application policy")
+		}
+		if s.CurrentSessionID() != "resumed-conversation" || settings["model"] != "unchanged" || settings["reasoning_effort"] != "high" {
+			t.Fatal("framing guidance must not reset the conversation or alter model settings")
+		}
+	}
+	s.runtime.ImageCapabilityToken = ""
+	policy := s.turnDeveloperInstructions()["settings"].(map[string]any)["developer_instructions"].(string)
+	if strings.Contains(policy, imageFramingInstructions) {
+		t.Fatal("unscoped turns must not retain image policy")
+	}
+}
