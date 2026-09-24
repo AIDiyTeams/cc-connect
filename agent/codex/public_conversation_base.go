@@ -56,11 +56,35 @@ Shape of a good first message (do not copy the wording; match the user's languag
 - Do not add tool calls, model calls or stages just to have something to report. Keep the final answer complete and self-contained; progress messages never replace any part of it.
 `
 
+// publicFinalAnswerSection replaces Codex's "Presenting your work and final message".
+// That section formats for a terminal: at most ten lines, "plain text that will later be
+// styled by the CLI", Title Case headers, no nested lists and file-path conventions. In an
+// application that renders Markdown for a business user it produced dense, flat replies.
+// Product-specific block formats stay in the application's own capability notes; this only
+// says how an answer is shaped and when richer blocks earn their place.
+const publicFinalAnswerSection = `## The final answer
+
+The final answer is read by a business user in an application that renders Markdown: headings, lists, tables, links, bold and code blocks appear formatted, not as terminal text, and there is no line limit. Write it the way a capable colleague reports back.
+
+- Lead with the answer. The first sentence gives the conclusion, recommendation or result; reasoning and detail follow. Write 「卡在排名，不是收录：240 个页面里 128 个已收录，但只有 9 个进了前 20。」, not 「根据你的需求，我做了分析，结果如下：」.
+- Match the size to the request. A quick question gets a few direct sentences; an analysis, plan or report gets the room it needs. Never pad with a restatement of the request, a summary of your process or a generic offer of more help. Close with a next step or decision only when the user has one to take.
+- Let the content choose its form:
+  - Sentences carry reasoning, causes, trade-offs and recommendations. They are the substance of the answer and are never replaced by structure.
+  - Lists carry parallel items or ordered steps; each item makes sense on its own.
+  - Tables carry exact values the reader compares across items or attributes.
+  - When the application describes richer blocks such as charts or diagrams, use one only when its shape (a trend, a distribution, a flow) is the point and neither a sentence nor a table shows it as well. One visual per point, never two views of the same numbers, and always say in words what it shows and why it matters.
+- Use headings only in long answers with distinct parts. Bold the few phrases a skimming reader must not miss, never whole paragraphs.
+- An explicit output contract always wins. When developer instructions, a skill or the user require a format (a JSON result, a document, a result block, a message to copy), follow it exactly; this guidance only shapes the free-form reply around it.
+- Greetings, acknowledgements and casual exchanges get a natural reply without structure.
+`
+
 const (
 	preambleSectionStart = "## Responsiveness\n"
 	preambleSectionEnd   = "## Planning\n"
 	progressSectionStart = "## Sharing progress updates\n"
 	progressSectionEnd   = "## Presenting your work and final message\n"
+	finalSectionStart    = progressSectionEnd
+	finalSectionEnd      = "# Tool Guidelines\n"
 )
 
 var (
@@ -75,18 +99,23 @@ var (
 func publicConversationBaseInstructions() (string, error) {
 	publicConversationBaseOnce.Do(func() {
 		publicConversationBaseText, publicConversationBaseErr = composePublicConversationBase(
-			codexDefaultBaseInstructions, publicConversationSection)
+			codexDefaultBaseInstructions, publicConversationSection, publicFinalAnswerSection)
 	})
 	return publicConversationBaseText, publicConversationBaseErr
 }
 
-func composePublicConversationBase(base, section string) (string, error) {
+func composePublicConversationBase(base, conversation, finalAnswer string) (string, error) {
 	out, err := replaceBetweenMarkers(base, preambleSectionStart, preambleSectionEnd,
-		strings.TrimSpace(section)+"\n\n")
+		strings.TrimSpace(conversation)+"\n\n")
 	if err != nil {
 		return "", err
 	}
 	out, err = replaceBetweenMarkers(out, progressSectionStart, progressSectionEnd, "")
+	if err != nil {
+		return "", err
+	}
+	out, err = replaceBetweenMarkers(out, finalSectionStart, finalSectionEnd,
+		strings.TrimSpace(finalAnswer)+"\n\n")
 	if err != nil {
 		return "", err
 	}

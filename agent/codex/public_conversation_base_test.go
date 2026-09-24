@@ -19,14 +19,14 @@ func TestVendoredCodexBaseInstructionsArePinned(t *testing.T) {
 	if got := hex.EncodeToString(sum[:]); got != codexDefaultBaseInstructionsSHA256 {
 		t.Fatalf("vendored Codex base instructions changed: sha256=%s", got)
 	}
-	for _, marker := range []string{preambleSectionStart, preambleSectionEnd, progressSectionStart, progressSectionEnd} {
+	for _, marker := range []string{preambleSectionStart, preambleSectionEnd, progressSectionStart, progressSectionEnd, finalSectionEnd} {
 		if strings.Count(codexDefaultBaseInstructions, marker) != 1 {
 			t.Fatalf("marker %q must appear exactly once in the vendored prompt", strings.TrimSpace(marker))
 		}
 	}
 }
 
-func TestPublicConversationBaseReplacesOnlyTheCodingAssistantNarrationGuidance(t *testing.T) {
+func TestPublicConversationBaseReplacesOnlyTheCodingAssistantCommunicationGuidance(t *testing.T) {
 	got, err := publicConversationBaseInstructions()
 	if err != nil {
 		t.Fatal(err)
@@ -37,9 +37,15 @@ func TestPublicConversationBaseReplacesOnlyTheCodingAssistantNarrationGuidance(t
 		"I’ve explored the repo; now checking the API route definitions.",
 		"## Sharing progress updates",
 		"describe what is immediately about to be done next",
+		"## Presenting your work and final message",
+		"You are producing plain text that will later be styled by the CLI",
+		"no more than 10 lines",
+		"`**Title Case**`",
+		"Don’t nest bullets or create deep hierarchies",
+		"The user is working on the same computer as you",
 	} {
 		if strings.Contains(got, removed) {
-			t.Fatalf("coding-assistant narration guidance survived: %q", removed)
+			t.Fatalf("coding-assistant communication guidance survived: %q", removed)
 		}
 	}
 	for _, kept := range []string{
@@ -57,7 +63,12 @@ func TestPublicConversationBaseReplacesOnlyTheCodingAssistantNarrationGuidance(t
 		"## Planning",
 		"## Task execution",
 		"## Ambition vs. precision",
-		"## Presenting your work and final message",
+		"## The final answer",
+		"application that renders Markdown",
+		"Lead with the answer",
+		"Match the size to the request",
+		"One visual per point, never two views of the same numbers",
+		"An explicit output contract always wins",
 		"# Tool Guidelines",
 		"## `update_plan`",
 	} {
@@ -65,14 +76,17 @@ func TestPublicConversationBaseReplacesOnlyTheCodingAssistantNarrationGuidance(t
 			t.Fatalf("expected %q exactly once in composed base instructions", kept)
 		}
 	}
-	// Everything outside the two communication sections is byte-identical.
+	// Everything outside the three communication sections is byte-identical.
 	head := codexDefaultBaseInstructions[:strings.Index(codexDefaultBaseInstructions, preambleSectionStart)]
 	if !strings.HasPrefix(got, head) {
 		t.Fatal("text before the communication section changed")
 	}
-	tail := codexDefaultBaseInstructions[strings.Index(codexDefaultBaseInstructions, progressSectionEnd):]
+	tail := codexDefaultBaseInstructions[strings.Index(codexDefaultBaseInstructions, finalSectionEnd):]
 	if !strings.HasSuffix(got, tail) {
-		t.Fatal("text after the removed progress section changed")
+		t.Fatal("tool guidelines after the final-answer section changed")
+	}
+	if !strings.Contains(got, "## The final answer\n\nThe final answer is read") || !strings.Contains(got, "without structure.\n\n# Tool Guidelines\n") {
+		t.Fatal("final-answer section is not framed by its heading and the tool guidelines")
 	}
 	middle := codexDefaultBaseInstructions[strings.Index(codexDefaultBaseInstructions, preambleSectionEnd):strings.Index(codexDefaultBaseInstructions, progressSectionStart)]
 	if !strings.Contains(got, middle) {
@@ -85,12 +99,16 @@ func TestPublicConversationBaseReplacesOnlyTheCodingAssistantNarrationGuidance(t
 }
 
 func TestComposePublicConversationBaseRejectsUnknownLayout(t *testing.T) {
-	if _, err := composePublicConversationBase("# Different prompt\n## Planning\n", "## Rules\n"); err == nil {
+	if _, err := composePublicConversationBase("# Different prompt\n## Planning\n", "## Rules\n", "## Answer\n"); err == nil {
 		t.Fatal("missing markers must be reported, not silently skipped")
 	}
 	doubled := codexDefaultBaseInstructions + "\n" + preambleSectionStart
-	if _, err := composePublicConversationBase(doubled, publicConversationSection); err == nil {
+	if _, err := composePublicConversationBase(doubled, publicConversationSection, publicFinalAnswerSection); err == nil {
 		t.Fatal("a duplicated marker must be rejected")
+	}
+	withoutTools := strings.Replace(codexDefaultBaseInstructions, finalSectionEnd, "# Other\n", 1)
+	if _, err := composePublicConversationBase(withoutTools, publicConversationSection, publicFinalAnswerSection); err == nil {
+		t.Fatal("a missing final-answer end marker must be rejected")
 	}
 }
 
