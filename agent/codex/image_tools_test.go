@@ -50,6 +50,18 @@ func TestImageToolFramingDoesNotImplyCropping(t *testing.T) {
 	}
 }
 
+// A zero-based first slot used to be refused without saying why, so the Agent guessed.
+func TestImageToolSlotsSayTheyCountFromOne(t *testing.T) {
+	properties := imageDynamicTools()[0]["inputSchema"].(map[string]any)["properties"].(map[string]any)
+	index := properties["slotIndex"].(map[string]any)
+	if index["minimum"] != 1 || !strings.Contains(index["description"].(string), "counting from 1") {
+		t.Fatalf("slotIndex must state that the first image is 1: %#v", index)
+	}
+	if count := properties["slotCount"].(map[string]any); count["minimum"] != 1 || count["description"] == "" {
+		t.Fatalf("slotCount must be described: %#v", count)
+	}
+}
+
 func TestImageToolsOnlyAdvertisedWithAuthorityAndInstalledAdapter(t *testing.T) {
 	s := imageToolTestSession(t, "")
 	if tools, ok := s.threadRequestParams()["dynamicTools"].([]map[string]any); !ok || len(tools) != 2 {

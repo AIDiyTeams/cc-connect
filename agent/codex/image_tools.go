@@ -45,7 +45,9 @@ const imageFramingInstructions = "Tomako image framing: when the user specifies 
 
 func imageDynamicTools() []map[string]any {
 	text := map[string]any{"type": "string", "minLength": 1}
-	positive := map[string]any{"type": "integer", "minimum": 1}
+	slot := func(description string) map[string]any {
+		return map[string]any{"type": "integer", "minimum": 1, "description": description}
+	}
 	return []map[string]any{
 		{"type": "function", "name": "tomako_generate_image", "deferLoading": false,
 			"description": "Preferred Tomako image generation/edit entry. Follow the shared image policy and edit-image skill; supply the brief and actual selected source references without inspecting scripts or assembling shell commands. One call submits one image. For multiple independent images, set waitForResult=false on each and submit them before waiting with tomako_image_status. If an image depends on a previous result, wait for that result before submitting it. Put the edited source first; preserve the requested scope and framing. Discussion does not authorize generation. A failed, pending or unconfirmed result does not authorize resubmitting that image. For compositing or other unsupported options use the existing shared image helper. This tool does not attach an image to a document. " + imageFramingInstructions,
@@ -61,7 +63,9 @@ func imageDynamicTools() []map[string]any {
 					"targetHeight":       map[string]any{"type": "integer", "minimum": 1, "description": "Requested framing height; provide with targetWidth. The returned file retains its actual dimensions by default."},
 					"resizeMode":         map[string]any{"type": "string", "enum": []string{"cover", "contain"}, "description": "Omit for ordinary generated results: persist the complete provider image. Set only for an explicitly requested fixed canvas with targetWidth/targetHeight: cover crops; contain adds a faded image background. Do not infer a crop from a poster or platform aspect-ratio request."},
 					"transparent":        map[string]any{"type": "boolean", "description": "Set true for an asset that will be layered over a canvas, slide, poster or another image (an object, character, prop or sticker): the result is a PNG with a transparent background, so no cutout step is needed. Describe one complete subject with no backdrop or ground shadow. Supported by the default model; omit for full scenes and background plates."},
-					"slotId":             text, "slotLabel": text, "slotIndex": positive, "slotCount": positive,
+					"slotId":             text, "slotLabel": text,
+					"slotIndex": slot("Position of this image in a planned set, counting from 1: the first image is 1 and the last equals slotCount. Provide with slotCount."),
+					"slotCount": slot("How many images the planned set has. Provide with slotIndex."),
 				}},
 		},
 		{"type": "function", "name": "tomako_image_status", "deferLoading": false,
