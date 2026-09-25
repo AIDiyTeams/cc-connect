@@ -448,6 +448,7 @@ type InteractionRequest struct {
 	InputPreview  string              `json:"input_preview,omitempty"`
 	Questions     []UserQuestion      `json:"questions,omitempty"`
 	Options       []InteractionOption `json:"options,omitempty"`
+	Form          *InteractionForm    `json:"form,omitempty"`
 }
 
 type InteractionOption struct {

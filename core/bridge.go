@@ -1114,7 +1114,7 @@ func (bp *BridgePlatform) SendInteraction(ctx context.Context, replyCtx any, req
 	if a == nil || !a.capabilities["interactions"] {
 		return ErrNotSupported
 	}
-	return bp.server.sendToAdapter(rc.Platform, map[string]any{
+	message := map[string]any{
 		"type":           "interaction_requested",
 		"session_key":    rc.SessionKey,
 		"reply_ctx":      rc.ReplyCtx,
@@ -1122,7 +1122,11 @@ func (bp *BridgePlatform) SendInteraction(ctx context.Context, replyCtx any, req
 		"kind":           request.Kind,
 		"questions":      request.Questions,
 		"options":        request.Options,
-	})
+	}
+	if request.Form != nil {
+		message["form"] = request.Form
+	}
+	return bp.server.sendToAdapter(rc.Platform, message)
 }
 
 func (bp *BridgePlatform) UpdateMessage(ctx context.Context, replyCtx any, content string) error {

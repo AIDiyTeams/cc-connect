@@ -3393,6 +3393,7 @@ func (e *Engine) RespondInteraction(sessionKey, interactionID, decision string, 
 	result := PermissionResult{Behavior: "allow", UpdatedInput: pending.ToolInput}
 	if len(pending.Questions) > 0 {
 		collected := make(map[int]string, len(pending.Questions))
+		fields := map[string]any{}
 		for idx, question := range pending.Questions {
 			values := answers[question.ID]
 			if len(values) == 0 {
@@ -3406,9 +3407,25 @@ func (e *Engine) RespondInteraction(sessionKey, interactionID, decision string, 
 					return fmt.Errorf("skipped answer for question %q cannot be combined with options", question.ID)
 				}
 			}
+			if question.InputType != "" {
+				// A form field keeps its values as given (choices mapped to their
+				// labels) so the requesting tool can read numbers and lists back.
+				skipped := len(values) == 1 && strings.TrimSpace(values[0]) == interactionSkippedAnswer
+				if skipped && question.Required {
+					return fmt.Errorf("question %q is required", question.ID)
+				}
+				fields[question.ID] = interactionFieldValues(question, values)
+				continue
+			}
 			collected[idx] = interactionAnswerText(question, values)
 		}
 		result.UpdatedInput = buildAskQuestionResponse(pending.ToolInput, pending.Questions, collected)
+		if len(fields) > 0 {
+			answersOut, _ := result.UpdatedInput["answers"].(map[string]any)
+			for id, values := range fields {
+				answersOut[id] = values
+			}
+		}
 	} else {
 		decision = strings.ToLower(strings.TrimSpace(decision))
 		switch decision {
@@ -3477,6 +3494,25 @@ const interactionSkippedAnswer = "__tomako_skipped__"
 const interactionSkippedAnswerText = "Skipped by user: the user declined to answer this question. " +
 	"Do not choose a value on their behalf. If the task cannot proceed correctly without this answer, " +
 	"stop and report what is missing instead of proceeding with an assumption."
+
+// interactionFieldValues maps choice ids to labels and trims text, keeping the
+// skip sentinel intact so the form tool can report the field as skipped.
+func interactionFieldValues(question UserQuestion, values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		for _, option := range question.Options {
+			if value == option.ID {
+				value = option.Label
+				break
+			}
+		}
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
 
 func interactionAnswerText(question UserQuestion, values []string) string {
 	if len(values) == 1 && strings.TrimSpace(values[0]) == interactionSkippedAnswer {
@@ -5512,6 +5548,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					ToolName:      event.ToolName,
 					InputPreview:  event.ToolInput,
 					Questions:     event.Questions,
+					Form:          event.Form,
 				}
 				if !isAskQuestion {
 					request.Options = []InteractionOption{

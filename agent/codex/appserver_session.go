@@ -528,6 +528,12 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	if params["dynamicTools"] == nil && s.imageToolsAvailable() {
 		params["dynamicTools"] = imageDynamicTools()
 	}
+	// Conversations can also ask for several facts on one form card. Appended,
+	// never assigned, so it joins whatever tools the conversation already has.
+	if s.formToolAvailable() && !s.isBrandAnalysisRuntime() && !s.isUserVoiceArchiveRuntime() && !s.isUserVoiceJudgmentRuntime() {
+		tools, _ := params["dynamicTools"].([]map[string]any)
+		params["dynamicTools"] = append(tools, formDynamicTool())
+	}
 	// Application-managed conversations replace the coding-assistant preamble
 	// guidance at the base-instruction level; see public_conversation_base.go.
 	if base := s.baseInstructionsOverride(); base != "" {
@@ -1126,6 +1132,14 @@ func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRa
 	}
 	if err := json.Unmarshal(paramsRaw, &params); err != nil {
 		s.writeDynamicToolResponse(rawID, false, "invalid tool arguments")
+		return
+	}
+	if params.Tool == formToolName {
+		if !s.formToolAvailable() {
+			s.writeDynamicToolResponse(rawID, false, "forms are only available in a conversation")
+			return
+		}
+		s.handleFormToolCall(rawID, params.CallID, params.Arguments)
 		return
 	}
 	if params.Tool == "tomako_generate_image" || params.Tool == "tomako_image_status" {
@@ -2510,6 +2524,10 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		publicResult := truncate(strings.TrimSpace(result), 500)
 		if tool == "search_reddit_archive" {
 			publicResult = archiveExecutionReceipt(result)
+		}
+		if tool == formToolName {
+			// The answers are the user's own input; the trace records only that the form returned.
+			publicResult = "form returned"
 		}
 		success := appServerToolSuccess(status, nil)
 		s.emit(core.Event{
