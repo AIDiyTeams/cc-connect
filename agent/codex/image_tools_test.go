@@ -41,6 +41,13 @@ func TestImageToolFramingDoesNotImplyCropping(t *testing.T) {
 	if strings.Contains(strings.Join(schema["required"].([]string), ","), "size") {
 		t.Fatal("supplier-specific size must not be mandatory in the bridge")
 	}
+	transparent := properties["transparent"].(map[string]any)
+	if transparent["type"] != "boolean" || !strings.Contains(transparent["description"].(string), "transparent background") {
+		t.Fatal("layered assets must be requestable with a transparent background")
+	}
+	if strings.Contains(strings.Join(schema["required"].([]string), ","), "transparent") {
+		t.Fatal("transparency is optional; full scenes keep their backdrop")
+	}
 }
 
 func TestImageToolsOnlyAdvertisedWithAuthorityAndInstalledAdapter(t *testing.T) {

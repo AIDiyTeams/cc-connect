@@ -60,6 +60,7 @@ func imageDynamicTools() []map[string]any {
 					"targetWidth":        map[string]any{"type": "integer", "minimum": 1, "description": "Requested framing width; provide with targetHeight. Without resizeMode this guides generation, not post-generation cropping or an exact delivered-pixel guarantee."},
 					"targetHeight":       map[string]any{"type": "integer", "minimum": 1, "description": "Requested framing height; provide with targetWidth. The returned file retains its actual dimensions by default."},
 					"resizeMode":         map[string]any{"type": "string", "enum": []string{"cover", "contain"}, "description": "Omit for ordinary generated results: persist the complete provider image. Set only for an explicitly requested fixed canvas with targetWidth/targetHeight: cover crops; contain adds a faded image background. Do not infer a crop from a poster or platform aspect-ratio request."},
+					"transparent":        map[string]any{"type": "boolean", "description": "Set true for an asset that will be layered over a canvas, slide, poster or another image (an object, character, prop or sticker): the result is a PNG with a transparent background, so no cutout step is needed. Describe one complete subject with no backdrop or ground shadow. Supported by the default model; omit for full scenes and background plates."},
 					"slotId":             text, "slotLabel": text, "slotIndex": positive, "slotCount": positive,
 				}},
 		},
