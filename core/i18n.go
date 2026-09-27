@@ -186,6 +186,7 @@ const (
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
 	MsgEmptyResponse             MsgKey = "empty_response"
 	MsgAgentEmptyResponse        MsgKey = "agent_empty_response"
+	MsgTurnInterruptedByShutdown MsgKey = "turn_interrupted_by_shutdown"
 	MsgPermissionPrompt          MsgKey = "permission_prompt"
 	MsgPermissionAllowed         MsgKey = "permission_allowed"
 	MsgPermissionApproveAll      MsgKey = "permission_approve_all"
@@ -835,6 +836,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "(空回應)",
 		LangJapanese:           "（空のレスポンス）",
 		LangSpanish:            "(respuesta vacía)",
+	},
+	MsgTurnInterruptedByShutdown: {
+		LangEnglish:            "The Agent service restarted and this turn was interrupted before it finished. Please send your request again.",
+		LangChinese:            "Agent 服务刚刚重启，这一轮在完成前被中断了。请重新发送需求。",
+		LangTraditionalChinese: "Agent 服務剛剛重新啟動，這一輪在完成前被中斷了。請重新傳送需求。",
+		LangJapanese:           "Agent サービスが再起動したため、このターンは完了前に中断されました。もう一度リクエストを送信してください。",
+		LangSpanish:            "El servicio del Agent se reinició y este turno se interrumpió antes de terminar. Vuelve a enviar tu solicitud.",
 	},
 	MsgAgentEmptyResponse: {
 		LangEnglish:            "❌ The Agent returned no usable result. Please retry; if the problem continues, check the configured model provider.",

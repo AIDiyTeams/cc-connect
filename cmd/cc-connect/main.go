@@ -1318,6 +1318,12 @@ func main() {
 	}
 
 	slog.Info("shutting down...")
+	// A /restart comes from inside a running turn, which would wait on itself.
+	if restartReq == nil {
+		drainCtx, stopDrain := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		core.DrainEngines(drainCtx, engines, shutdownDrainTimeout(), time.Second)
+		stopDrain()
+	}
 	if mgmtSrv != nil {
 		mgmtSrv.Stop()
 	}
@@ -1990,4 +1996,20 @@ func derefInt(v *int) int {
 		return 0
 	}
 	return *v
+}
+
+// shutdownDrainTimeout is how long a stop waits for running turns before it
+// cuts and reports them. Keep it below the service manager's stop timeout.
+func shutdownDrainTimeout() time.Duration {
+	const fallback = 60 * time.Second
+	raw := strings.TrimSpace(os.Getenv("CC_CONNECT_SHUTDOWN_DRAIN"))
+	if raw == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		slog.Warn("invalid CC_CONNECT_SHUTDOWN_DRAIN; using default", "value", raw, "default", fallback)
+		return fallback
+	}
+	return d
 }

@@ -296,6 +296,11 @@ type Engine struct {
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
 
+	// Turns currently streaming, so a shutdown can wait for them and report
+	// the ones it has to cut. See shutdown_drain.go.
+	activeTurnsMu sync.Mutex
+	activeTurns   map[*activeTurn]struct{}
+
 	platformLifecycleMu sync.Mutex
 	platformReady       map[Platform]bool
 	stopping            bool
@@ -4720,6 +4725,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.currentMessageID = msgID
 		state.mu.Unlock()
 	}
+	defer e.trackActiveTurn(state.platform, replyCtx)()
 
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed

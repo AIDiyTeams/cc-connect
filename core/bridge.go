@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -44,6 +45,10 @@ type BridgeServer struct {
 
 	enginesMu sync.RWMutex
 	engines   map[string]*bridgeEngineRef // project name → engine ref
+
+	// instanceID changes on every process start. Adapters compare it across
+	// reconnects: a new value means turns sent to the old process are gone.
+	instanceID string
 }
 
 type bridgeEngineRef struct {
@@ -321,8 +326,20 @@ func newBridgeServer(port int, token, path string, corsOrigins []string, insecur
 		tokenStreamReplyPrefixes: []string{"cmsg-", "llm-"},
 		adapters:                 make(map[string]*bridgeAdapter),
 		engines:                  make(map[string]*bridgeEngineRef),
+		instanceID:               newBridgeInstanceID(),
 	}
 }
+
+func newBridgeInstanceID() string {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("t%x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buf)
+}
+
+// InstanceID identifies this process to adapters; see BridgeServer.instanceID.
+func (bs *BridgeServer) InstanceID() string { return bs.instanceID }
 
 // SetTokenStreamReplyPrefixes configures which reply_ctx prefixes enable
 // by-token reply_stream. Empty keeps the default ["cmsg-", "llm-"].
@@ -1605,6 +1622,7 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 	if err := writeJSON(conn, &adapter.writeMu, map[string]any{
 		"type": "register_ack", "ok": true,
 		"runtime_capabilities": []string{"output_schema_v1", "turn_budget_v1"},
+		"instance_id":          bs.instanceID,
 	}); err != nil {
 		slog.Debug("bridge: write register ack failed", "error", err)
 		return
