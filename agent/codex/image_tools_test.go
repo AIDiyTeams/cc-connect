@@ -27,6 +27,33 @@ func imageToolTestSession(t *testing.T, script string) *appServerSession {
 	return s
 }
 
+func TestImageToolDeliveryRoleRequiredAndForwarded(t *testing.T) {
+	schema := imageDynamicTools()[0]["inputSchema"].(map[string]any)
+	if !strings.Contains(strings.Join(schema["required"].([]string), ","), "deliveryRole") {
+		t.Fatal("native image calls must distinguish final deliverables from supporting assets before generation")
+	}
+	role, ok := schema["properties"].(map[string]any)["deliveryRole"].(map[string]any)
+	if !ok || strings.Join(role["enum"].([]string), ",") != "DELIVERABLE,SUPPORTING" {
+		t.Fatal("native schema must expose the backend delivery role contract")
+	}
+	for _, value := range []string{"DELIVERABLE", "SUPPORTING"} {
+		t.Run(value, func(t *testing.T) {
+			s := imageToolTestSession(t, "")
+			cmd, cancel, cleanup, err := s.prepareImageTool("tomako_generate_image", map[string]any{"operation": "create", "prompt": "asset", "deliveryRole": value})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cancel()
+			defer cleanup()
+			input, _ := io.ReadAll(cmd.Stdin)
+			var call map[string]any
+			if json.Unmarshal(input, &call) != nil || call["arguments"].(map[string]any)["deliveryRole"] != value {
+				t.Fatal("Agent-selected delivery role lost before the shared helper")
+			}
+		})
+	}
+}
+
 func TestImageToolFramingDoesNotImplyCropping(t *testing.T) {
 	schema := imageDynamicTools()[0]["inputSchema"].(map[string]any)
 	properties := schema["properties"].(map[string]any)
