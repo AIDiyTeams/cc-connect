@@ -40,7 +40,7 @@ func needsNativeWebModelCatalog(runtime core.SessionRuntime) bool {
 		return false
 	}
 	switch strings.TrimSpace(runtime.Scene) {
-	case "growth_opportunity_user_voice_plan", "growth_opportunity_user_voice_search", "growth_opportunity_user_voice_judge":
+	case "brand_competitor_discovery", "growth_opportunity_user_voice_plan", "growth_opportunity_user_voice_search", "growth_opportunity_user_voice_judge":
 		return true
 	default:
 		return false

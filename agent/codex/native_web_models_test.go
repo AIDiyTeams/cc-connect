@@ -43,6 +43,21 @@ func TestDeepSeekNativeWebCatalog_PreservesOfficialCapabilities(t *testing.T) {
 	}
 }
 
+func TestBrandCompetitorNativeSearch_RetainsHostedSearchCapability(t *testing.T) {
+	runtime := core.SessionRuntime{Scene: "brand_competitor_discovery", GatewayModel: "tomako/deepseek-v4-flash-vision-exp", WebSearch: "live"}
+	if !needsNativeWebModelCatalog(runtime) {
+		t.Fatal("competitor discovery starts without its hosted search capability")
+	}
+	ordinary := &appServerSession{}
+	if ordinary.SupportsSessionRuntime(runtime) {
+		t.Fatal("an ordinary process must restart with the search catalog")
+	}
+	runtime.WebSearch = "disabled"
+	if needsNativeWebModelCatalog(runtime) {
+		t.Fatal("catalog must not enable search when the runtime disables it")
+	}
+}
+
 func TestNativeWebResponsesLite_StartupCatalogScopeAndCleanup(t *testing.T) {
 	for _, scene := range []string{"growth_opportunity_user_voice_plan", "growth_opportunity_user_voice_search", "growth_opportunity_user_voice_judge"} {
 		r := core.SessionRuntime{Scene: scene, GatewayModel: "tomako/gpt-5.6-sol", WebSearch: "live", ReasoningEffort: "high"}
