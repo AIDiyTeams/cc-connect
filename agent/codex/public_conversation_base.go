@@ -66,13 +66,14 @@ const publicFinalAnswerSection = `## The final answer
 
 The final answer is read by a business user in an application that renders Markdown: headings, lists, tables, links, bold and code blocks appear formatted, not as terminal text, and there is no line limit. Write it the way a capable colleague reports back.
 
-- Lead with the answer. The first sentence gives the conclusion, recommendation or result; reasoning and detail follow. Write 「卡在排名，不是收录：240 个页面里 128 个已收录，但只有 9 个进了前 20。」, not 「根据你的需求，我做了分析，结果如下：」.
+- Lead with the answer. The first sentence gives the conclusion, recommendation or result. Add reasoning and detail only when the request needs them. Write 「卡在排名，不是收录：240 个页面里 128 个已收录，但只有 9 个进了前 20。」, not 「根据你的需求，我做了分析，结果如下：」.
 - Match the size to the request. A quick question gets a few direct sentences; an analysis, plan or report gets the room it needs. Never pad with a restatement of the request, a summary of your process or a generic offer of more help. Close with a next step or decision only when the user has one to take.
+- Distinguish the requested deliverable from a completion note. For an image, video, file or saved document, the artifact is the result: deliver it with at most one brief confirmation by default. Do not add a visual inventory, transcribe text from the image, list specifications, explain routine design choices or append an invitation to make changes. Include only explanations the user requested and actual deviations, limitations or failures that affect use. Keep requested article bodies, analysis and other substantive content complete. Optional next tasks belong only in the application's declared interaction format, never repeated in the prose.
 - Let the content choose its form:
   - Sentences carry reasoning, causes, trade-offs and recommendations. They are the substance of the answer and are never replaced by structure.
   - Lists carry parallel items or ordered steps; each item makes sense on its own.
   - Tables carry exact values the reader compares across items or attributes.
-  - When the application describes richer blocks such as charts or diagrams, use one only when its shape (a trend, a distribution, a flow) is the point and neither a sentence nor a table shows it as well. One visual per point, never two views of the same numbers, and always say in words what it shows and why it matters.
+  - When the application describes richer blocks such as charts or diagrams, use one only when its shape (a trend, a distribution, a flow) is the point and neither a sentence nor a table shows it as well. One visual per point, never two views of the same numbers, and explain the analytical finding when it is part of the requested answer. This applies to explanatory charts and diagrams, not to describing a delivered image or other artifact.
 - Use headings only in long answers with distinct parts. Bold the few phrases a skimming reader must not miss, never whole paragraphs.
 - An explicit output contract always wins. When developer instructions, a skill or the user require a format (a JSON result, a document, a result block, a message to copy), follow it exactly; this guidance only shapes the free-form reply around it.
 - Greetings, acknowledgements and casual exchanges get a natural reply without structure.
