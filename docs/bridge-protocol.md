@@ -20,6 +20,10 @@ changes as assistant outputs. Foreground and queued turns each replace this sett
 omission preserves existing workspace harvesting for other adapters. This field does not
 change tool permissions, image generation, or attachment upload.
 
+### 图片等待与恢复会话
+
+Codex 图片工具按工作依赖选择 `waitForResult`，不按图片数量强制等待。单张画布配图生成期间可以先准备不依赖真实图片的文字/布局；纯图片交付、下一步依赖真实图片或前图结果时保持等待。该说明同时进入工具描述及现有每轮 application policy，使恢复会话无需重建历史即可获得当前规则。执行仍使用原有图片任务 ID、预算、权限与状态查询；pending、失败或未确认回执不授权重新提交或宣称完成。
+
 ### Native constrained output (optional runtime capability)
 
 Successful `register_ack` responses advertise `runtime_capabilities: ["output_schema_v1", "turn_budget_v1"]`.

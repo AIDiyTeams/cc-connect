@@ -809,7 +809,7 @@ func (s *appServerSession) turnDeveloperInstructions() map[string]any {
 	var instructions any
 	policy := s.runtime.DeveloperInstructions
 	if imageRuntimeAuthorized(s.runtime) {
-		policy = imageFramingInstructions + "\n\n" + policy
+		policy = imageFramingInstructions + "\n\n" + imageSchedulingInstructions + "\n\n" + policy
 	}
 	if policy != "" {
 		prefix := "You are in Default mode. The following current application instructions replace earlier application instructions in this collaboration-mode block and remain in effect until replaced by later collaboration instructions.\n\n"

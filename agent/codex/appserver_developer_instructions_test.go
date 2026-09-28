@@ -102,7 +102,7 @@ func TestImageFramingPolicyReachesResumedTurnsWithoutResettingConversation(t *te
 	for range 2 {
 		settings := s.turnDeveloperInstructions()["settings"].(map[string]any)
 		policy := settings["developer_instructions"].(string)
-		if strings.Count(policy, imageFramingInstructions) != 1 || !strings.HasSuffix(policy, "Current application policy") || strings.Contains(policy, "secret") {
+		if strings.Count(policy, imageFramingInstructions) != 1 || strings.Count(policy, imageSchedulingInstructions) != 1 || !strings.HasSuffix(policy, "Current application policy") || strings.Contains(policy, "secret") {
 			t.Fatal("current framing guidance must be scoped, non-duplicated and preserve the application policy")
 		}
 		if s.CurrentSessionID() != "resumed-conversation" || settings["model"] != "unchanged" || settings["reasoning_effort"] != "high" {
@@ -111,7 +111,7 @@ func TestImageFramingPolicyReachesResumedTurnsWithoutResettingConversation(t *te
 	}
 	s.runtime.ImageCapabilityToken = ""
 	policy := s.turnDeveloperInstructions()["settings"].(map[string]any)["developer_instructions"].(string)
-	if strings.Contains(policy, imageFramingInstructions) {
+	if strings.Contains(policy, imageFramingInstructions) || strings.Contains(policy, imageSchedulingInstructions) {
 		t.Fatal("unscoped turns must not retain image policy")
 	}
 }
