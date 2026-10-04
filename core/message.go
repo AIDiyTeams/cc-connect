@@ -304,6 +304,7 @@ type Event struct {
 	Content                  string
 	ContentProvisional       bool             // Native item phase is not final until item/completed.
 	ContentKind              string           // For EventThinking: "summary" (provider reasoning summary) or "raw" (full reasoning text).
+	ContentPartial           bool             // For EventThinking: a slice of a reasoning block still being written; the completed block follows.
 	ContentVersion           int64            // cumulative public commentary snapshot; zero is legacy completed prose
 	ContentDone              bool             // seals this commentary item, not the task
 	ToolName                 string           // populated for EventToolUse, EventPermissionRequest

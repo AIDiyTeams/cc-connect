@@ -19,6 +19,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -211,6 +212,7 @@ type appServerSession struct {
 	lastFinalItem         string
 	lastCommentary        recentCommentary
 	turnCommentaryCount   int
+	reasoningSlice        *reasoningSlice
 
 	runtimeMu             sync.RWMutex
 	usage                 *core.UsageReport
@@ -407,12 +409,13 @@ func (s *appServerSession) initialize() error {
 			// item/agentMessage/delta is deliberately NOT opted out: Studio
 			// streams assistant text token-by-token through EventText so the
 			// user sees prose forming live instead of one blob at turn end.
+			// item/reasoning/textDelta is kept too: a long reasoning block is
+			// sliced for the backend's progress summary (see reasoningSlice).
 			"optOutNotificationMethods": []string{
 				"command/exec/outputDelta",
 				"item/plan/delta",
 				"item/fileChange/outputDelta",
 				"item/reasoning/summaryTextDelta",
-				"item/reasoning/textDelta",
 			},
 		},
 	}
@@ -714,6 +717,7 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	s.lastFinalItem = ""
 	s.lastCommentary = recentCommentary{}
 	s.turnCommentaryCount = 0
+	s.reasoningSlice = nil
 	s.stateMu.Unlock()
 
 	return nil
@@ -2229,6 +2233,7 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 			s.finalItems = nil
 			s.completedMessageItems = nil
 			s.lastFinalItem = ""
+			s.reasoningSlice = nil
 			s.stateMu.Unlock()
 			s.storeContextUsage(nil)
 		}
@@ -2246,6 +2251,15 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		}
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
 			s.handleAgentMessageDelta(notif.ItemID, notif.Delta)
+		}
+
+	case "item/reasoning/textDelta":
+		var notif struct {
+			ItemID string `json:"itemId"`
+			Delta  string `json:"delta"`
+		}
+		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
+			s.handleReasoningDelta(notif.ItemID, notif.Delta, time.Now())
 		}
 
 	case "item/completed":
@@ -2412,6 +2426,11 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 
 	switch itemType {
 	case "reasoning":
+		s.stateMu.Lock()
+		if s.reasoningSlice != nil && s.reasoningSlice.itemID == itemID {
+			s.reasoningSlice = nil
+		}
+		s.stateMu.Unlock()
 		text := appServerReasoningText(item)
 		if text != "" {
 			s.emit(core.Event{Type: core.EventThinking, Content: text, ContentKind: reasoningKind(item)})
@@ -2883,6 +2902,57 @@ func (s *appServerSession) handleAgentMessageDelta(itemID, delta string) {
 		// as commentary. Keep prose live without committing it to answer history.
 		s.emitCommentarySnapshot(itemID, delta, false, true)
 	}
+}
+
+// A reasoning block can run for tens of seconds before the model says or does anything.
+// Its streamed text is cut into time slices so the backend can summarize what the model is
+// weighing while the block is still running. The completed item still carries the whole
+// block; only chat turns receive slices (see core.BridgePlatform.ReportAgentTrace).
+const (
+	reasoningSliceInterval = 10 * time.Second
+	reasoningSliceMinRunes = 300  // the backend summarizer ignores shorter text
+	reasoningSliceMaxRunes = 4000 // the summarizer reads only the end of a slice
+)
+
+type reasoningSlice struct {
+	itemID  string
+	started time.Time
+	text    strings.Builder
+}
+
+func (s *appServerSession) handleReasoningDelta(itemID, delta string, now time.Time) {
+	if delta == "" {
+		return
+	}
+	s.stateMu.Lock()
+	slice := s.reasoningSlice
+	if slice == nil || slice.itemID != itemID {
+		slice = &reasoningSlice{itemID: itemID, started: now}
+		s.reasoningSlice = slice
+	}
+	slice.text.WriteString(delta)
+	if now.Sub(slice.started) < reasoningSliceInterval || slice.text.Len() < reasoningSliceMinRunes {
+		s.stateMu.Unlock()
+		return
+	}
+	text := slice.text.String()
+	if utf8.RuneCountInString(text) < reasoningSliceMinRunes {
+		s.stateMu.Unlock()
+		return
+	}
+	slice.text.Reset()
+	slice.started = now
+	s.stateMu.Unlock()
+	s.emit(core.Event{Type: core.EventThinking, Content: lastRunes(text, reasoningSliceMaxRunes),
+		ContentKind: "raw", ContentPartial: true})
+}
+
+func lastRunes(text string, limit int) string {
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[len(runes)-limit:])
 }
 
 func (s *appServerSession) flushPendingAsThinking() {

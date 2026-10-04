@@ -15719,6 +15719,43 @@ func TestProcessInteractiveEvents_SkipsEllipsisThinkingInTraceReporter(t *testin
 	}
 }
 
+func TestProcessInteractiveEvents_PartialThinkingOnlyFeedsTheTraceReporter(t *testing.T) {
+	p := &stubTraceReporterPlatform{stubPlatformEngine: stubPlatformEngine{n: "bridge"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true})
+
+	sessionKey := "bridge:user-trace-partial"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-trace-partial")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "cmsg-partial"}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventThinking, Content: "slice of an unfinished block", ContentKind: "raw", ContentPartial: true}
+	agentSession.events <- Event{Type: EventThinking, Content: "the completed block", ContentKind: "raw"}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-trace-partial", time.Now(), nil, nil, state.replyCtx)
+
+	var partial, completed int
+	for _, tr := range p.traces {
+		if tr.Type != EventThinking {
+			continue
+		}
+		if tr.ContentPartial && tr.Content == "slice of an unfinished block" && tr.ContentKind == "raw" {
+			partial++
+		} else if !tr.ContentPartial && tr.Content == "the completed block" {
+			completed++
+		}
+	}
+	if partial != 1 || completed != 1 {
+		t.Fatalf("reporter must receive the slice and the completed block once each: %#v", p.traces)
+	}
+	for _, sent := range p.getSent() {
+		if strings.Contains(sent, "slice of an unfinished block") {
+			t.Fatalf("a slice must never render on the messaging platform: %q", sent)
+		}
+	}
+}
+
 type stubMachineChannelPlatform struct {
 	stubPlatformEngine
 	replies      []string

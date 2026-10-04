@@ -41,6 +41,7 @@ type AgentTraceEvent struct {
 	ContentVersion     int64
 	ContentDone        bool
 	ContentKind        string // Thinking only: "summary" or "raw"; the backend shows summaries and summarizes raw text.
+	ContentPartial     bool   // Thinking only: a slice of a block still being written, for chat summaries only.
 }
 
 // AgentStructuredResultReporter transports a validated dynamic-tool result to

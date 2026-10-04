@@ -79,6 +79,27 @@ func TestBridge_PublicProgressRetainsPhaseAndTurn(t *testing.T) {
 	}
 }
 
+func TestBridge_PartialThinkingReachesChatTurnsOnly(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "java-backend", []string{"text", "agent_trace"})
+	bp := bs.NewPlatform("proj")
+	adapter := bs.getAdapter("java-backend")
+	partial := AgentTraceEvent{Type: EventThinking, Content: "weighing three interview questions", ContentKind: "raw", ContentPartial: true}
+	// A backend task persists every thinking frame, so a slice would duplicate the completed block.
+	if err := bp.ReportAgentTrace(context.Background(), newBridgeReplyCtx(adapter, "session", "llm-task"), partial); err != nil {
+		t.Fatal(err)
+	}
+	if err := bp.ReportAgentTrace(context.Background(), newBridgeReplyCtx(adapter, "session", "cmsg-chat"), partial); err != nil {
+		t.Fatal(err)
+	}
+	frame := readMsg(t, conn)
+	if frame["reply_ctx"] != "cmsg-chat" || frame["phase"] != "thinking" || frame["reasoning_kind"] != "raw" ||
+		frame["content"] != "weighing three interview questions" {
+		t.Fatalf("chat turn must receive the slice as a raw thinking frame first: %#v", frame)
+	}
+}
+
 func startTestBridge(t *testing.T, token string) (*BridgeServer, string) {
 	t.Helper()
 	var bs *BridgeServer

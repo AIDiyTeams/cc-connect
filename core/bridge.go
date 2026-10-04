@@ -609,6 +609,11 @@ func (bp *BridgePlatform) ReportAgentTrace(ctx context.Context, replyCtx any, ev
 		if !strings.HasPrefix(rc.ReplyCtx, "llm-") && !strings.HasPrefix(rc.ReplyCtx, "cmsg-") {
 			return nil
 		}
+		// Backend tasks persist each thinking frame; a slice of an unfinished block would
+		// duplicate the completed one there. Only chat turns summarize slices.
+		if event.ContentPartial && !strings.HasPrefix(rc.ReplyCtx, "cmsg-") {
+			return nil
+		}
 		if event.ContentProvisional && (!strings.HasPrefix(rc.ReplyCtx, "cmsg-") || !a.capabilities["provisional_messages"]) {
 			return nil
 		}

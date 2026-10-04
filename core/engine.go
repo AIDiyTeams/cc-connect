@@ -5014,6 +5014,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				trace.ContentDone = event.ContentDone
 				trace.ContentProvisional = event.ContentProvisional
 				trace.ContentKind = event.ContentKind
+				trace.ContentPartial = event.ContentPartial
 			}
 			if trace.Output == "" {
 				trace.Output = event.Content
@@ -5021,6 +5022,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if err := reporter.ReportAgentTrace(e.ctx, replyCtx, trace); err != nil {
 				slog.Debug("agent trace report failed", "platform", p.Name(), "error", err)
 			}
+		}
+		// A slice of an unfinished reasoning block exists only for the backend's progress
+		// summary. Messaging platforms keep rendering the completed block, exactly once.
+		if event.Type == EventThinking && event.ContentPartial {
+			continue
 		}
 		if event.Type == EventStructuredResult {
 			var deliveryErr error
