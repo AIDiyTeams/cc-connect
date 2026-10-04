@@ -258,6 +258,8 @@ type bridgeRespondInteraction struct {
 	Decision      string              `json:"decision,omitempty"`
 	Answers       map[string][]string `json:"answers,omitempty"`
 	Project       string              `json:"project,omitempty"`
+	// Runtime carries freshly issued tool credentials for the paused turn.
+	Runtime *SessionRuntime `json:"runtime,omitempty"`
 }
 
 type bridgePreviewAck struct {
@@ -1707,7 +1709,13 @@ func (a *bridgeAdapter) handleRespondInteraction(raw json.RawMessage) {
 		a.sendInteractionResponseStatus(response, "rejected", "INTERACTION_NOT_PENDING")
 		return
 	}
-	if err := ref.engine.RespondInteraction(response.SessionKey, response.InteractionID, response.Decision, response.Answers); err != nil {
+	var authority *SessionRuntime
+	if response.Runtime != nil {
+		normalized := normalizeSessionRuntime(*response.Runtime)
+		authority = &normalized
+	}
+	if err := ref.engine.RespondInteractionWithAuthority(response.SessionKey, response.InteractionID,
+		response.Decision, response.Answers, authority); err != nil {
 		slog.Warn("bridge: interaction response rejected", "interaction_id", response.InteractionID, "error", err)
 		a.sendInteractionResponseStatus(response, "rejected", "INTERACTION_RUNTIME_REJECTED")
 		return

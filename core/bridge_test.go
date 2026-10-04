@@ -678,6 +678,72 @@ func TestBridge_InteractionResponseRoutesPendingAcrossEnginesWithoutProject(t *t
 	}
 }
 
+type refreshingInteractionAgentSession struct {
+	*bridgeInteractionAgentSession
+	refreshed chan SessionRuntime
+}
+
+func (s *refreshingInteractionAgentSession) RefreshCapabilityAuthority(runtime SessionRuntime) error {
+	s.refreshed <- runtime
+	return nil
+}
+
+func TestBridge_InteractionResponseHandsFreshAuthorityToThePausedTurn(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	platform := bs.NewPlatform("authority-proj")
+	session := &refreshingInteractionAgentSession{
+		bridgeInteractionAgentSession: newBridgeInteractionAgentSession("authority-session"),
+		refreshed:                     make(chan SessionRuntime, 1),
+	}
+	engine := NewEngine("authority-proj", &controllableAgent{nextSession: session}, []Platform{platform}, "", LangEnglish)
+	bs.RegisterEngine("authority-proj", engine, platform)
+
+	sessionKey := "bridge:room-late:user-1"
+	engine.interactiveMu.Lock()
+	engine.interactiveStates[sessionKey] = &interactiveState{
+		agentSession: session,
+		pending: &pendingPermission{
+			RequestID:     `"rui-late-1"`,
+			InteractionID: "interaction-late-1",
+			ToolName:      "AskUserQuestion",
+			ToolInput:     map[string]any{"questions": []any{}},
+			Questions:     []UserQuestion{{ID: "audience", Question: "Who is it for?"}},
+			Resolved:      make(chan struct{}),
+		},
+	}
+	engine.interactiveMu.Unlock()
+
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "bridge", []string{"text", "interactions"})
+	mustWriteJSON(t, conn, map[string]any{
+		"type":           "respond_interaction",
+		"session_key":    sessionKey,
+		"reply_ctx":      "cmsg-late-1",
+		"interaction_id": "interaction-late-1",
+		"answers":        map[string][]string{"audience": {"Developers"}},
+		"runtime": map[string]any{
+			"task_id":                           "cmsg-late-1",
+			"workspace_id":                      "w",
+			"brand_id":                          "b",
+			"employee_command_capability_token": "fresh-employee-token",
+		},
+	})
+
+	select {
+	case runtime := <-session.refreshed:
+		if runtime.TaskID != "cmsg-late-1" || runtime.EmployeeCommandCapabilityToken != "fresh-employee-token" {
+			t.Fatalf("refreshed authority = %#v", runtime)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("fresh authority did not reach the paused turn")
+	}
+	select {
+	case <-session.responses:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the answer must still resume the turn")
+	}
+}
+
 func TestBridge_MessageReplyCtxCarriesProgressHints(t *testing.T) {
 	bs, wsURL := startTestBridge(t, "")
 

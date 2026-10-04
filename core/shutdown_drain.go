@@ -69,6 +69,36 @@ func (e *Engine) PendingTurnCount() int {
 	return len(e.pendingTurns())
 }
 
+// drainableTurnCount is what a shutdown can usefully wait for. A turn paused on
+// the user cannot finish without a person, so neither it nor the messages queued
+// behind it hold the restart; they are still reported when the bridge stops, and
+// the control plane keeps such a question answerable across the restart.
+func (e *Engine) drainableTurnCount() int {
+	total := len(e.pendingTurns())
+	e.interactiveMu.Lock()
+	states := make([]*interactiveState, 0, len(e.interactiveStates))
+	for _, state := range e.interactiveStates {
+		states = append(states, state)
+	}
+	e.interactiveMu.Unlock()
+	for _, state := range states {
+		state.mu.Lock()
+		if state.pending != nil {
+			total--
+			for _, queued := range state.pendingMessages {
+				if queued.platform != nil && queued.replyCtx != nil {
+					total--
+				}
+			}
+		}
+		state.mu.Unlock()
+	}
+	if total < 0 {
+		return 0
+	}
+	return total
+}
+
 // InterruptPendingTurns reports every turn a shutdown is about to cut, so the
 // adapter can settle it at once instead of waiting for it to go silent.
 // It must run while the platforms are still connected.
@@ -93,7 +123,7 @@ func DrainEngines(ctx context.Context, engines []*Engine, timeout time.Duration,
 	count := func() int {
 		total := 0
 		for _, e := range engines {
-			total += e.PendingTurnCount()
+			total += e.drainableTurnCount()
 		}
 		return total
 	}

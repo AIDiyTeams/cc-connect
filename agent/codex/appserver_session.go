@@ -790,6 +790,35 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	return nil
 }
 
+// RefreshCapabilityAuthority swaps only the scoped tool credentials of the
+// current task. The model, tools and thread stay as they are, so it is safe
+// while a turn is paused on the user's answer.
+func (s *appServerSession) RefreshCapabilityAuthority(fresh core.SessionRuntime) error {
+	if !s.alive.Load() {
+		return fmt.Errorf("session is closed")
+	}
+	s.runtimeMu.Lock()
+	defer s.runtimeMu.Unlock()
+	runtime := s.runtime
+	taskID := strings.TrimSpace(fresh.TaskID)
+	if taskID == "" || taskID != strings.TrimSpace(runtime.TaskID) ||
+		fresh.WorkspaceID != runtime.WorkspaceID || fresh.BrandID != runtime.BrandID {
+		return fmt.Errorf("authority belongs to another task")
+	}
+	runtime.MachineCapabilityToken = fresh.MachineCapabilityToken
+	runtime.ImageCapabilityToken = fresh.ImageCapabilityToken
+	runtime.DocumentCapabilityToken = fresh.DocumentCapabilityToken
+	runtime.EmployeeCommandCapabilityToken = fresh.EmployeeCommandCapabilityToken
+	runtime.TaskAuthorityEnvelopeB64 = fresh.TaskAuthorityEnvelopeB64
+	envFile, err := updateTaskRuntimeEnv(s.taskRuntimeEnvFile, runtime)
+	if err != nil {
+		return err
+	}
+	s.taskRuntimeEnvFile = envFile
+	s.runtime = runtime
+	return nil
+}
+
 func (s *appServerSession) currentTaskRuntimeEnvFile() string {
 	s.runtimeMu.RLock()
 	defer s.runtimeMu.RUnlock()

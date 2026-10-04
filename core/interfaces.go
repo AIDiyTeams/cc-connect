@@ -564,6 +564,14 @@ type ToolAuthoritySession interface {
 	SupportsToolAuthority() bool
 }
 
+// CapabilityAuthorityRefresher replaces the scoped tool credentials of the
+// current task while its turn is paused on the user. Credentials live minutes;
+// a person may answer hours later, and the resumed turn must still be able to
+// save its work. Nothing else about the turn changes.
+type CapabilityAuthorityRefresher interface {
+	RefreshCapabilityAuthority(runtime SessionRuntime) error
+}
+
 // NativeOutputSchemaSession opts into enforcing Runtime.OutputSchema in the
 // model runtime, rather than treating the schema as instructions in the prompt.
 type NativeOutputSchemaSession interface {

@@ -3390,6 +3390,14 @@ func newInteractionID() string {
 // RespondInteraction resolves the structured interaction currently waiting on
 // a session. The native JSON-RPC request id never leaves cc-connect.
 func (e *Engine) RespondInteraction(sessionKey, interactionID, decision string, answers map[string][]string) error {
+	return e.RespondInteractionWithAuthority(sessionKey, interactionID, decision, answers, nil)
+}
+
+// RespondInteractionWithAuthority answers a pending interaction and, when the
+// control plane supplies fresh credentials, hands them to the paused turn first
+// so the work that follows the answer is not refused for an expired token.
+func (e *Engine) RespondInteractionWithAuthority(sessionKey, interactionID, decision string,
+	answers map[string][]string, authority *SessionRuntime) error {
 	state, pending := e.lookupPendingInteraction(sessionKey, interactionID)
 	if state == nil || pending == nil {
 		return fmt.Errorf("no pending interaction for session %q", sessionKey)
@@ -3441,6 +3449,15 @@ func (e *Engine) RespondInteraction(sessionKey, interactionID, decision string, 
 			result.Message = "User denied this tool use."
 		default:
 			return fmt.Errorf("unsupported interaction decision %q", decision)
+		}
+	}
+	if authority != nil {
+		if refresher, ok := state.agentSession.(CapabilityAuthorityRefresher); ok {
+			// The answer still resumes the turn: a tool that cannot use the old
+			// credentials reports its own failure, which beats losing the answer.
+			if err := refresher.RefreshCapabilityAuthority(*authority); err != nil {
+				slog.Warn("interaction authority refresh failed", "interaction_id", interactionID, "error", err)
+			}
 		}
 	}
 	if err := state.agentSession.RespondPermission(pending.RequestID, result); err != nil {

@@ -148,3 +148,30 @@ func TestBridgeRegisterAckCarriesStableInstanceID(t *testing.T) {
 		t.Fatal("instance ids should differ between processes")
 	}
 }
+
+func TestDrainEnginesDoesNotWaitForATurnPausedOnTheUser(t *testing.T) {
+	p := &shutdownCapturePlatform{}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	done := e.trackActiveTurn(p, "cmsg-asking")
+	defer done()
+	e.interactiveMu.Lock()
+	e.interactiveStates["bridge:room:user"] = &interactiveState{
+		platform:        p,
+		replyCtx:        "cmsg-asking",
+		pending:         &pendingPermission{InteractionID: "interaction-1", Resolved: make(chan struct{})},
+		pendingMessages: []queuedMessage{{platform: p, replyCtx: "cmsg-queued-behind"}},
+	}
+	e.interactiveMu.Unlock()
+
+	start := time.Now()
+	if n := DrainEngines(context.Background(), []*Engine{e}, time.Minute, 10*time.Millisecond); n != 2 {
+		t.Fatalf("interrupted %d turns, want the paused turn and the message behind it reported", n)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("drain waited %s for a turn only a person can finish", time.Since(start))
+	}
+	failures := p.failed()
+	if failures["cmsg-asking"].Code != TurnInterruptedByShutdown || failures["cmsg-queued-behind"].Code != TurnInterruptedByShutdown {
+		t.Fatalf("failures = %v", failures)
+	}
+}
