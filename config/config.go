@@ -115,6 +115,10 @@ type Config struct {
 	Hooks              []HookConfig            `toml:"hooks"`
 	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"`  // max minutes between consecutive agent events; 0 = no timeout; default 120
 	MaxTurnTimeMins    *int                    `toml:"max_turn_time_mins,omitempty"` // absolute wall-clock cap per turn in minutes; 0 = disabled (default)
+	// PausedTurnReleaseMins bounds how long a turn paused on a structured
+	// question keeps its Agent process; the control plane continues the task
+	// when the answer arrives later. 0 keeps the turn until answered. Default 60.
+	PausedTurnReleaseMins *int `toml:"paused_turn_release_mins,omitempty"`
 	// WorkspaceIdleTimeoutMins controls the workspace idle reaper timeout
 	// (multi-workspace mode) for every engine in the process. 0 disables
 	// reaping. Default: 15 minutes. Defined as a top-level (process-global)

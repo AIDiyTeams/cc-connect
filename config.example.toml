@@ -142,6 +142,14 @@ level = "info" # debug, info, warn, error
 # 推荐值：30–60。默认 0（禁用）。
 # max_turn_time_mins = 0  # default: disabled / 默认禁用
 
+# How long a turn paused on a structured question (bridge interaction) keeps its
+# agent process. When it expires the turn is released and reported; the control
+# plane keeps the question answerable and continues the task from the answer.
+# 0 keeps the paused turn until answered.
+# 结构化问题卡（bridge 交互）等回答时保留 agent 进程的分钟数。到期释放这一轮并上报；
+# 控制面保留问题，用户回答后从答案继续任务。设为 0 则一直等到回答。
+# paused_turn_release_mins = 60  # default: 60 / 默认 60
+
 # Auto-reset the active session after the user has been inactive for a while.
 # Unlike idle_timeout_mins, this does not detect stuck agent execution. It
 # rotates to a fresh cc-connect session when the user comes back after being idle.

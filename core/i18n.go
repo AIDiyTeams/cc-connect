@@ -187,6 +187,7 @@ const (
 	MsgEmptyResponse             MsgKey = "empty_response"
 	MsgAgentEmptyResponse        MsgKey = "agent_empty_response"
 	MsgTurnInterruptedByShutdown MsgKey = "turn_interrupted_by_shutdown"
+	MsgPausedTurnReleased        MsgKey = "paused_turn_released"
 	MsgPermissionPrompt          MsgKey = "permission_prompt"
 	MsgPermissionAllowed         MsgKey = "permission_allowed"
 	MsgPermissionApproveAll      MsgKey = "permission_approve_all"
@@ -843,6 +844,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "Agent 服務剛剛重新啟動，這一輪在完成前被中斷了。請重新傳送需求。",
 		LangJapanese:           "Agent サービスが再起動したため、このターンは完了前に中断されました。もう一度リクエストを送信してください。",
 		LangSpanish:            "El servicio del Agent se reinició y este turno se interrumpió antes de terminar. Vuelve a enviar tu solicitud.",
+	},
+	MsgPausedTurnReleased: {
+		LangEnglish:            "This turn was paused on your answer for a long time and has been released. Your answer still continues the task.",
+		LangChinese:            "这一轮等你回答的时间较长，已先释放；你回答后任务会接着进行。",
+		LangTraditionalChinese: "這一輪等你回答的時間較長，已先釋放；你回答後任務會接著進行。",
+		LangJapanese:           "このターンは回答待ちの時間が長かったため一旦解放されました。回答すればタスクは続行されます。",
+		LangSpanish:            "Este turno esperó tu respuesta mucho tiempo y se liberó. Tu respuesta seguirá continuando la tarea.",
 	},
 	MsgAgentEmptyResponse: {
 		LangEnglish:            "❌ The Agent returned no usable result. Please retry; if the problem continues, check the configured model provider.",

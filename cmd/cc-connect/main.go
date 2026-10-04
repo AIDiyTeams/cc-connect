@@ -687,6 +687,11 @@ func main() {
 			}
 		}
 
+		// Wire the paused-turn release (0 keeps a paused turn until answered)
+		if cfg.PausedTurnReleaseMins != nil && *cfg.PausedTurnReleaseMins >= 0 {
+			engine.SetPausedTurnRelease(time.Duration(*cfg.PausedTurnReleaseMins) * time.Minute)
+		}
+
 		// Wire max turn time (absolute per-turn wall-clock cap; 0 = disabled)
 		if cfg.MaxTurnTimeMins != nil && *cfg.MaxTurnTimeMins > 0 {
 			engine.SetMaxTurnTime(time.Duration(*cfg.MaxTurnTimeMins) * time.Minute)

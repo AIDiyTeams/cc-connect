@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -244,6 +245,7 @@ type Engine struct {
 	references        ReferenceRenderCfg
 	relayManager      *RelayManager
 	eventIdleTimeout  time.Duration
+	pausedTurnRelease time.Duration // how long a structured question keeps its turn alive (0 = forever)
 	maxTurnTime       time.Duration // absolute wall-clock cap per turn (0 = disabled)
 	maxQueuedMessages int
 	dirHistory        *DirHistory
@@ -522,6 +524,9 @@ type pendingPermission struct {
 	CurrentQuestion int            // index of the question currently being asked
 	Resolved        chan struct{}  // closed when user responds
 	resolveOnce     sync.Once
+	// claimed is taken by whichever comes first for a structured interaction:
+	// the user's answer, or the release of a turn left waiting too long.
+	claimed atomic.Bool
 }
 
 func (s *interactiveState) stopSignal() <-chan struct{} {
@@ -560,6 +565,11 @@ func (pp *pendingPermission) resolve() {
 	pp.resolveOnce.Do(func() { close(pp.Resolved) })
 }
 
+// claim reports whether the caller won the right to settle this interaction.
+func (pp *pendingPermission) claim() bool {
+	return pp.claimed.CompareAndSwap(false, true)
+}
+
 func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath string, lang Language) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{
@@ -581,6 +591,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		streamPreview:         DefaultStreamPreviewCfg(),
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
+		pausedTurnRelease:     defaultPausedTurnRelease,
 		maxQueuedMessages:     defaultMaxQueuedMessages,
 		showContextIndicator:  true,
 		showWorkdirIndicator:  true,
@@ -1251,6 +1262,14 @@ func (e *Engine) SetMaxTurnTime(d time.Duration) {
 // 0 disables the timeout entirely.
 func (e *Engine) SetEventIdleTimeout(d time.Duration) {
 	e.eventIdleTimeout = d
+}
+
+// SetPausedTurnRelease sets how long a turn paused on a structured question
+// keeps its Agent process before it is released. 0 keeps it until answered.
+func (e *Engine) SetPausedTurnRelease(d time.Duration) {
+	if d >= 0 {
+		e.pausedTurnRelease = d
+	}
 }
 
 // SetMaxQueuedMessages sets the per-session message queue depth.
@@ -3387,6 +3406,35 @@ func newInteractionID() string {
 	return fmt.Sprintf("interaction-%d", time.Now().UnixNano())
 }
 
+// awaitAnswer blocks until the paused turn is answered. A structured question
+// left unanswered past pausedTurnRelease releases the turn instead and reports
+// true; the caller then ends the turn so its Agent process can exit, while the
+// control plane keeps the question answerable and continues on its answer.
+func (e *Engine) awaitAnswer(state *interactiveState, pending *pendingPermission, releasable bool) bool {
+	if !releasable || e.pausedTurnRelease <= 0 {
+		<-pending.Resolved
+		return false
+	}
+	timer := time.NewTimer(e.pausedTurnRelease)
+	defer timer.Stop()
+	select {
+	case <-pending.Resolved:
+		return false
+	case <-timer.C:
+	}
+	if !pending.claim() {
+		// The answer won the race; it is being delivered to this turn.
+		<-pending.Resolved
+		return false
+	}
+	state.mu.Lock()
+	if state.pending == pending {
+		state.pending = nil
+	}
+	state.mu.Unlock()
+	return true
+}
+
 // RespondInteraction resolves the structured interaction currently waiting on
 // a session. The native JSON-RPC request id never leaves cc-connect.
 func (e *Engine) RespondInteraction(sessionKey, interactionID, decision string, answers map[string][]string) error {
@@ -3400,7 +3448,7 @@ func (e *Engine) RespondInteractionWithAuthority(sessionKey, interactionID, deci
 	answers map[string][]string, authority *SessionRuntime) error {
 	state, pending := e.lookupPendingInteraction(sessionKey, interactionID)
 	if state == nil || pending == nil {
-		return fmt.Errorf("no pending interaction for session %q", sessionKey)
+		return fmt.Errorf("%w: session %q", ErrInteractionNotPending, sessionKey)
 	}
 
 	result := PermissionResult{Behavior: "allow", UpdatedInput: pending.ToolInput}
@@ -3451,6 +3499,9 @@ func (e *Engine) RespondInteractionWithAuthority(sessionKey, interactionID, deci
 			return fmt.Errorf("unsupported interaction decision %q", decision)
 		}
 	}
+	if !pending.claim() {
+		return fmt.Errorf("%w: %q was released", ErrInteractionNotPending, interactionID)
+	}
 	if authority != nil {
 		if refresher, ok := state.agentSession.(CapabilityAuthorityRefresher); ok {
 			// The answer still resumes the turn: a tool that cannot use the old
@@ -3461,6 +3512,7 @@ func (e *Engine) RespondInteractionWithAuthority(sessionKey, interactionID, deci
 		}
 	}
 	if err := state.agentSession.RespondPermission(pending.RequestID, result); err != nil {
+		pending.claimed.Store(false)
 		return err
 	}
 	state.mu.Lock()
@@ -4414,6 +4466,20 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 }
 
 const defaultEventIdleTimeout = 2 * time.Hour
+
+// defaultPausedTurnRelease bounds how long an unanswered structured question
+// holds an Agent process. People often answer hours later; by then the turn's
+// credentials have expired anyway, and the control plane continues the task
+// from the answer, so the process need not wait with it.
+const defaultPausedTurnRelease = time.Hour
+
+// TurnPausedTurnReleased is the typed failure code for a turn released while it
+// waited on a structured question. The question itself stays answerable.
+const TurnPausedTurnReleased = "AGENT_PAUSED_TURN_RELEASED"
+
+// ErrInteractionNotPending reports that an interaction no longer has a paused
+// turn to resume, so the control plane must continue the task another way.
+var ErrInteractionNotPending = errors.New("interaction is not pending")
 
 // cardToolEntry stores a tool call record for card content rendering.
 type cardToolEntry struct {
@@ -5607,7 +5673,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				idleTimer.Stop()
 			}
 
-			<-pending.Resolved
+			if e.awaitAnswer(state, pending, structuredSent) {
+				slog.Info("paused turn released without an answer",
+					"session_key", sessionKey, "interaction_id", pending.InteractionID, "after", e.pausedTurnRelease)
+				sp.discard()
+				state.mu.Lock()
+				p := state.platform
+				state.mu.Unlock()
+				e.failTurn(p, replyCtx, TurnPausedTurnReleased, e.i18n.T(MsgPausedTurnReleased))
+				e.cleanupInteractiveState(sessionKey, state)
+				return
+			}
 			slog.Info("permission resolved", "request_id", event.RequestID)
 
 			// Restart idle timer after permission is resolved

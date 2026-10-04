@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -1717,7 +1718,12 @@ func (a *bridgeAdapter) handleRespondInteraction(raw json.RawMessage) {
 	if err := ref.engine.RespondInteractionWithAuthority(response.SessionKey, response.InteractionID,
 		response.Decision, response.Answers, authority); err != nil {
 		slog.Warn("bridge: interaction response rejected", "interaction_id", response.InteractionID, "error", err)
-		a.sendInteractionResponseStatus(response, "rejected", "INTERACTION_RUNTIME_REJECTED")
+		code := "INTERACTION_RUNTIME_REJECTED"
+		if errors.Is(err, ErrInteractionNotPending) {
+			// The paused turn is gone (released or cut); the control plane continues instead.
+			code = "INTERACTION_NOT_PENDING"
+		}
+		a.sendInteractionResponseStatus(response, "rejected", code)
 		return
 	}
 	a.sendInteractionResponseStatus(response, "accepted", "")
