@@ -540,6 +540,11 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 		tools, _ := params["dynamicTools"].([]map[string]any)
 		params["dynamicTools"] = append(tools, formDynamicTool())
 	}
+	// Conversations read public pages through the platform reader; see web_read_tool.go.
+	if s.webReadToolAvailable() {
+		tools, _ := params["dynamicTools"].([]map[string]any)
+		params["dynamicTools"] = append(tools, webReadDynamicTool())
+	}
 	// Application-managed conversations replace the coding-assistant preamble
 	// guidance at the base-instruction level; see public_conversation_base.go.
 	if base := s.baseInstructionsOverride(); base != "" {
@@ -1180,6 +1185,21 @@ func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRa
 			return
 		}
 		s.handleFormToolCall(rawID, params.CallID, params.Arguments)
+		return
+	}
+	if params.Tool == webReadToolName {
+		if !s.webReadToolAvailable() {
+			s.writeDynamicToolResponse(rawID, false, "web page reading is not available for this task")
+			return
+		}
+		go func() {
+			result, err := s.readWebPage(params.Arguments)
+			if err != nil {
+				s.writeDynamicToolResponse(rawID, false, err.Error())
+				return
+			}
+			s.writeDynamicToolResponse(rawID, true, result)
+		}()
 		return
 	}
 	if params.Tool == "tomako_generate_image" || params.Tool == "tomako_image_status" {
@@ -2446,7 +2466,11 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 
 	case "dynamicToolCall":
 		tool, _ := item["tool"].(string)
-		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: tool, ToolInput: appServerJSON(item["arguments"])})
+		event := core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: tool, ToolInput: appServerJSON(item["arguments"])}
+		if tool == webReadToolName {
+			event.PublicActivity = webReadPublicActivity(item["arguments"], "running")
+		}
+		s.emit(event)
 
 	case "fileChange":
 		s.emit(core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: "Patch", ToolInput: appServerJSON(item["changes"])})
@@ -2585,14 +2609,18 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 			publicResult = "form returned"
 		}
 		success := appServerToolSuccess(status, nil)
-		s.emit(core.Event{
+		event := core.Event{
 			Type:        core.EventToolResult,
 			TraceID:     itemID,
 			ToolName:    tool,
 			ToolResult:  publicResult,
 			ToolStatus:  strings.TrimSpace(status),
 			ToolSuccess: &success,
-		})
+		}
+		if tool == webReadToolName {
+			event.PublicActivity = webReadPublicActivity(item["arguments"], "returned")
+		}
+		s.emit(event)
 	}
 }
 
