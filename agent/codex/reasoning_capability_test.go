@@ -14,6 +14,14 @@ func TestReasoningCapabilityIsBoundToKnownModelAndRequestedEffort(t *testing.T) 
 		{"tomako/gpt-5.6-sol", "high", true},
 		{"gpt-5.6-sol", "medium", true},
 		{"tomako/gpt-5.6-sol", "", false},
+		{"tomako/gpt-6-astra", "medium", true},
+		{"gpt-6-astra", "medium", true},
+		{"tomako/gpt-6-astra", "", false},
+		{"other/gpt-6-astra", "medium", false},
+		{"tomako/gpt-6.1-sol", "medium", true},
+		{"gpt-6.1-sol", "medium", true},
+		{"tomako/gpt-6.1-sol", "", false},
+		{"other/gpt-6.1-sol", "medium", false},
 		{"tomako/deepseek-v4-flash", "high", true},
 		{"deepseek-v4-flash", "medium", true},
 		{"tomako/deepseek-v4-flash", "", false},
@@ -38,6 +46,38 @@ func TestReasoningCapabilityIsBoundToKnownModelAndRequestedEffort(t *testing.T) 
 				t.Fatalf("thread reasoning capability = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestAppServerSwitchGPT6ModelsPreservesMediumEffort(t *testing.T) {
+	s := &appServerSession{model: "tomako/gpt-5.6-sol", effort: "high"}
+	s.alive.Store(true)
+	s.threadID.Store("existing-reasoning-thread")
+	for _, model := range []string{"tomako/gpt-6-astra", "tomako/gpt-6.1-sol"} {
+		if err := s.SetSessionRuntime(core.SessionRuntime{
+			GatewayModel: model, ReasoningEffort: "medium", WebSearch: "disabled",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		params := s.threadRequestParams()
+		config := params["config"].(map[string]any)
+		if params["model"] != model || config["model_reasoning_effort"] != "medium" ||
+			config["model_supports_reasoning_summaries"] != true {
+			t.Fatalf("switched thread must request %s with medium reasoning: %#v", model, params)
+		}
+		// Managed developer instructions also carry the effective model/effort
+		// on each turn, overriding any collaboration preset defaults.
+		s.developerInstructionsManaged = true
+		settings := s.turnDeveloperInstructions()["settings"].(map[string]any)
+		if settings["model"] != model || settings["reasoning_effort"] != "medium" {
+			t.Fatalf("turn settings lost the selected model/effort: %#v", settings)
+		}
+		cs := &codexSession{model: model, effort: "medium", mode: "suggest"}
+		args := cs.buildExecArgs("public prompt", nil)
+		if !containsSequence(args, []string{"-c", `model_reasoning_effort="medium"`}) ||
+			!containsSequence(args, []string{"-c", "model_supports_reasoning_summaries=true"}) {
+			t.Fatalf("CLI must pass medium and the reasoning capability: %#v", args)
+		}
 	}
 }
 

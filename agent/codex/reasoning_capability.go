@@ -14,7 +14,8 @@ func needsReasoningCapability(model, effort string) bool {
 		return false
 	}
 	switch model {
-	case "gpt-5.6-sol", "tomako/gpt-5.6-sol", "deepseek-v4-flash", "tomako/deepseek-v4-flash",
+	case "gpt-5.6-sol", "tomako/gpt-5.6-sol", "gpt-6-astra", "tomako/gpt-6-astra",
+		"gpt-6.1-sol", "tomako/gpt-6.1-sol", "deepseek-v4-flash", "tomako/deepseek-v4-flash",
 		"deepseek-v4-flash-vision-exp", "tomako/deepseek-v4-flash-vision-exp":
 		return true
 	default:
