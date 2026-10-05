@@ -220,6 +220,8 @@ type appServerSession struct {
 	runtime               core.SessionRuntime
 	taskRuntimeEnvFile    string
 	nativeWebModelCatalog string
+	// modelCatalogKind records which startup catalog the process runs with (see modelCatalogFor).
+	modelCatalogKind string
 	// Resumed threads may retain a previous turn's collaboration instructions.
 	// A later unscoped turn must explicitly restore Codex's built-in default.
 	developerInstructionsManaged bool
@@ -285,13 +287,14 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 			cancel()
 			return nil, err
 		}
-		if needsNativeWebModelCatalog(runtime) {
-			s.nativeWebModelCatalog, err = writeNativeWebModelCatalog(s.taskRuntimeEnvFile)
+		if kind := modelCatalogFor(runtime); kind != "" {
+			s.nativeWebModelCatalog, err = writeModelCatalog(s.taskRuntimeEnvFile, runtime)
 			if err != nil {
 				removeTaskRuntimeEnv(s.taskRuntimeEnvFile)
 				cancel()
 				return nil, err
 			}
+			s.modelCatalogKind = kind
 		}
 	}
 
@@ -546,6 +549,10 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 		// raw text; without this, providers that have no reasoning summaries
 		// (DeepSeek) would leave the conversation with no thinking signal at all.
 		config["show_raw_agent_reasoning"] = true
+		// The application base prompt and plan contract ask for update_plan, and the
+		// product renders the plan as a checklist. Codex 0.153 registers the tool only
+		// when it is enabled, so without this every plan call failed as "unsupported".
+		config["tools.update_plan.enabled"] = true
 	}
 	if profile := strings.TrimSpace(s.permissionsProfile); profile != "" {
 		params["permissions"] = profile
