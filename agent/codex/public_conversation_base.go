@@ -79,6 +79,41 @@ The final answer is read by a business user in an application that renders Markd
 - Greetings, acknowledgements and casual exchanges get a natural reply without structure.
 `
 
+// publicValidationSection replaces Codex's "Validating your work", which only covers running
+// a codebase's tests and formatters. Application-managed conversations mostly deliver
+// research, analysis and writing, and without an equivalent check the model states headline
+// conclusions it never tested against its own evidence: on 2026-10-05 a competitor report
+// called one vendor "the cheapest in the industry" beside its own table listing a cheaper
+// model, and inverted the peak/off-peak hours it had read correctly. This is a working
+// method for any deliverable, not a rule for one kind of task.
+const publicValidationSection = `## Validating your work
+
+Check your work the way a careful professional in that field would before you yield.
+
+For code: when the codebase has tests or can be built or run, use them, starting with the narrowest check for what you changed and widening as confidence grows. Do not add tests to a codebase that has none, and do not fix unrelated failures; mention them instead.
+
+For research, analysis, comparisons and recommendations, the answer is only as strong as its weakest load-bearing claim:
+
+- Keep the facts you rely on in a short working note as you collect them: value, unit or currency, tier or period, date and source. Build the answer from that note rather than from memory of earlier tool output.
+- Do arithmetic, conversions, rankings and counts with code against the note. Put items on one basis before comparing them (same unit, currency, period and tier), or say why they cannot be compared.
+- Before writing the final answer, test each headline conclusion against everything you collected, including evidence that cuts against it. A superlative or exclusive claim ("the cheapest", "the only", "ranks third") must hold for every relevant item you saw; when it does not, narrow it to what is true.
+- Re-read the draft once against the note: numbers, names, dates, time windows and directions (peak vs. off-peak, rising vs. falling) match the sources, and no section contradicts another.
+- Make clear which statements come from sources and which are your judgment where the difference matters to the reader, and name what you could not verify once, plainly, instead of hedging every sentence.
+`
+
+// The generic Codex prompt introduces task execution with "You are a coding agent.", which
+// contradicts the application's own role for every non-code deliverable. Only that sentence
+// is dropped; the coding guidelines that follow still apply whenever code is written.
+const (
+	codingAgentExecutionLead  = "You are a coding agent. Please keep going until the query is completely resolved"
+	generalAgentExecutionLead = "Please keep going until the query is completely resolved"
+)
+
+const (
+	validationSectionStart = "## Validating your work\n"
+	validationSectionEnd   = "## Ambition vs. precision\n"
+)
+
 const (
 	preambleSectionStart = "## Responsiveness\n"
 	preambleSectionEnd   = "## Planning\n"
@@ -100,14 +135,23 @@ var (
 func publicConversationBaseInstructions() (string, error) {
 	publicConversationBaseOnce.Do(func() {
 		publicConversationBaseText, publicConversationBaseErr = composePublicConversationBase(
-			codexDefaultBaseInstructions, publicConversationSection, publicFinalAnswerSection)
+			codexDefaultBaseInstructions, publicConversationSection, publicFinalAnswerSection, publicValidationSection)
 	})
 	return publicConversationBaseText, publicConversationBaseErr
 }
 
-func composePublicConversationBase(base, conversation, finalAnswer string) (string, error) {
+func composePublicConversationBase(base, conversation, finalAnswer, validation string) (string, error) {
 	out, err := replaceBetweenMarkers(base, preambleSectionStart, preambleSectionEnd,
 		strings.TrimSpace(conversation)+"\n\n")
+	if err != nil {
+		return "", err
+	}
+	if strings.Count(out, codingAgentExecutionLead) != 1 {
+		return "", fmt.Errorf("codex base instructions: task execution lead must appear exactly once")
+	}
+	out = strings.Replace(out, codingAgentExecutionLead, generalAgentExecutionLead, 1)
+	out, err = replaceBetweenMarkers(out, validationSectionStart, validationSectionEnd,
+		strings.TrimSpace(validation)+"\n\n")
 	if err != nil {
 		return "", err
 	}

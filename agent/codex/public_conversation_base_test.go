@@ -19,7 +19,8 @@ func TestVendoredCodexBaseInstructionsArePinned(t *testing.T) {
 	if got := hex.EncodeToString(sum[:]); got != codexDefaultBaseInstructionsSHA256 {
 		t.Fatalf("vendored Codex base instructions changed: sha256=%s", got)
 	}
-	for _, marker := range []string{preambleSectionStart, preambleSectionEnd, progressSectionStart, progressSectionEnd, finalSectionEnd} {
+	for _, marker := range []string{preambleSectionStart, preambleSectionEnd, progressSectionStart, progressSectionEnd, finalSectionEnd,
+		validationSectionStart, validationSectionEnd, codingAgentExecutionLead} {
 		if strings.Count(codexDefaultBaseInstructions, marker) != 1 {
 			t.Fatalf("marker %q must appear exactly once in the vendored prompt", strings.TrimSpace(marker))
 		}
@@ -43,6 +44,9 @@ func TestPublicConversationBaseReplacesOnlyTheCodingAssistantCommunicationGuidan
 		"`**Title Case**`",
 		"Don’t nest bullets or create deep hierarchies",
 		"The user is working on the same computer as you",
+		"You are a coding agent. Please keep going",
+		"consider using them to verify that your work is complete",
+		"iterate up to 3 times to get formatting right",
 	} {
 		if strings.Contains(got, removed) {
 			t.Fatalf("coding-assistant communication guidance survived: %q", removed)
@@ -71,6 +75,14 @@ func TestPublicConversationBaseReplacesOnlyTheCodingAssistantCommunicationGuidan
 		"An explicit output contract always wins",
 		"# Tool Guidelines",
 		"## `update_plan`",
+		"## Validating your work",
+		"Please keep going until the query is completely resolved",
+		"Do arithmetic, conversions, rankings and counts with code",
+		"test each headline conclusion against everything you collected",
+		"must hold for every relevant item you saw",
+		"Re-read the draft once against the note",
+		"instead of hedging every sentence",
+		"starting with the narrowest check",
 	} {
 		if strings.Count(got, kept) != 1 {
 			t.Fatalf("expected %q exactly once in composed base instructions", kept)
@@ -89,8 +101,15 @@ func TestPublicConversationBaseReplacesOnlyTheCodingAssistantCommunicationGuidan
 		t.Fatal("final-answer section is not framed by its heading and the tool guidelines")
 	}
 	middle := codexDefaultBaseInstructions[strings.Index(codexDefaultBaseInstructions, preambleSectionEnd):strings.Index(codexDefaultBaseInstructions, progressSectionStart)]
-	if !strings.Contains(got, middle) {
-		t.Fatal("planning and execution guidance between the two sections changed")
+	// Only the execution lead sentence and the validation section change in between.
+	wantMiddle := strings.Replace(middle, codingAgentExecutionLead, generalAgentExecutionLead, 1)
+	wantMiddle, err = replaceBetweenMarkers(wantMiddle, validationSectionStart, validationSectionEnd,
+		strings.TrimSpace(publicValidationSection)+"\n\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, wantMiddle) {
+		t.Fatal("planning and execution guidance changed beyond the execution lead and the validation section")
 	}
 	if strings.Contains(got, "\n\n\n\n") {
 		t.Fatal("composition left stray blank lines")
@@ -99,16 +118,24 @@ func TestPublicConversationBaseReplacesOnlyTheCodingAssistantCommunicationGuidan
 }
 
 func TestComposePublicConversationBaseRejectsUnknownLayout(t *testing.T) {
-	if _, err := composePublicConversationBase("# Different prompt\n## Planning\n", "## Rules\n", "## Answer\n"); err == nil {
+	if _, err := composePublicConversationBase("# Different prompt\n## Planning\n", "## Rules\n", "## Answer\n", "## Check\n"); err == nil {
 		t.Fatal("missing markers must be reported, not silently skipped")
 	}
 	doubled := codexDefaultBaseInstructions + "\n" + preambleSectionStart
-	if _, err := composePublicConversationBase(doubled, publicConversationSection, publicFinalAnswerSection); err == nil {
+	if _, err := composePublicConversationBase(doubled, publicConversationSection, publicFinalAnswerSection, publicValidationSection); err == nil {
 		t.Fatal("a duplicated marker must be rejected")
 	}
 	withoutTools := strings.Replace(codexDefaultBaseInstructions, finalSectionEnd, "# Other\n", 1)
-	if _, err := composePublicConversationBase(withoutTools, publicConversationSection, publicFinalAnswerSection); err == nil {
+	if _, err := composePublicConversationBase(withoutTools, publicConversationSection, publicFinalAnswerSection, publicValidationSection); err == nil {
 		t.Fatal("a missing final-answer end marker must be rejected")
+	}
+	withoutValidation := strings.Replace(codexDefaultBaseInstructions, validationSectionStart, "## Checking\n", 1)
+	if _, err := composePublicConversationBase(withoutValidation, publicConversationSection, publicFinalAnswerSection, publicValidationSection); err == nil {
+		t.Fatal("a missing validation section must be rejected, not left as the coding-only text")
+	}
+	withoutLead := strings.Replace(codexDefaultBaseInstructions, codingAgentExecutionLead, "Keep going", 1)
+	if _, err := composePublicConversationBase(withoutLead, publicConversationSection, publicFinalAnswerSection, publicValidationSection); err == nil {
+		t.Fatal("a changed task execution lead must be reported")
 	}
 }
 
@@ -142,5 +169,11 @@ func TestThreadParamsOverrideBaseInstructionsOnlyForApplicationManagedConversati
 	plainConfig, _ := plain.threadRequestParams()["config"].(map[string]any)
 	if _, ok := plainConfig["show_raw_agent_reasoning"]; ok {
 		t.Fatal("plain bridge sessions keep Codex's default reasoning visibility")
+	}
+	if managedConfig["tools.update_plan.enabled"] != true {
+		t.Fatal("managed conversations are told to publish a plan, so the plan tool must be registered")
+	}
+	if _, ok := plainConfig["tools.update_plan.enabled"]; ok {
+		t.Fatal("plain bridge sessions keep Codex's default tool set")
 	}
 }
