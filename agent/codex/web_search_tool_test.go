@@ -108,6 +108,12 @@ func TestWebSearchConfigurationReadsTheCredentialsFile(t *testing.T) {
 	if _, err := loadWebSearchConfig(); err == nil {
 		t.Fatal("a configuration without a token was accepted")
 	}
+
+	writeWebSearchConfig(t, "BRAVE_API_KEY=brave-1\nWEB_SEARCH_PROVIDERS=brave\n")
+	config, err = loadWebSearchConfig()
+	if err != nil || config.BraveKey != "brave-1" || strings.Join(config.Providers, ",") != "brave" {
+		t.Fatalf("Brave alone did not configure search: %+v %v", config, err)
+	}
 	t.Setenv(webSearchConfigEnv, "")
 	if _, err := loadWebSearchConfig(); err == nil {
 		t.Fatal("search was configured without a credentials file")
@@ -270,5 +276,73 @@ func TestWebSearchShowsTheQueryInTheConversation(t *testing.T) {
 	event = <-s.events
 	if event.PublicActivity == nil || event.PublicActivity.Query != "buffer pricing 2026" || event.PublicActivity.Status != "returned" {
 		t.Fatalf("activity=%+v", event.PublicActivity)
+	}
+}
+
+type braveCall struct {
+	Path, Query, Count, Token, Authorization string
+}
+
+// fakeBraveAPI answers every Brave search with status and body.
+func fakeBraveAPI(t *testing.T, status int, body string) *[]braveCall {
+	t.Helper()
+	var mu sync.Mutex
+	calls := []braveCall{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls = append(calls, braveCall{Path: r.Method + " " + r.URL.Path, Query: r.URL.Query().Get("q"), Count: r.URL.Query().Get("count"),
+			Token: r.Header.Get("X-Subscription-Token"), Authorization: r.Header.Get("Authorization")})
+		mu.Unlock()
+		respond(status, body)(w)
+	}))
+	t.Cleanup(server.Close)
+	previous := braveSearchAPIBase
+	braveSearchAPIBase = server.URL + "/res/v1"
+	t.Cleanup(func() { braveSearchAPIBase = previous })
+	return &calls
+}
+
+func TestWebSearchCallsBraveDirectly(t *testing.T) {
+	writeWebSearchConfig(t, "BRAVE_API_KEY=brave-key\nWEB_SEARCH_PROVIDERS=brave\n")
+	calls := fakeBraveAPI(t, 200, `{"web":{"results":[
+		{"title":"Buffer <strong>Pricing</strong> &amp; Plans","url":"https://buffer.com/pricing","description":"Start for <strong>free</strong>, Essentials $6 per channel."},
+		{"title":"Buffer review","url":"https://example.com/review","description":""}]}}`)
+	output, err := webSearchTestSession(t).searchWeb(map[string]any{"query": "buffer pricing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("calls=%+v", *calls)
+	}
+	call := (*calls)[0]
+	if call.Path != "GET /res/v1/web/search" || call.Query != "buffer pricing" || call.Count != "8" || call.Token != "brave-key" || call.Authorization != "" {
+		t.Fatalf("call=%+v", call)
+	}
+	for _, want := range []string{"Results: 2 from brave", "1. Buffer Pricing & Plans\n   https://buffer.com/pricing\n   Start for free, Essentials $6 per channel."} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output lacks %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestWebSearchMovesFromBraveToCloudflareWhenBraveCannotAnswer(t *testing.T) {
+	writeWebSearchConfig(t, "BRAVE_API_KEY=brave-key\nCLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nWEB_SEARCH_PROVIDERS=brave,exa\n")
+	braveCalls := fakeBraveAPI(t, 429, `{"type":"ErrorResponse","error":{"code":"RATE_LIMITED","detail":"Request rate limit exceeded"}}`)
+	cloudflareCalls := fakeWebSearchAPI(t, map[string]func(http.ResponseWriter){
+		"exa": respond(200, `{"items":[{"url":"https://buffer.com/pricing","title":"Pricing","description":"plans"}]}`),
+	})
+	output, err := webSearchTestSession(t).searchWeb(map[string]any{"query": "buffer pricing"})
+	if err != nil || !strings.Contains(output, "Results: 1 from exa") {
+		t.Fatalf("output=%q err=%v", output, err)
+	}
+	if len(*braveCalls) != 1 || len(*cloudflareCalls) != 1 {
+		t.Fatalf("brave=%d cloudflare=%d", len(*braveCalls), len(*cloudflareCalls))
+	}
+
+	// Without a Brave key the provider is skipped rather than failing the search.
+	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nWEB_SEARCH_PROVIDERS=brave,exa\n")
+	output, err = webSearchTestSession(t).searchWeb(map[string]any{"query": "buffer pricing"})
+	if err != nil || !strings.Contains(output, "from exa") || len(*braveCalls) != 1 {
+		t.Fatalf("output=%q err=%v brave=%d", output, err, len(*braveCalls))
 	}
 }

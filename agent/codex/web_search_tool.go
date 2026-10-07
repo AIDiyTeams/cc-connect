@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,8 +33,14 @@ const (
 	webSearchResponseLimit    = 1 << 20
 )
 
-// webSearchAPIBase is Cloudflare's v4 API root; tests point it at a local server.
-var webSearchAPIBase = "https://api.cloudflare.com/client/v4"
+// webSearchAPIBase is Cloudflare's v4 API root and braveSearchAPIBase is
+// Brave's Search API root; tests point them at a local server.
+var (
+	webSearchAPIBase   = "https://api.cloudflare.com/client/v4"
+	braveSearchAPIBase = "https://api.search.brave.com/res/v1"
+)
+
+var htmlTags = regexp.MustCompile(`<[^>]+>`)
 
 // Searches are short HTTP calls, but each one is billed, so a runaway loop in
 // one conversation should queue rather than fan out.
@@ -47,13 +55,23 @@ type webSearchConfig struct {
 	AccountID string
 	Token     string
 	GatewayID string
+	BraveKey  string
 	// Providers are tried in order; a later one answers only when an earlier
-	// one is unavailable or finds nothing. Exa leads by default: on research
-	// queries from real conversations it was the only one that put the vendor's
-	// own page (pricing, docs) in the top results; Linkup returns fresh,
-	// relevant third-party pages; Ceramic often returned nothing or off-topic
-	// pages, and English pages for Chinese queries.
+	// one is unavailable or finds nothing. Brave is called directly; the others
+	// go through Cloudflare's Web Search API. Exa leads by default: on research
+	// queries from real conversations it put the vendor's own page (pricing,
+	// docs) in the top results most often; Brave did as well on English queries
+	// but less often on Chinese ones; Linkup returns fresh, relevant third-party
+	// pages; Ceramic often returned nothing or off-topic pages.
 	Providers []string
+}
+
+// hasCredentials reports whether the configuration can call provider.
+func (c webSearchConfig) hasCredentials(provider string) bool {
+	if provider == "brave" {
+		return c.BraveKey != ""
+	}
+	return c.AccountID != "" && c.Token != ""
 }
 
 func loadWebSearchConfig() (webSearchConfig, error) {
@@ -90,9 +108,7 @@ func loadWebSearchConfig() (webSearchConfig, error) {
 		AccountID: values["CLOUDFLARE_ACCOUNT_ID"],
 		Token:     values["CLOUDFLARE_API_TOKEN"],
 		GatewayID: values["CLOUDFLARE_AI_GATEWAY_ID"],
-	}
-	if config.AccountID == "" || config.Token == "" {
-		return webSearchConfig{}, errors.New("web search configuration needs CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN")
+		BraveKey:  values["BRAVE_API_KEY"],
 	}
 	if config.GatewayID == "" {
 		config.GatewayID = "default"
@@ -105,7 +121,12 @@ func loadWebSearchConfig() (webSearchConfig, error) {
 	if len(config.Providers) == 0 {
 		config.Providers = []string{"exa", "linkup"}
 	}
-	return config, nil
+	for _, provider := range config.Providers {
+		if config.hasCredentials(provider) {
+			return config, nil
+		}
+	}
+	return webSearchConfig{}, errors.New("web search configuration has no credentials for its providers")
 }
 
 func webSearchDynamicTool() map[string]any {
@@ -226,6 +247,80 @@ func (s *appServerSession) searchWeb(arguments map[string]any) (string, error) {
 }
 
 func webSearchAttempt(parent context.Context, config webSearchConfig, provider, query string, limit int) (*webSearchResponse, error) {
+	if !config.hasCredentials(provider) {
+		return nil, &webSearchAttemptError{message: provider + " has no credentials configured", retryable: true}
+	}
+	if provider == "brave" {
+		return braveSearchAttempt(parent, config, query, limit)
+	}
+	return cloudflareSearchAttempt(parent, config, provider, query, limit)
+}
+
+// sendWebSearchRequest returns the response body and status, or an attempt
+// error that lets the caller try the next provider.
+func sendWebSearchRequest(ctx, parent context.Context, request *http.Request, provider string) ([]byte, int, error) {
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		if ctx.Err() != nil && parent.Err() == nil {
+			return nil, 0, &webSearchAttemptError{message: provider + " timed out", retryable: true}
+		}
+		return nil, 0, &webSearchAttemptError{message: provider + " was unreachable", retryable: true}
+	}
+	defer response.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(response.Body, webSearchResponseLimit))
+	if err != nil {
+		return nil, 0, &webSearchAttemptError{message: provider + " response was cut off", retryable: true}
+	}
+	return raw, response.StatusCode, nil
+}
+
+func braveSearchAttempt(parent context.Context, config webSearchConfig, query string, limit int) (*webSearchResponse, error) {
+	ctx, cancel := context.WithTimeout(parent, webSearchAttemptTimeout)
+	defer cancel()
+	endpoint := braveSearchAPIBase + "/web/search?" + url.Values{"q": {query}, "count": {strconv.Itoa(limit)}}.Encode()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("X-Subscription-Token", config.BraveKey)
+	raw, status, err := sendWebSearchRequest(ctx, parent, request, "brave")
+	if err != nil {
+		return nil, err
+	}
+	var payload struct {
+		Web struct {
+			Results []webSearchItem `json:"results"`
+		} `json:"web"`
+		Error struct {
+			Detail string `json:"detail"`
+		} `json:"error"`
+	}
+	parseErr := json.Unmarshal(raw, &payload)
+	if status < 200 || status > 299 {
+		reason := http.StatusText(status)
+		if strings.TrimSpace(payload.Error.Detail) != "" {
+			reason = payload.Error.Detail
+		}
+		return nil, &webSearchAttemptError{
+			message:   fmt.Sprintf("brave returned HTTP %d: %s", status, limitRunes(reason, 200)),
+			retryable: status == http.StatusTooManyRequests || status >= 500,
+		}
+	}
+	if parseErr != nil {
+		return nil, &webSearchAttemptError{message: "brave returned an unreadable response", retryable: true}
+	}
+	// Brave marks the matched words with <strong> in titles and snippets.
+	response := &webSearchResponse{}
+	for _, item := range payload.Web.Results {
+		item.Title = htmlTags.ReplaceAllString(item.Title, "")
+		item.Description = htmlTags.ReplaceAllString(item.Description, "")
+		response.Items = append(response.Items, item)
+	}
+	return response, nil
+}
+
+func cloudflareSearchAttempt(parent context.Context, config webSearchConfig, provider, query string, limit int) (*webSearchResponse, error) {
 	body, err := json.Marshal(map[string]any{
 		"query":    query,
 		"provider": provider,
@@ -244,17 +339,9 @@ func webSearchAttempt(parent context.Context, config webSearchConfig, provider, 
 	}
 	request.Header.Set("Authorization", "Bearer "+config.Token)
 	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
+	raw, status, err := sendWebSearchRequest(ctx, parent, request, provider)
 	if err != nil {
-		if ctx.Err() != nil && parent.Err() == nil {
-			return nil, &webSearchAttemptError{message: provider + " timed out", retryable: true}
-		}
-		return nil, &webSearchAttemptError{message: provider + " was unreachable", retryable: true}
-	}
-	defer response.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(response.Body, webSearchResponseLimit))
-	if err != nil {
-		return nil, &webSearchAttemptError{message: provider + " response was cut off", retryable: true}
+		return nil, err
 	}
 
 	var envelope struct {
@@ -264,14 +351,14 @@ func webSearchAttempt(parent context.Context, config webSearchConfig, provider, 
 		} `json:"errors"`
 	}
 	_ = json.Unmarshal(raw, &envelope)
-	if response.StatusCode < 200 || response.StatusCode > 299 {
-		reason := http.StatusText(response.StatusCode)
+	if status < 200 || status > 299 {
+		reason := http.StatusText(status)
 		if len(envelope.Errors) > 0 && strings.TrimSpace(envelope.Errors[0].Message) != "" {
 			reason = envelope.Errors[0].Message
 		}
-		retryable := response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500
+		retryable := status == http.StatusTooManyRequests || status >= 500
 		return nil, &webSearchAttemptError{
-			message:   fmt.Sprintf("%s returned HTTP %d: %s", provider, response.StatusCode, limitRunes(reason, 200)),
+			message:   fmt.Sprintf("%s returned HTTP %d: %s", provider, status, limitRunes(reason, 200)),
 			retryable: retryable,
 		}
 	}
