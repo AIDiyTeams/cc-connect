@@ -553,6 +553,11 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 		tools, _ := params["dynamicTools"].([]map[string]any)
 		params["dynamicTools"] = append(tools, webReadDynamicTool())
 	}
+	// ...and find them through the platform search; see web_search_tool.go.
+	if s.webSearchToolAvailable() {
+		tools, _ := params["dynamicTools"].([]map[string]any)
+		params["dynamicTools"] = append(tools, webSearchDynamicTool())
+	}
 	// Application-managed conversations replace the coding-assistant preamble
 	// guidance at the base-instruction level; see public_conversation_base.go.
 	if base := s.baseInstructionsOverride(); base != "" {
@@ -1209,6 +1214,21 @@ func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRa
 		}
 		go func() {
 			result, err := s.readWebPage(params.Arguments)
+			if err != nil {
+				s.writeDynamicToolResponse(rawID, false, err.Error())
+				return
+			}
+			s.writeDynamicToolResponse(rawID, true, result)
+		}()
+		return
+	}
+	if params.Tool == webSearchToolName {
+		if !s.webSearchToolAvailable() {
+			s.writeDynamicToolResponse(rawID, false, "web search is not available for this task")
+			return
+		}
+		go func() {
+			result, err := s.searchWeb(params.Arguments)
 			if err != nil {
 				s.writeDynamicToolResponse(rawID, false, err.Error())
 				return
@@ -2482,8 +2502,11 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 	case "dynamicToolCall":
 		tool, _ := item["tool"].(string)
 		event := core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: tool, ToolInput: appServerJSON(item["arguments"])}
-		if tool == webReadToolName {
+		switch tool {
+		case webReadToolName:
 			event.PublicActivity = webReadPublicActivity(item["arguments"], "running")
+		case webSearchToolName:
+			event.PublicActivity = webSearchPublicActivity(item["arguments"], "running")
 		}
 		s.emit(event)
 
@@ -2632,8 +2655,11 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 			ToolStatus:  strings.TrimSpace(status),
 			ToolSuccess: &success,
 		}
-		if tool == webReadToolName {
+		switch tool {
+		case webReadToolName:
 			event.PublicActivity = webReadPublicActivity(item["arguments"], "returned")
+		case webSearchToolName:
+			event.PublicActivity = webSearchPublicActivity(item["arguments"], "returned")
 		}
 		s.emit(event)
 	}
