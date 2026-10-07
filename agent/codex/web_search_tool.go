@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -47,7 +48,11 @@ type webSearchConfig struct {
 	Token     string
 	GatewayID string
 	// Providers are tried in order; a later one answers only when an earlier
-	// one is unavailable or finds nothing.
+	// one is unavailable or finds nothing. Exa leads by default: on research
+	// queries from real conversations it was the only one that put the vendor's
+	// own page (pricing, docs) in the top results; Linkup returns fresh,
+	// relevant third-party pages; Ceramic often returned nothing or off-topic
+	// pages, and English pages for Chinese queries.
 	Providers []string
 }
 
@@ -98,7 +103,7 @@ func loadWebSearchConfig() (webSearchConfig, error) {
 		}
 	}
 	if len(config.Providers) == 0 {
-		config.Providers = []string{"ceramic", "linkup"}
+		config.Providers = []string{"exa", "linkup"}
 	}
 	return config, nil
 }
@@ -293,12 +298,12 @@ func formatWebSearchResults(query, provider string, response *webSearchResponse)
 	}
 	out.WriteString("\n")
 	for index, item := range response.Items {
-		title := strings.Join(strings.Fields(item.Title), " ")
+		title := strings.Join(strings.Fields(html.UnescapeString(item.Title)), " ")
 		if title == "" {
 			title = "(untitled)"
 		}
 		entry := fmt.Sprintf("\n%d. %s\n   %s\n", index+1, limitRunes(title, 200), strings.TrimSpace(item.URL))
-		if description := strings.Join(strings.Fields(item.Description), " "); description != "" {
+		if description := strings.Join(strings.Fields(html.UnescapeString(item.Description)), " "); description != "" {
 			entry += "   " + truncate(description, webSearchDescriptionRunes) + "\n"
 		}
 		out.WriteString(entry)

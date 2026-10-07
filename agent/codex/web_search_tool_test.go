@@ -91,7 +91,7 @@ func TestWebSearchConfigurationReadsTheCredentialsFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	if config.AccountID != "acc-1" || config.Token != "tok-1" || config.GatewayID != "default" ||
-		strings.Join(config.Providers, ",") != "ceramic,linkup" {
+		strings.Join(config.Providers, ",") != "exa,linkup" {
 		t.Fatalf("config=%+v", config)
 	}
 
@@ -138,8 +138,8 @@ func TestWebSearchToolOfferedToConversationsOnlyWhenConfigured(t *testing.T) {
 func TestWebSearchSendsTheDocumentedRequest(t *testing.T) {
 	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\n")
 	calls := fakeWebSearchAPI(t, map[string]func(http.ResponseWriter){
-		"ceramic": respond(200, `{"success":true,"errors":[],"result":{"items":[
-			{"url":"https://buffer.com/pricing","title":"Buffer  Pricing","description":"Essentials $6 per month per channel."},
+		"exa": respond(200, `{"success":true,"errors":[],"result":{"items":[
+			{"url":"https://buffer.com/pricing","title":"Buffer  Pricing &amp; Plans","description":"Essentials $6 per month per channel &#8211; billed yearly."},
 			{"url":"https://example.com/review","title":"","description":""}],
 			"metadata":{"query":"buffer pricing","requestId":"r-1","latencyMs":412}}}`),
 	})
@@ -155,11 +155,11 @@ func TestWebSearchSendsTheDocumentedRequest(t *testing.T) {
 		t.Fatalf("call=%+v", call)
 	}
 	gateway, _ := call.Body["options"].(map[string]any)["gateway"].(map[string]any)
-	if call.Body["query"] != "buffer pricing" || call.Body["provider"] != "ceramic" || call.Body["limit"] != float64(webSearchMaxLimit) || gateway["id"] != "default" {
+	if call.Body["query"] != "buffer pricing" || call.Body["provider"] != "exa" || call.Body["limit"] != float64(webSearchMaxLimit) || gateway["id"] != "default" {
 		t.Fatalf("body=%+v", call.Body)
 	}
-	for _, want := range []string{"untrusted content", "Query: buffer pricing", "Results: 2 from ceramic in 412 ms",
-		"1. Buffer Pricing\n   https://buffer.com/pricing\n   Essentials $6 per month per channel.", "2. (untitled)", webReadToolName} {
+	for _, want := range []string{"untrusted content", "Query: buffer pricing", "Results: 2 from exa in 412 ms",
+		"1. Buffer Pricing & Plans\n   https://buffer.com/pricing\n   Essentials $6 per month per channel \u2013 billed yearly.", "2. (untitled)", webReadToolName} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output lacks %q:\n%s", want, output)
 		}
@@ -191,8 +191,8 @@ func TestWebSearchTriesTheNextProviderWhenOneIsUnavailableOrEmpty(t *testing.T) 
 func TestWebSearchStopsOnCredentialErrors(t *testing.T) {
 	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\n")
 	calls := fakeWebSearchAPI(t, map[string]func(http.ResponseWriter){
-		"ceramic": respond(401, `{"success":false,"errors":[{"code":10000,"message":"Authentication error"}]}`),
-		"linkup":  respond(200, `{"items":[{"url":"https://example.com/","title":"x","description":"y"}]}`),
+		"exa":    respond(401, `{"success":false,"errors":[{"code":10000,"message":"Authentication error"}]}`),
+		"linkup": respond(200, `{"items":[{"url":"https://example.com/","title":"x","description":"y"}]}`),
 	})
 	_, err := webSearchTestSession(t).searchWeb(map[string]any{"query": "pricing"})
 	if err == nil || !strings.Contains(err.Error(), "HTTP 401: Authentication error") {
@@ -219,11 +219,11 @@ func TestWebSearchReportsNoResultsWithoutFailing(t *testing.T) {
 func TestWebSearchReportsFailureWhenNoProviderAnswers(t *testing.T) {
 	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\n")
 	fakeWebSearchAPI(t, map[string]func(http.ResponseWriter){
-		"ceramic": respond(429, `{"success":false,"errors":[{"message":"rate limited"}]}`),
-		"linkup":  respond(500, `not json`),
+		"exa":    respond(429, `{"success":false,"errors":[{"message":"rate limited"}]}`),
+		"linkup": respond(500, `not json`),
 	})
 	_, err := webSearchTestSession(t).searchWeb(map[string]any{"query": "pricing"})
-	if err == nil || !strings.Contains(err.Error(), "ceramic returned HTTP 429: rate limited") || !strings.Contains(err.Error(), "linkup returned HTTP 500") {
+	if err == nil || !strings.Contains(err.Error(), "exa returned HTTP 429: rate limited") || !strings.Contains(err.Error(), "linkup returned HTTP 500") {
 		t.Fatalf("err=%v", err)
 	}
 }
