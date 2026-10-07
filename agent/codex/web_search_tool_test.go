@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -23,8 +25,16 @@ func writeWebSearchConfig(t *testing.T, content string) {
 	t.Setenv(webSearchConfigEnv, path)
 }
 
+func resetWebSearchCache() {
+	webSearchCache.Lock()
+	webSearchCache.entries = map[string]webSearchCacheEntry{}
+	webSearchCache.Unlock()
+}
+
 func webSearchTestSession(t *testing.T) *appServerSession {
 	t.Helper()
+	resetWebSearchCache()
+	t.Cleanup(resetWebSearchCache)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	s := &appServerSession{ctx: ctx, cancel: cancel, workDir: t.TempDir(), events: make(chan core.Event, 4),
@@ -344,5 +354,50 @@ func TestWebSearchMovesFromBraveToCloudflareWhenBraveCannotAnswer(t *testing.T) 
 	output, err = webSearchTestSession(t).searchWeb(map[string]any{"query": "buffer pricing"})
 	if err != nil || !strings.Contains(output, "from exa") || len(*braveCalls) != 1 {
 		t.Fatalf("output=%q err=%v brave=%d", output, err, len(*braveCalls))
+	}
+}
+
+func TestWebSearchReusesARecentSearch(t *testing.T) {
+	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\n")
+	calls := fakeWebSearchAPI(t, map[string]func(http.ResponseWriter){
+		"exa": respond(200, `{"items":[{"url":"https://buffer.com/pricing","title":"Pricing","description":"plans"}],"metadata":{"latencyMs":300}}`),
+	})
+	s := webSearchTestSession(t)
+	if _, err := s.searchWeb(map[string]any{"query": "Buffer pricing"}); err != nil {
+		t.Fatal(err)
+	}
+	output, err := s.searchWeb(map[string]any{"query": "buffer   PRICING"})
+	if err != nil || len(*calls) != 1 || !strings.Contains(output, "Results: 1 from exa, searched 0s ago") || strings.Contains(output, "300 ms") {
+		t.Fatalf("calls=%d output=%q err=%v", len(*calls), output, err)
+	}
+	if _, err := s.searchWeb(map[string]any{"query": "Buffer pricing", "limit": float64(3)}); err != nil || len(*calls) != 2 {
+		t.Fatalf("a different result count reused the cache: calls=%d err=%v", len(*calls), err)
+	}
+
+	key := webSearchCacheKey("buffer pricing", webSearchDefaultLimit)
+	webSearchCache.Lock()
+	entry := webSearchCache.entries[key]
+	entry.at = time.Now().Add(-webSearchCacheTTL - time.Minute)
+	webSearchCache.entries[key] = entry
+	webSearchCache.Unlock()
+	if _, err := s.searchWeb(map[string]any{"query": "Buffer pricing"}); err != nil || len(*calls) != 3 {
+		t.Fatalf("an expired search was reused: calls=%d err=%v", len(*calls), err)
+	}
+}
+
+func TestWebSearchCacheStaysBounded(t *testing.T) {
+	resetWebSearchCache()
+	t.Cleanup(resetWebSearchCache)
+	start := time.Now()
+	for i := 0; i < webSearchCacheEntries+20; i++ {
+		rememberWebSearch(fmt.Sprintf("q%d", i), webSearchCacheEntry{provider: "exa", at: start.Add(time.Duration(i) * time.Second)})
+	}
+	webSearchCache.Lock()
+	size := len(webSearchCache.entries)
+	_, oldestKept := webSearchCache.entries["q0"]
+	_, newestKept := webSearchCache.entries[fmt.Sprintf("q%d", webSearchCacheEntries+19)]
+	webSearchCache.Unlock()
+	if size != webSearchCacheEntries || oldestKept || !newestKept {
+		t.Fatalf("size=%d oldestKept=%v newestKept=%v", size, oldestKept, newestKept)
 	}
 }

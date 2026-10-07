@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -45,6 +46,54 @@ var htmlTags = regexp.MustCompile(`<[^>]+>`)
 // Searches are short HTTP calls, but each one is billed, so a runaway loop in
 // one conversation should queue rather than fan out.
 var webSearchSlots = make(chan struct{}, 4)
+
+const (
+	webSearchCacheTTL     = 24 * time.Hour
+	webSearchCacheEntries = 512
+)
+
+type webSearchCacheEntry struct {
+	provider string
+	response webSearchResponse
+	at       time.Time
+}
+
+// Conversations look up the same vendor pages again and again and every call
+// is billed, so a search repeated within a day reuses the earlier results.
+var webSearchCache = struct {
+	sync.Mutex
+	entries map[string]webSearchCacheEntry
+}{entries: map[string]webSearchCacheEntry{}}
+
+func webSearchCacheKey(query string, limit int) string {
+	return strings.ToLower(query) + "\x00" + strconv.Itoa(limit)
+}
+
+func cachedWebSearch(key string, now time.Time) (webSearchCacheEntry, bool) {
+	webSearchCache.Lock()
+	defer webSearchCache.Unlock()
+	entry, ok := webSearchCache.entries[key]
+	if ok && now.Sub(entry.at) > webSearchCacheTTL {
+		delete(webSearchCache.entries, key)
+		return webSearchCacheEntry{}, false
+	}
+	return entry, ok
+}
+
+func rememberWebSearch(key string, entry webSearchCacheEntry) {
+	webSearchCache.Lock()
+	defer webSearchCache.Unlock()
+	if len(webSearchCache.entries) >= webSearchCacheEntries {
+		oldestKey, oldest := "", entry.at
+		for k, e := range webSearchCache.entries {
+			if !e.at.After(oldest) {
+				oldestKey, oldest = k, e.at
+			}
+		}
+		delete(webSearchCache.entries, oldestKey)
+	}
+	webSearchCache.entries[key] = entry
+}
 
 // webSearchConfigEnv names the file holding the search credentials. The bridge
 // reads it per call, so a rotated token needs no restart, and Agent commands
@@ -209,6 +258,13 @@ func (s *appServerSession) searchWeb(arguments map[string]any) (string, error) {
 	if err != nil {
 		return "", errors.New("web search is not available right now")
 	}
+	key := webSearchCacheKey(query, limit)
+	if entry, ok := cachedWebSearch(key, time.Now()); ok {
+		age := time.Since(entry.at).Round(time.Minute)
+		response := entry.response
+		response.Metadata.LatencyMs = 0
+		return formatWebSearchResults(query, fmt.Sprintf("%s, searched %s ago", entry.provider, age), &response), nil
+	}
 
 	select {
 	case webSearchSlots <- struct{}{}:
@@ -233,6 +289,7 @@ func (s *appServerSession) searchWeb(arguments map[string]any) (string, error) {
 			continue
 		}
 		if len(response.Items) > 0 {
+			rememberWebSearch(key, webSearchCacheEntry{provider: provider, response: *response, at: time.Now()})
 			return formatWebSearchResults(query, provider, response), nil
 		}
 		answered = true
