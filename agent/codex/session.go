@@ -154,9 +154,7 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 	if taskRuntimeEnvFile != "" {
 		turnEnv = append(turnEnv, "TOMAKO_TASK_ENV_FILE="+taskRuntimeEnvFile)
 	}
-	if len(turnEnv) > 0 {
-		cmd.Env = core.MergeEnv(os.Environ(), turnEnv)
-	}
+	cmd.Env = codexProcessEnv(turnEnv)
 	cmd.Stdin = strings.NewReader(prompt)
 
 	stdout, err := cmd.StdoutPipe()
@@ -684,9 +682,7 @@ func loadCodexRuntimeConfig(ctx context.Context, workDir string, extraEnv []stri
 	cmd := exec.CommandContext(ctx, "codex", "app-server")
 	cmd.Dir = workDir
 	prepareCmdForKill(cmd)
-	if len(extraEnv) > 0 {
-		cmd.Env = core.MergeEnv(os.Environ(), extraEnv)
-	}
+	cmd.Env = codexProcessEnv(extraEnv)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
