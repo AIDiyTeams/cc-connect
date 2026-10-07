@@ -496,6 +496,10 @@ func (s *appServerSession) ensureThreadForSend() error {
 func (s *appServerSession) threadRequestParams() map[string]any {
 	config := map[string]any{
 		"features.default_mode_request_user_input": true,
+		// Agent commands inherit the bridge environment, and provider credentials
+		// in it ended up in command output and model context. Nothing an Agent runs
+		// uses these; see agentShellExcludedEnv.
+		"shell_environment_policy.exclude": agentShellExcludedEnv(),
 	}
 	if envFile := s.currentTaskRuntimeEnvFile(); envFile != "" {
 		config["shell_environment_policy.set.TOMAKO_TASK_ENV_FILE"] = envFile
