@@ -500,6 +500,10 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	if envFile := s.currentTaskRuntimeEnvFile(); envFile != "" {
 		config["shell_environment_policy.set.TOMAKO_TASK_ENV_FILE"] = envFile
 	}
+	// A conversation's commands get its own scratch directory; see conversation_scratch.go.
+	if scratch := s.prepareConversationScratch(time.Now()); scratch != "" {
+		config["shell_environment_policy.set.TMPDIR"] = scratch
+	}
 	params := map[string]any{
 		"experimentalRawEvents":  false,
 		"persistExtendedHistory": false,
@@ -660,6 +664,8 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	if err != nil {
 		return err
 	}
+	// Each turn counts as use, so an active conversation's scratch is never expired.
+	s.prepareConversationScratch(time.Now())
 	if err := s.ensureThreadForSend(); err != nil {
 		return err
 	}
@@ -862,7 +868,12 @@ func (s *appServerSession) turnDeveloperInstructions() map[string]any {
 		// resumed thread may report another cwd; never advertise its old path.
 		if tmpDir := envValue(s.extraEnv, "TMPDIR"); strings.TrimSpace(s.permissionsProfile) != "" &&
 			filepath.IsAbs(s.workDir) && tmpDir == filepath.Join(s.workDir, ".tmp") {
-			prefix += fmt.Sprintf("Current execution environment: for scratch files, use unique files or subdirectories under %q, the prepared workspace temporary directory. Keep user deliverables in their intended locations; existing filesystem permissions remain in force.\n\n", tmpDir)
+			scratch := conversationScratchPath(s.workDir, s.permissionsProfile, s.runtime.ChatSessionID)
+			if conversationScratchReady(scratch) {
+				prefix += fmt.Sprintf("Current execution environment: for scratch files, use unique files or subdirectories under %q, this conversation's own temporary directory. Other conversations do not see it, and it is removed after 30 days without use; durable product knowledge belongs in memory or saved documents. Keep user deliverables in their intended locations; existing filesystem permissions remain in force.\n\n", scratch)
+			} else {
+				prefix += fmt.Sprintf("Current execution environment: for scratch files, use unique files or subdirectories under %q, the prepared workspace temporary directory. Keep user deliverables in their intended locations; existing filesystem permissions remain in force.\n\n", tmpDir)
+			}
 		}
 		instructions = prefix + policy
 	}
