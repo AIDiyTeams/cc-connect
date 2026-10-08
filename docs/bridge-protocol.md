@@ -1120,6 +1120,9 @@ agentMessage prose whose item/started phase was final_answer but may still chang
 This is public assistant prose, never a reasoning delta. Structured task consumers
 and adapters lacking the capability do not receive provisional frames.
 
+Provisional snapshots checkpoint at most every 250 ms so the application can show a
+forming answer; confirmed commentary keeps at most one checkpoint per second.
+
 Only item/completed commits text to answer history. The answer's `reply` and
 `reply_stream` frames carry `finalized_item_ids`, the cumulative native IDs now
 included in that response. Preview handles share this metadata. The backend must

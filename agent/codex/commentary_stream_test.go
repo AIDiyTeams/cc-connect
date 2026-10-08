@@ -37,6 +37,24 @@ func TestCommentaryStreamsOneNoteBeforeCompletionAndFlushesThrottledTail(t *test
 	}
 }
 
+// Unclassified prose may be the answer, so it checkpoints faster than a confirmed note.
+func TestProvisionalProseCheckpointsFasterThanNotes(t *testing.T) {
+	s := terminalTestSession()
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "answer", "phase": "final_answer"})
+	s.handleAgentMessageDelta("answer", "第一段，")
+	<-s.events
+	s.handleAgentMessageDelta("answer", "还在写")
+	if len(s.events) != 0 {
+		t.Fatal("provisional checkpoint ignored its interval")
+	}
+	s.commentaryStreams["answer"].lastSentAt = time.Now().Add(-provisionalSnapshotInterval)
+	s.handleAgentMessageDelta("answer", "。")
+	next := <-s.events
+	if !next.ContentProvisional || next.ContentVersion != 2 || next.Content != "第一段，还在写。" {
+		t.Fatalf("provisional prose waited for the note cadence: %#v", next)
+	}
+}
+
 // A real provider can revise final_answer to commentary on completion.
 func TestProvisionalFinalPhaseNeverContaminatesAnswer(t *testing.T) {
 	s := terminalTestSession()

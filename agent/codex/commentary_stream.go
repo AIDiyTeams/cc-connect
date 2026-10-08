@@ -13,10 +13,15 @@ type commentaryStream struct {
 	lastSentAt time.Time
 }
 
+// Provisional prose may turn out to be the answer the user is waiting for, so it
+// checkpoints often enough for the application to show it forming.
+const provisionalSnapshotInterval = 250 * time.Millisecond
+
 // Native public prose streams here until its completed phase is known. Cumulative snapshots
 // let adapters replace one note rather than append tokens as separate stages.
-// A real delta triggers at most one checkpoint per second; completion always
-// flushes. There is no timer, translation call, or fabricated activity.
+// A real delta triggers at most one checkpoint per second (per provisionalSnapshotInterval
+// for unclassified prose); completion always flushes. There is no timer, translation call,
+// or fabricated activity.
 func (s *appServerSession) emitCommentarySnapshot(itemID, text string, done, provisional bool) {
 	if itemID == "" {
 		if done {
@@ -39,7 +44,11 @@ func (s *appServerSession) emitCommentarySnapshot(itemID, text string, done, pro
 		stream.text += text
 	}
 	now := time.Now()
-	if !done && !stream.lastSentAt.IsZero() && now.Sub(stream.lastSentAt) < time.Second {
+	interval := time.Second
+	if provisional {
+		interval = provisionalSnapshotInterval
+	}
+	if !done && !stream.lastSentAt.IsZero() && now.Sub(stream.lastSentAt) < interval {
 		s.stateMu.Unlock()
 		return
 	}
