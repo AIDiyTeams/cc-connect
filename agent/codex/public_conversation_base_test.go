@@ -71,7 +71,7 @@ func TestPublicConversationBaseReplacesOnlyTheCodingAssistantCommunicationGuidan
 		"application that renders Markdown",
 		"Lead with the answer",
 		"Match the size to the request",
-		"One visual per point, never two views of the same numbers",
+		"One block per point, never two views of the same numbers",
 		"An explicit output contract always wins",
 		"# Tool Guidelines",
 		"## `update_plan`",
