@@ -1204,3 +1204,13 @@ func waitForWrittenJSONLine(t *testing.T, w *lockedWriteCloser) string {
 		}
 	}
 }
+
+func TestFencedWorkspacesStartCodexWithoutThePluginMarketplace(t *testing.T) {
+	fenced := strings.Join((&appServerSession{permissionsProfile: "tomako-brand-fence"}).startupArgs(), " ")
+	if !strings.Contains(fenced, "-c features.plugins=false") {
+		t.Fatalf("fenced startup keeps plugins on: %s", fenced)
+	}
+	if unfenced := strings.Join((&appServerSession{}).startupArgs(), " "); strings.Contains(unfenced, "features.plugins") {
+		t.Fatalf("unfenced startup changed plugins: %s", unfenced)
+	}
+}

@@ -351,6 +351,12 @@ func (s *appServerSession) startupArgs() []string {
 	if s.nativeWebModelCatalog != "" {
 		args = append(args, "-c", fmt.Sprintf("model_catalog_json=%q", s.nativeWebModelCatalog))
 	}
+	// Fenced brand workspaces run Tomako's own skills. With plugins enabled,
+	// every start syncs OpenAI's curated plugin marketplace into the
+	// workspace's CODEX_HOME (about 100 MB per brand) although nothing uses it.
+	if strings.TrimSpace(s.permissionsProfile) != "" {
+		args = append(args, "-c", "features.plugins=false")
+	}
 	return args
 }
 
