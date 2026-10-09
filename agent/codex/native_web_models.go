@@ -35,7 +35,8 @@ func needsNativeWebModelCatalog(runtime core.SessionRuntime) bool {
 		return false
 	}
 	switch strings.TrimSpace(runtime.GatewayModel) {
-	case "tomako/gpt-5.6-sol", "gpt-5.6-sol", "tomako/deepseek-v4-flash-vision-exp":
+	case "tomako/gpt-5.6-sol", "gpt-5.6-sol", "tomako/deepseek-v4-flash-vision-exp",
+		gpt61SolGatewaySlug, "gpt-6.1-sol":
 	default:
 		return false
 	}
@@ -45,6 +46,32 @@ func needsNativeWebModelCatalog(runtime core.SessionRuntime) bool {
 	default:
 		return false
 	}
+}
+
+// GPT-6.1 Sol is the platform default model behind the gateway slug below. Codex has no
+// metadata for that namespaced slug, so native-search scenes would fall back to Responses
+// Lite, which omits hosted web_search. Its descriptor is the public GPT-5.6 Sol one above
+// (same tool, shell and image capabilities) under the gateway slug, defaulting to the
+// platform's medium effort.
+const gpt61SolGatewaySlug = "tomako/gpt-6.1-sol"
+
+func gpt61SolNativeWebDescriptor() (json.RawMessage, error) {
+	var source struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(nativeWebModels, &source); err != nil || len(source.Models) != 1 {
+		return nil, fmt.Errorf("codex GPT-6.1 Sol web catalog: unexpected base descriptor")
+	}
+	model := source.Models[0]
+	model["slug"] = gpt61SolGatewaySlug
+	model["display_name"] = "GPT-6.1 Sol"
+	model["default_reasoning_level"] = "medium"
+	model["use_responses_lite"] = false
+	data, err := json.Marshal(model)
+	if err != nil {
+		return nil, fmt.Errorf("codex GPT-6.1 Sol web catalog encode: %w", err)
+	}
+	return data, nil
 }
 
 func writeNativeWebModelCatalog(envFile string) (string, error) {
@@ -62,6 +89,11 @@ func writeNativeWebModelCatalog(envFile string) (string, error) {
 		return "", fmt.Errorf("codex DeepSeek web catalog decode: %w", err)
 	}
 	catalog.Models = append(catalog.Models, deepseek.Models...)
+	gpt61, err := gpt61SolNativeWebDescriptor()
+	if err != nil {
+		return "", err
+	}
+	catalog.Models = append(catalog.Models, gpt61)
 	data, err := json.Marshal(catalog)
 	if err != nil {
 		return "", fmt.Errorf("codex native web catalog encode: %w", err)

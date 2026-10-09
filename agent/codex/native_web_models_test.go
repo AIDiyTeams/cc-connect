@@ -31,8 +31,12 @@ func TestDeepSeekNativeWebCatalog_PreservesOfficialCapabilities(t *testing.T) {
 	if err := json.Unmarshal(raw, &catalog); err != nil {
 		t.Fatal(err)
 	}
-	if len(catalog.Models) != 2 {
-		t.Fatalf("expected both model descriptors, got %d", len(catalog.Models))
+	if len(catalog.Models) != 3 {
+		t.Fatalf("expected all model descriptors, got %d", len(catalog.Models))
+	}
+	gpt := catalog.Models[2]
+	if gpt["slug"] != "tomako/gpt-6.1-sol" || gpt["use_responses_lite"] != false || gpt["default_reasoning_level"] != "medium" || gpt["web_search_tool_type"] == "" || gpt["base_instructions"] == "" {
+		t.Fatalf("GPT-6.1 Sol native-search descriptor: %v", gpt["slug"])
 	}
 	model := catalog.Models[1]
 	if model["truncation_policy"].(map[string]any)["limit"] != float64(128000) {
@@ -40,6 +44,18 @@ func TestDeepSeekNativeWebCatalog_PreservesOfficialCapabilities(t *testing.T) {
 	}
 	if model["slug"] != "tomako/deepseek-v4-flash-vision-exp" || model["context_window"] != float64(1048576) || model["default_reasoning_level"] != "high" || model["use_responses_lite"] != false || model["supports_search_tool"] != true || model["base_instructions"] == "" {
 		t.Fatal("DeepSeek capability descriptor changed")
+	}
+}
+
+func TestGPT61SolNativeSearchScenesUseTheSearchCatalog(t *testing.T) {
+	for _, scene := range []string{"brand_competitor_discovery", "growth_opportunity_user_voice_plan", "growth_opportunity_user_voice_search", "growth_opportunity_user_voice_judge"} {
+		runtime := core.SessionRuntime{Scene: scene, GatewayModel: "tomako/gpt-6.1-sol", WebSearch: "live", ReasoningEffort: "medium"}
+		if modelCatalogFor(runtime) != nativeWebModelCatalogTag {
+			t.Fatalf("GPT-6.1 Sol %s starts without hosted search", scene)
+		}
+	}
+	if modelCatalogFor(core.SessionRuntime{Scene: "brand_analysis", GatewayModel: "tomako/gpt-6.1-sol", WebSearch: "disabled"}) != "" {
+		t.Fatal("an ordinary GPT-6.1 Sol turn must not load the search catalog")
 	}
 }
 
