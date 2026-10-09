@@ -22,6 +22,14 @@ func TestReasoningCapabilityIsBoundToKnownModelAndRequestedEffort(t *testing.T) 
 		{"gpt-6.1-sol", "medium", true},
 		{"tomako/gpt-6.1-sol", "", false},
 		{"other/gpt-6.1-sol", "medium", false},
+		{"tomako/gpt-6-sol", "medium", true},
+		{"gpt-6-sol", "medium", true},
+		{"tomako/gpt-6-sol", "", false},
+		{"other/gpt-6-sol", "medium", false},
+		{"tomako/gpt-6-luna", "medium", true},
+		{"gpt-6-luna", "medium", true},
+		{"tomako/gpt-6-luna", "", false},
+		{"other/gpt-6-luna", "medium", false},
 		{"tomako/deepseek-v4-flash", "high", true},
 		{"deepseek-v4-flash", "medium", true},
 		{"tomako/deepseek-v4-flash", "", false},
@@ -53,7 +61,7 @@ func TestAppServerSwitchGPT6ModelsPreservesMediumEffort(t *testing.T) {
 	s := &appServerSession{model: "tomako/gpt-5.6-sol", effort: "high"}
 	s.alive.Store(true)
 	s.threadID.Store("existing-reasoning-thread")
-	for _, model := range []string{"tomako/gpt-6-astra", "tomako/gpt-6.1-sol"} {
+	for _, model := range []string{"tomako/gpt-6-astra", "tomako/gpt-6.1-sol", "tomako/gpt-6-luna", "tomako/gpt-6-sol"} {
 		if err := s.SetSessionRuntime(core.SessionRuntime{
 			GatewayModel: model, ReasoningEffort: "medium", WebSearch: "disabled",
 		}); err != nil {
