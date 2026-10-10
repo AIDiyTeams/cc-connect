@@ -77,7 +77,7 @@ func workspaceSecurityStartupArgs(profile, workDir, scratchDir, brokerPublicDir,
 			".git", ".github", ".codex", ".agents", "test", "test-fixtures", "docs", "deploy",
 			"AGENTS.md", "CONTRIBUTING.md", "tomako-video-generate.test.mjs",
 			"brand-analysis-pipeline.mjs", "onboarding-activation-pipeline.mjs",
-			"scripts/__pycache__", "skills/brand-name-finder-kit/scripts/__pycache__",
+			"scripts/signals-x-search-worker.py", "scripts/__pycache__", "skills/brand-name-finder-kit/scripts/__pycache__",
 			"skills/result-writer/scripts/__pycache__",
 		} {
 			filesystemRules += ", " + quote(filepath.Join(sharedSkillsDir, filepath.FromSlash(relative))) + " = " + quote("none")

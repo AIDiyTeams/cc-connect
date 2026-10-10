@@ -455,7 +455,7 @@ func (b *capabilityBroker) serveXSearch(w http.ResponseWriter, r *http.Request) 
 	}
 	env := core.MergeEnv(os.Environ(), b.session.extraEnv)
 	key := envValue(env, "XAI_API_KEY")
-	script := filepath.Join(envValue(env, "SKILLS_OL_DIR"), "scripts", "signals-x-search.py")
+	script := filepath.Join(envValue(env, "SKILLS_OL_DIR"), "scripts", "signals-x-search-worker.py")
 	if key == "" || !filepath.IsAbs(script) {
 		brokerReject(w, http.StatusServiceUnavailable)
 		return
@@ -464,7 +464,7 @@ func (b *capabilityBroker) serveXSearch(w http.ResponseWriter, r *http.Request) 
 	// The request cannot choose code, a file, a model, an endpoint or headers.
 	ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "python3", script, "--broker-execute")
+	cmd := exec.CommandContext(ctx, "python3", "-B", script, "--broker-execute")
 	for _, entry := range env {
 		name, _, _ := strings.Cut(entry, "=")
 		if name == "PATH" || name == "HOME" || name == "LANG" || name == "TZ" ||
@@ -478,7 +478,13 @@ func (b *capabilityBroker) serveXSearch(w http.ResponseWriter, r *http.Request) 
 	if envValue(cmd.Env, "XAI_X_SEARCH_ENDPOINT") == "" {
 		cmd.Env = append(cmd.Env, "XAI_X_SEARCH_ENDPOINT=https://api.x.ai/v1/responses")
 	}
-	encoded, _ := json.Marshal(input)
+	// The revision authorizes the broker call; it is not a worker parameter.
+	encoded, _ := json.Marshal(map[string]any{
+		"query": input.Query, "maximum": input.Maximum,
+		"allowedHandles":  append([]string{}, input.AllowedHandles...),
+		"excludedHandles": append([]string{}, input.ExcludedHandles...),
+		"fromDate":        input.FromDate, "toDate": input.ToDate,
+	})
 	cmd.Stdin = bytes.NewReader(encoded)
 	// This fixed script caps provider data at 4 MB and validated posts at ten.
 	var stdout bytes.Buffer

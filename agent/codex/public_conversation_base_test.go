@@ -33,6 +33,9 @@ func TestPublicConversationBaseReplacesOnlyTheCodingAssistantCommunicationGuidan
 		t.Fatal(err)
 	}
 	for _, removed := range []string{
+		"project led by OpenAI",
+		"language model built by OpenAI",
+		"You are a coding agent running in the Codex CLI",
 		"### Preamble messages",
 		"send a brief preamble to the user explaining what you’re about to do",
 		"I’ve explored the repo; now checking the API route definitions.",
@@ -53,6 +56,7 @@ func TestPublicConversationBaseReplacesOnlyTheCodingAssistantCommunicationGuidan
 		}
 	}
 	for _, kept := range []string{
+		"You are Tomako, an AI assistant",
 		"## Talking with the user while you work",
 		"Never restate or paraphrase the request",
 		"comply with them silently",
@@ -88,8 +92,11 @@ func TestPublicConversationBaseReplacesOnlyTheCodingAssistantCommunicationGuidan
 			t.Fatalf("expected %q exactly once in composed base instructions", kept)
 		}
 	}
-	// Everything outside the three communication sections is byte-identical.
+	// Outside the product identity and communication sections, retain the
+	// upstream tool, sandbox and planning instructions byte for byte.
 	head := codexDefaultBaseInstructions[:strings.Index(codexDefaultBaseInstructions, preambleSectionStart)]
+	head = strings.Replace(head, codexNativeIdentity, tomakoProductIdentity, 1)
+	head = strings.Replace(head, codexNativeIdentityNote+"\n\n", "", 1)
 	if !strings.HasPrefix(got, head) {
 		t.Fatal("text before the communication section changed")
 	}

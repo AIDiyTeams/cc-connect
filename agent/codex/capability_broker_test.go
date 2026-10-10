@@ -331,3 +331,120 @@ func TestBrokerShellEnvironmentAllowsRuntimeButNeverUnknownSupervisorSecrets(t *
 		}
 	}
 }
+
+func TestCapabilityBrokerXSearchRunsOnlyPrivateWorker(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 required")
+	}
+	b, _ := brokerFixture(t)
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "scripts"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	b.session.extraEnv = []string{"SKILLS_OL_DIR=" + dir, "XAI_API_KEY=synthetic-trusted-key",
+		"XAI_X_SEARCH_MODEL=private-retrieval-model", "XAI_X_SEARCH_ENDPOINT=https://provider.invalid/responses"}
+	// The public entry deliberately fails: trusted execution must use the
+	// private worker that the Agent's filesystem profile hides.
+	if err := os.WriteFile(filepath.Join(dir, "scripts", "signals-x-search.py"), []byte("raise RuntimeError('public wrapper executed')"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	script := `import json, os, sys
+assert sys.argv[1:] == ['--broker-execute'] and sys.dont_write_bytecode
+assert os.environ['XAI_API_KEY'] == 'synthetic-trusted-key'
+assert os.environ['XAI_X_SEARCH_MODEL'] == 'private-retrieval-model'
+assert os.environ['XAI_X_SEARCH_ENDPOINT'] == 'https://provider.invalid/responses'
+assert not os.environ.get('TOMAKO_CAPABILITY_SOCKET')
+request = json.load(sys.stdin)
+assert set(request) == {'query', 'maximum', 'allowedHandles', 'excludedHandles', 'fromDate', 'toDate'}
+assert request['allowedHandles'] == [] and request['excludedHandles'] == []
+print(json.dumps({'model': 'x-search', 'query': request['query'],
+ 'posts': [{'exactOriginalText': 'A public post can discuss Grok or xAI.', 'evidenceMethod': 'X_SEARCH_CITATION_GATED'}],
+ 'rejected': [{'reason': 'STATUS_URL_NOT_IN_CITATIONS'}], 'citations': ['https://x.com/author/status/123'],
+ 'usage': {'xToolCalls': 1, 'costUsd': 0.007, 'costBasis': 'PROVIDER_REPORTED_TICKS'}}))`
+	if err := os.WriteFile(filepath.Join(dir, "scripts", "signals-x-search-worker.py"), []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+	input := map[string]any{"revision": b.revision, "query": "normal business research", "maximum": 2}
+	call := func() *httptest.ResponseRecorder {
+		data, _ := json.Marshal(input)
+		w := httptest.NewRecorder()
+		b.serve(w, httptest.NewRequest("POST", "/v1/x-search", bytes.NewReader(data)))
+		return w
+	}
+	if w := call(); w.Code != 200 || !strings.Contains(w.Body.String(), "A public post can discuss Grok or xAI.") ||
+		!strings.Contains(w.Body.String(), `"costUsd":0.007`) || strings.Contains(w.Body.String(), "synthetic-trusted-key") ||
+		strings.Contains(w.Body.String(), "private-retrieval-model") || strings.Contains(w.Body.String(), "provider.invalid") {
+		t.Fatalf("public capability receipt changed: %d %s", w.Code, w.Body.String())
+	}
+	for _, field := range []string{"model", "endpoint", "script", "headers"} {
+		input[field] = "caller-controlled"
+		if w := call(); w.Code != 400 {
+			t.Fatalf("caller can choose private worker %s: %d", field, w.Code)
+		}
+		delete(input, field)
+	}
+	input["revision"] = "revoked"
+	if w := call(); w.Code != 403 {
+		t.Fatal("revoked task can invoke private worker")
+	}
+}
+
+// Run with CC_X_SEARCH_WORKER_SCRIPT pointing to the matching Skills checkout.
+// The optional cross-repository test calls only an in-process synthetic server.
+func TestCapabilityBrokerXSearchWithPrivateWorkerIntegration(t *testing.T) {
+	worker := os.Getenv("CC_X_SEARCH_WORKER_SCRIPT")
+	if worker == "" {
+		t.Skip("set CC_X_SEARCH_WORKER_SCRIPT for the real Python worker contract test")
+	}
+	data, err := os.ReadFile(worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := brokerFixture(t)
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "scripts"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "scripts", "signals-x-search-worker.py"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var request map[string]any
+		if r.Header.Get("Authorization") != "Bearer synthetic-private-key" || json.NewDecoder(r.Body).Decode(&request) != nil || request["model"] != "synthetic-private-model" {
+			t.Error("trusted provider request changed")
+			w.WriteHeader(400)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"model":"synthetic-private-model","citations":["https://x.com/author/status/123"],"output":[{"type":"message","content":[{"type":"output_text","text":"{\"posts\":[{\"url\":\"https://x.com/author/status/123\",\"exactOriginalText\":\"A public post can discuss Grok.\"},{\"url\":\"https://x.com/uncited/status/456\",\"exactOriginalText\":\"Unverified\"}]}"}]}],"usage":{"input_tokens":1000,"output_tokens":500,"server_side_tool_usage":{"x_search":1},"cost_in_usd_ticks":70000000}}`)
+	}))
+	defer server.Close()
+	b.session.extraEnv = []string{"SKILLS_OL_DIR=" + dir, "XAI_API_KEY=synthetic-private-key",
+		"XAI_X_SEARCH_MODEL=synthetic-private-model", "XAI_X_SEARCH_ENDPOINT=" + server.URL}
+	input, _ := json.Marshal(map[string]any{"revision": b.revision, "query": "normal business research", "maximum": 2})
+	w := httptest.NewRecorder()
+	b.serve(w, httptest.NewRequest("POST", "/v1/x-search", bytes.NewReader(input)))
+	if w.Code != 200 || calls != 1 {
+		t.Fatalf("real broker/worker protocol failed: status=%d calls=%d body=%s", w.Code, calls, w.Body.String())
+	}
+	var receipt struct {
+		Model    string
+		Posts    []map[string]any
+		Rejected []map[string]any
+		Usage    map[string]any
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Model != "x-search" || len(receipt.Posts) != 1 || receipt.Posts[0]["exactOriginalText"] != "A public post can discuss Grok." ||
+		receipt.Posts[0]["evidenceMethod"] != "X_SEARCH_CITATION_GATED" || len(receipt.Rejected) != 1 ||
+		receipt.Rejected[0]["reason"] != "STATUS_URL_NOT_IN_CITATIONS" || receipt.Usage["costBasis"] != "PROVIDER_REPORTED_TICKS" ||
+		receipt.Usage["costUsd"] != 0.007 || receipt.Usage["xToolCalls"] != float64(1) {
+		t.Fatalf("real worker public receipt changed: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "synthetic-private") || strings.Contains(w.Body.String(), server.URL) {
+		t.Fatal("trusted provider identity or credentials escaped")
+	}
+}

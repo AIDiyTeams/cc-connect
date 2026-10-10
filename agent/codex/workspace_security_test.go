@@ -158,12 +158,12 @@ func TestWorkspaceSecurityStartupArgsHideOnlyPrivateSharedSkillPaths(t *testing.
 		t.Fatal(err)
 	}
 	fs := config["permissions"].(map[string]any)["fence"].(map[string]any)["filesystem"].(map[string]any)
-	for _, private := range []string{".git", ".github", ".codex", ".agents", "test", "test-fixtures", "docs", "deploy", "AGENTS.md", "CONTRIBUTING.md", "brand-analysis-pipeline.mjs", "onboarding-activation-pipeline.mjs", "scripts/__pycache__", "skills/brand-name-finder-kit/scripts/__pycache__", "skills/result-writer/scripts/__pycache__"} {
+	for _, private := range []string{".git", ".github", ".codex", ".agents", "test", "test-fixtures", "docs", "deploy", "AGENTS.md", "CONTRIBUTING.md", "brand-analysis-pipeline.mjs", "onboarding-activation-pipeline.mjs", "scripts/signals-x-search-worker.py", "scripts/__pycache__", "skills/brand-name-finder-kit/scripts/__pycache__", "skills/result-writer/scripts/__pycache__"} {
 		if fs[filepath.Join(sharedDir, filepath.FromSlash(private))] != "none" {
 			t.Fatalf("private runtime path not hidden: %s", private)
 		}
 	}
-	for _, public := range []string{".cache", "examples", "skills", "platform-facts", "capability-fetch.mjs", "machine-auth.mjs", "scripts/capability_transport.py"} {
+	for _, public := range []string{".cache", "examples", "skills", "platform-facts", "capability-fetch.mjs", "machine-auth.mjs", "scripts/capability_transport.py", "scripts/signals-x-search.py"} {
 		if _, exists := fs[filepath.Join(sharedDir, filepath.FromSlash(public))]; exists {
 			t.Fatalf("required runtime path changed: %s", public)
 		}
