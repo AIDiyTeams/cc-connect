@@ -193,3 +193,92 @@ func TestWebReadCancelledPartialClaimReturnsItsHeldSlot(t *testing.T) {
 		t.Fatalf("partial cancelled claim leaked: slots=%d gate=%d", len(webReadSlots), len(webReadAdmission))
 	}
 }
+
+func TestWebInventorySupportsBoundedFileModesAndRejectsAmbiguity(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+	for _, input := range []map[string]any{
+		{"sourceFile": map[string]any{"path": ".tmp/urls.json", "offset": float64(50), "limit": float64(50)}},
+		{"receipt": map[string]any{"path": ".tmp/web-inventory/batch/receipt.json", "sha256": hash, "offset": float64(0), "limit": float64(20)}},
+	} {
+		if _, maxBytes, err := webInventoryInput(input); err != nil || maxBytes != 24000 {
+			t.Fatalf("valid file mode rejected: %v, bytes=%d", err, maxBytes)
+		}
+	}
+	for name, input := range map[string]map[string]any{
+		"no mode":         {},
+		"two modes":       {"urls": []any{"https://example.com"}, "sourceFile": map[string]any{"path": ".tmp/urls.json"}},
+		"null source":     {"sourceFile": nil},
+		"missing path":    {"sourceFile": map[string]any{}},
+		"empty path":      {"sourceFile": map[string]any{"path": " "}},
+		"extra field":     {"sourceFile": map[string]any{"path": ".tmp/urls.json", "workers": float64(10)}},
+		"negative offset": {"sourceFile": map[string]any{"path": ".tmp/urls.json", "offset": float64(-1)}},
+		"fraction offset": {"sourceFile": map[string]any{"path": ".tmp/urls.json", "offset": 0.5}},
+		"zero limit":      {"sourceFile": map[string]any{"path": ".tmp/urls.json", "limit": float64(0)}},
+		"large limit":     {"receipt": map[string]any{"path": ".tmp/r.json", "sha256": hash, "limit": float64(51)}},
+		"missing hash":    {"receipt": map[string]any{"path": ".tmp/r.json"}},
+		"invalid hash":    {"receipt": map[string]any{"path": ".tmp/r.json", "sha256": strings.Repeat("z", 64)}},
+		"short hash":      {"receipt": map[string]any{"path": ".tmp/r.json", "sha256": "abc"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := webInventoryInput(input); err == nil {
+				t.Fatal("invalid mode accepted")
+			}
+		})
+	}
+}
+
+func TestWebInventoryReceiptReadDoesNotWaitForNetworkBudget(t *testing.T) {
+	release, err := acquireWebReadSlots(context.Background(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	s := inventoryTestSession(t, `let input='';for await(const x of process.stdin) input+=x;process.stdout.write(JSON.stringify({input:JSON.parse(input),page:{nextOffset:null,complete:true}}));`)
+	ctx, cancel := context.WithTimeout(s.ctx, time.Second)
+	defer cancel()
+	s.ctx = ctx
+	out, err := s.readWebInventory(map[string]any{"receipt": map[string]any{"path": ".tmp/web-inventory/batch/receipt.json", "sha256": strings.Repeat("a", 64)}})
+	if err != nil || !strings.Contains(out, `"complete":true`) {
+		t.Fatalf("local receipt blocked by network budget: %v %s", err, out)
+	}
+	if len(webReadSlots) != 2 {
+		t.Fatal("receipt changed network budget")
+	}
+}
+
+func TestWebInventorySourceFileKeepsSharedNetworkBudget(t *testing.T) {
+	release, err := acquireWebReadSlots(context.Background(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	s := inventoryTestSession(t, `import fs from 'node:fs';fs.writeFileSync('started','yes');process.stdout.write('{}');`)
+	ctx, cancel := context.WithTimeout(s.ctx, 40*time.Millisecond)
+	defer cancel()
+	s.ctx = ctx
+	_, err = s.readWebInventory(map[string]any{"sourceFile": map[string]any{"path": ".tmp/urls.json"}})
+	if err == nil || !strings.Contains(err.Error(), "shared reader budget") {
+		t.Fatalf("scan bypassed shared budget: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.workDir, "started")); !os.IsNotExist(err) {
+		t.Fatal("scan started without network budget")
+	}
+}
+
+func TestWebInventorySchemaUsesExclusiveSourcesWithoutOutputKnobs(t *testing.T) {
+	schema := webInventoryDynamicTool()["inputSchema"].(map[string]any)
+	properties := schema["properties"].(map[string]any)
+	for _, key := range []string{"urls", "sourceFile", "receipt"} {
+		if properties[key] == nil {
+			t.Fatalf("missing mode %s", key)
+		}
+	}
+	for _, key := range []string{"maxOutputBytes", "deadlineMs"} {
+		if _, ok := properties[key]; ok {
+			t.Fatalf("model still controls %s", key)
+		}
+	}
+	if modes, ok := schema["oneOf"].([]map[string]any); !ok || len(modes) != 3 {
+		t.Fatal("schema does not require exactly one source")
+	}
+}
