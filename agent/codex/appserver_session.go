@@ -222,6 +222,8 @@ type appServerSession struct {
 	nativeWebModelCatalog string
 	// modelCatalogKind records which startup catalog the process runs with (see modelCatalogFor).
 	modelCatalogKind string
+	// Process-level config cannot change when a later turn updates its model.
+	startupToolOutputTokens int
 	// Resumed threads may retain a previous turn's collaboration instructions.
 	// A later unscoped turn must explicitly restore Codex's built-in default.
 	developerInstructionsManaged bool
@@ -298,6 +300,7 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 		}
 	}
 
+	s.startupToolOutputTokens = toolOutputTokensFor(s.model, s.nativeWebModelCatalog)
 	connectStartedAt := time.Now()
 	if err := s.connect(); err != nil {
 		removeTaskRuntimeEnv(s.taskRuntimeEnvFile)
@@ -350,6 +353,9 @@ func (s *appServerSession) startupArgs() []string {
 	}
 	if s.nativeWebModelCatalog != "" {
 		args = append(args, "-c", fmt.Sprintf("model_catalog_json=%q", s.nativeWebModelCatalog))
+	}
+	if s.startupToolOutputTokens > 0 {
+		args = append(args, "-c", fmt.Sprintf("tool_output_token_limit=%d", s.startupToolOutputTokens))
 	}
 	// Fenced brand workspaces run Tomako's own skills. With plugins enabled,
 	// every start syncs OpenAI's curated plugin marketplace into the

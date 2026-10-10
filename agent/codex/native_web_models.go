@@ -186,5 +186,22 @@ func writeDeepSeekConversationCatalog(envFile, slug string) (string, error) {
 }
 
 func (s *appServerSession) SupportsSessionRuntime(runtime core.SessionRuntime) bool {
-	return s.modelCatalogKind == modelCatalogFor(runtime)
+	kind := modelCatalogFor(runtime)
+	model := strings.TrimSpace(runtime.GatewayModel)
+	if model == "" {
+		s.runtimeMu.RLock()
+		model = s.model
+		s.runtimeMu.RUnlock()
+	}
+	return s.modelCatalogKind == kind && s.startupToolOutputTokens == toolOutputTokensFor(model, kind)
+}
+
+// Ordinary namespaced GPT has no Codex descriptor and otherwise gets a 10KB
+// tool-output fallback. Bound output to 8k tokens without replacing its model
+// metadata. Existing catalogs retain their own output policies.
+func toolOutputTokensFor(model, catalog string) int {
+	if catalog == "" && strings.TrimSpace(model) == gpt61SolGatewaySlug {
+		return 8000
+	}
+	return 0
 }
