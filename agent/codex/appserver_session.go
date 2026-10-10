@@ -559,6 +559,10 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 		tools, _ := params["dynamicTools"].([]map[string]any)
 		params["dynamicTools"] = append(tools, webReadDynamicTool())
 	}
+	if s.webInventoryToolAvailable() {
+		tools, _ := params["dynamicTools"].([]map[string]any)
+		params["dynamicTools"] = append(tools, webInventoryDynamicTool())
+	}
 	// ...and find them through the platform search; see web_search_tool.go.
 	if s.webSearchToolAvailable() {
 		tools, _ := params["dynamicTools"].([]map[string]any)
@@ -1220,6 +1224,21 @@ func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRa
 		}
 		go func() {
 			result, err := s.readWebPage(params.Arguments)
+			if err != nil {
+				s.writeDynamicToolResponse(rawID, false, err.Error())
+				return
+			}
+			s.writeDynamicToolResponse(rawID, true, result)
+		}()
+		return
+	}
+	if params.Tool == webInventoryToolName {
+		if !s.webInventoryToolAvailable() {
+			s.writeDynamicToolResponse(rawID, false, "web inventory is not available for this task")
+			return
+		}
+		go func() {
+			result, err := s.readWebInventory(params.Arguments)
 			if err != nil {
 				s.writeDynamicToolResponse(rawID, false, err.Error())
 				return
