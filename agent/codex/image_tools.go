@@ -104,7 +104,7 @@ func (s *appServerSession) prepareImageTool(tool string, arguments map[string]an
 	var call map[string]any
 	_ = json.Unmarshal(encoded, &call)
 	if args, ok := call["arguments"].(map[string]any); ok {
-		if err := snapshotImageReferences(s.workDir, filepath.Dir(path), args); err != nil {
+		if err := snapshotImageReferences(s.workDir, filepath.Dir(path), args, s.sandboxScratchDir); err != nil {
 			removeTaskRuntimeEnv(path)
 			return nil, nil, nil, err
 		}
@@ -158,7 +158,7 @@ func runImageToolCommand(cmd *exec.Cmd) (string, error) {
 // os.Root prevents traversal and symlink escapes, including concurrent symlink
 // replacement. Copy bounded regular files to the private task snapshot so the
 // existing Node uploader never opens an unconfined model-selected path.
-func snapshotImageReferences(workDir, snapshotDir string, args map[string]any) error {
+func snapshotImageReferences(workDir, snapshotDir string, args map[string]any, fencedScratch string) error {
 	value, exists := args["referenceImages"]
 	if !exists {
 		return nil
@@ -192,7 +192,12 @@ func snapshotImageReferences(workDir, snapshotDir string, args map[string]any) e
 		if err != nil {
 			return fmt.Errorf("image source is outside the current workspace")
 		}
-		data, err := readWorkspaceImage(root, rel)
+		var data []byte
+		if fencedScratch != "" {
+			data, err = readFencedWorkspaceImage(workDir, source, fencedScratch)
+		} else {
+			data, err = readWorkspaceImage(root, rel)
+		}
 		if err != nil {
 			return err
 		}
@@ -211,6 +216,10 @@ func readWorkspaceImage(root *os.Root, path string) ([]byte, error) {
 		return nil, fmt.Errorf("selected image is unavailable or outside the current workspace")
 	}
 	defer file.Close()
+	return readImageFile(file)
+}
+
+func readImageFile(file *os.File) ([]byte, error) {
 	info, err := file.Stat()
 	const maxBytes = 12 * 1024 * 1024
 	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > maxBytes {
@@ -221,4 +230,36 @@ func readWorkspaceImage(root *os.Root, path string) ([]byte, error) {
 		return nil, fmt.Errorf("selected image changed or could not be read")
 	}
 	return data, nil
+}
+
+// A native tool runs outside the shell sandbox and must enforce the same private
+// paths. Resolve legitimate local aliases, then atomically refuse every symlink
+// while opening the resolved path so a swapped alias cannot bypass this check.
+func readFencedWorkspaceImage(workDir, source, scratch string) ([]byte, error) {
+	base, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		return nil, fmt.Errorf("current image workspace unavailable")
+	}
+	resolved, err := filepath.EvalSymlinks(source)
+	if err != nil {
+		return nil, fmt.Errorf("selected image is unavailable")
+	}
+	rel, err := filepath.Rel(base, resolved)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return nil, fmt.Errorf("selected image is outside the current workspace")
+	}
+	scratchRel, err := filepath.Rel(workDir, scratch)
+	within := func(path, dir string) bool {
+		return path == dir || strings.HasPrefix(path, dir+string(filepath.Separator))
+	}
+	if err != nil || within(rel, ".codex") && !within(rel, filepath.Join(".codex", "memories")) ||
+		within(rel, ".tmp") && !within(rel, scratchRel) {
+		return nil, fmt.Errorf("selected image is outside the current task scope")
+	}
+	file, err := openImageWithoutSymlinks(base, rel)
+	if err != nil {
+		return nil, fmt.Errorf("selected image is unavailable or changed")
+	}
+	defer file.Close()
+	return readImageFile(file)
 }

@@ -276,3 +276,58 @@ func TestImageToolLocalReferencesStayWithinWorkspaceAndPreserveOrder(t *testing.
 		}
 	}
 }
+
+func TestImageToolCannotUploadHiddenRuntimeOrOtherSessionFiles(t *testing.T) {
+	s := imageToolTestSession(t, "")
+	s.sandboxScratchDir = filepath.Join(s.workDir, ".tmp", "conversations", "own")
+	paths := map[string]bool{
+		"assets/source.png":                   true,
+		".codex/memories/own.png":             true,
+		".tmp/conversations/own/source.png":   true,
+		".codex/auth.json":                    false,
+		".codex/config.toml":                  false,
+		".codex/sessions/history.jsonl":       false,
+		".tmp/conversations/other/source.png": false,
+		".tmp/tasks/other/machine.env":        false,
+	}
+	for relative, allowed := range paths {
+		source := filepath.Join(s.workDir, relative)
+		if err := os.MkdirAll(filepath.Dir(source), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(source, []byte("synthetic-selected-image"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		for _, alias := range []bool{false, true} {
+			selected := source
+			if alias {
+				selected = filepath.Join(s.workDir, "alias")
+				_ = os.Remove(selected)
+				if err := os.Symlink(source, selected); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd, cancel, cleanup, err := s.prepareImageTool("tomako_generate_image", map[string]any{"referenceImages": []any{map[string]any{"path": selected}}})
+			if err == nil {
+				cancel()
+				cleanup()
+				if cmd == nil {
+					t.Fatal("missing adapter")
+				}
+			}
+			if (err == nil) != allowed {
+				t.Fatalf("path=%s alias=%v allowed=%v err=%v", relative, alias, allowed, err)
+			}
+		}
+	}
+	// This is the open step after scope validation; an attacker swaps a parent
+	// directory to a symlink to the private runtime before the descriptor opens.
+	link := filepath.Join(s.workDir, "swapped")
+	if err := os.Symlink(filepath.Join(s.workDir, ".codex"), link); err != nil {
+		t.Fatal(err)
+	}
+	if file, err := openImageWithoutSymlinks(s.workDir, "swapped/auth.json"); err == nil {
+		file.Close()
+		t.Fatal("followed a swapped parent symlink")
+	}
+}

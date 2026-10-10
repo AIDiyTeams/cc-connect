@@ -314,7 +314,6 @@ trust_level = "trusted"
 		`default_permissions = "tomako-brand-fence"`,
 		`project_root_markers = ["AGENTS.md"]`,
 		`[permissions.tomako-brand-fence.filesystem]`,
-		`"/home/ubuntu/Skills-OL" = "read"`,
 		fmt.Sprintf("%q = \"read\"", sharedSkillsDir),
 		`[permissions.tomako-brand-fence.filesystem.":workspace_roots"]`,
 		`".codex/memories" = "write"`,
@@ -324,7 +323,7 @@ trust_level = "trusted"
 			t.Errorf("per-workspace config missing %q\ngot:\n%s", want, content)
 		}
 	}
-	if strings.Contains(content, "/host-only") {
+	if strings.Contains(content, "/home/ubuntu/Skills-OL") || strings.Contains(content, "/host-only") {
 		t.Fatalf("global project trust leaked into per-workspace config:\n%s", content)
 	}
 	if got := strings.Count(content, fmt.Sprintf("%q = \"read\"", sharedSkillsDir)); got != 1 {
@@ -332,15 +331,6 @@ trust_level = "trusted"
 	}
 	if strings.Count(content, "project_root_markers") != 1 {
 		t.Fatal("workspace root markers must be inherited exactly once")
-	}
-}
-
-func TestAddPermissionReadPathRejectsRelativeDirectory(t *testing.T) {
-	config := `[permissions.tomako-brand-fence.filesystem]
-":minimal" = "read"
-`
-	if got := addPermissionReadPath(config, "tomako-brand-fence", "Skills-OL-test"); got != config {
-		t.Fatalf("relative directory unexpectedly changed permission config:\n%s", got)
 	}
 }
 

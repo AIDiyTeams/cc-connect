@@ -219,6 +219,10 @@ type appServerSession struct {
 	context               *core.ContextUsage
 	runtime               core.SessionRuntime
 	taskRuntimeEnvFile    string
+	capabilityBroker      *capabilityBroker
+	securityStartupArgs   []string
+	privateCatalogEnvFile string
+	sandboxScratchDir     string
 	nativeWebModelCatalog string
 	// modelCatalogKind records which startup catalog the process runs with (see modelCatalogFor).
 	modelCatalogKind string
@@ -276,22 +280,48 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 	// eager resume. Codex ignores config overrides when resuming a loaded
 	// thread; a second resume cannot add the shell environment after the fact.
 	var err error
-	s.taskRuntimeEnvFile, err = createTaskRuntimeEnv(workDir, permissionsProfile)
+	brokerRequired := s.permissionsProfile != ""
+	if brokerRequired {
+		s.extraEnv = core.MergeEnv(s.extraEnv, []string{"TOMAKO_CAPABILITY_BROKER_REQUIRED=1"})
+		// Outside the denied brand .codex/.tmp trees. The fixed profile grants
+		// this process access only to this one public metadata/socket directory.
+		s.taskRuntimeEnvFile, err = writeTaskRuntimeEnvInDir("", "", "/tmp")
+	} else {
+		s.taskRuntimeEnvFile, err = createTaskRuntimeEnv(workDir, permissionsProfile)
+	}
 	if err != nil {
 		cancel()
 		return nil, err
+	}
+	if brokerRequired {
+		s.capabilityBroker, err = newCapabilityBroker(s)
+		if err != nil {
+			removeTaskRuntimeEnv(s.taskRuntimeEnvFile)
+			cancel()
+			return nil, err
+		}
 	}
 
 	if len(startupRuntime) > 0 {
 		runtime := startupRuntime[0]
 		if err := s.SetSessionRuntime(runtime); err != nil {
+			s.capabilityBroker.close()
 			removeTaskRuntimeEnv(s.taskRuntimeEnvFile)
 			cancel()
 			return nil, err
 		}
 		if kind := modelCatalogFor(runtime); kind != "" {
-			s.nativeWebModelCatalog, err = writeModelCatalog(s.taskRuntimeEnvFile, runtime)
+			catalogEnv := s.taskRuntimeEnvFile
+			if brokerRequired {
+				s.privateCatalogEnvFile, err = createTaskRuntimeEnv(workDir, permissionsProfile)
+				catalogEnv = s.privateCatalogEnvFile
+			}
+			if err == nil {
+				s.nativeWebModelCatalog, err = writeModelCatalog(catalogEnv, runtime)
+			}
 			if err != nil {
+				s.capabilityBroker.close()
+				removeTaskRuntimeEnv(s.privateCatalogEnvFile)
 				removeTaskRuntimeEnv(s.taskRuntimeEnvFile)
 				cancel()
 				return nil, err
@@ -299,10 +329,28 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 			s.modelCatalogKind = kind
 		}
 	}
+	if brokerRequired {
+		scratch := s.prepareConversationScratch(time.Now())
+		if scratch == "" {
+			scratch = filepath.Join(workDir, ".tmp", "tasks", filepath.Base(filepath.Dir(s.taskRuntimeEnvFile)))
+			err = prepareConversationScratchDir(scratch, time.Now())
+		}
+		if err == nil {
+			s.securityStartupArgs, err = workspaceSecurityStartupArgs(s.permissionsProfile, workDir, scratch, filepath.Dir(s.taskRuntimeEnvFile), envValue(core.MergeEnv(os.Environ(), s.extraEnv), "SKILLS_OL_DIR"))
+		}
+		if err != nil {
+			_ = s.Close()
+			return nil, err
+		}
+		s.extraEnv = core.MergeEnv(s.extraEnv, []string{"TMPDIR=" + scratch, "PYTHONDONTWRITEBYTECODE=1"})
+		s.sandboxScratchDir = scratch
+	}
 
 	s.startupToolOutputTokens = toolOutputTokensFor(s.model, s.nativeWebModelCatalog)
 	connectStartedAt := time.Now()
 	if err := s.connect(); err != nil {
+		s.capabilityBroker.close()
+		removeTaskRuntimeEnv(s.privateCatalogEnvFile)
 		removeTaskRuntimeEnv(s.taskRuntimeEnvFile)
 		cancel()
 		return nil, err
@@ -363,6 +411,7 @@ func (s *appServerSession) startupArgs() []string {
 	if strings.TrimSpace(s.permissionsProfile) != "" {
 		args = append(args, "-c", "features.plugins=false")
 	}
+	args = append(args, s.securityStartupArgs...)
 	return args
 }
 
@@ -771,7 +820,7 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	}
 	runtime.OutputSchema = append(json.RawMessage(nil), runtime.OutputSchema...)
 	s.runtimeMu.Lock()
-	envFile, err := updateTaskRuntimeEnv(s.taskRuntimeEnvFile, runtime)
+	envFile, err := s.writeSessionRuntime(runtime)
 	if err != nil {
 		s.runtimeMu.Unlock()
 		return err
@@ -842,8 +891,9 @@ func (s *appServerSession) RefreshCapabilityAuthority(fresh core.SessionRuntime)
 	runtime.ImageCapabilityToken = fresh.ImageCapabilityToken
 	runtime.DocumentCapabilityToken = fresh.DocumentCapabilityToken
 	runtime.EmployeeCommandCapabilityToken = fresh.EmployeeCommandCapabilityToken
+	runtime.ProductUpdateCapabilityToken = fresh.ProductUpdateCapabilityToken
 	runtime.TaskAuthorityEnvelopeB64 = fresh.TaskAuthorityEnvelopeB64
-	envFile, err := updateTaskRuntimeEnv(s.taskRuntimeEnvFile, runtime)
+	envFile, err := s.writeSessionRuntime(runtime)
 	if err != nil {
 		return err
 	}
@@ -856,6 +906,15 @@ func (s *appServerSession) currentTaskRuntimeEnvFile() string {
 	s.runtimeMu.RLock()
 	defer s.runtimeMu.RUnlock()
 	return s.taskRuntimeEnvFile
+}
+
+// runtimeMu is held by the caller; the broker and the visible revision update
+// together before another request can snapshot authority.
+func (s *appServerSession) writeSessionRuntime(runtime core.SessionRuntime) (string, error) {
+	if s.capabilityBroker != nil {
+		return s.capabilityBroker.writeRuntime(runtime)
+	}
+	return updateTaskRuntimeEnv(s.taskRuntimeEnvFile, runtime)
 }
 
 func (s *appServerSession) SupportsOutputSchema() bool { return true }
@@ -2153,9 +2212,12 @@ func (s *appServerSession) Alive() bool {
 
 func (s *appServerSession) Close() error {
 	s.alive.Store(false)
+	s.capabilityBroker.close()
 	s.runtimeMu.Lock()
 	removeTaskRuntimeEnv(s.taskRuntimeEnvFile)
 	s.taskRuntimeEnvFile = ""
+	removeTaskRuntimeEnv(s.privateCatalogEnvFile)
+	s.privateCatalogEnvFile = ""
 	s.runtimeMu.Unlock()
 	s.cancel()
 
