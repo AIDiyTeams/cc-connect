@@ -51,7 +51,7 @@ func webInventoryDynamicTool() map[string]any {
 		return map[string]any{"type": "object", "additionalProperties": false, "properties": properties, "required": required}
 	}
 	return map[string]any{
-		"type": "function", "name": webInventoryToolName, "deferLoading": false,
+		"type": "function", "name": webInventoryToolName, "deferLoading": false, "supportsParallelToolCalls": true,
 		"description": "Screen up to 50 public URLs from one origin for a shallow website inventory with two HTTP workers per batch, sharing a process-wide limit of three batches (six HTTP workers), separate from the single-page browser budget. " +
 			"Returns titles, descriptions, headings and short snippets, not a full-page read or proof of content coverage. " +
 			"Use discover with explicit source kinds and allowed origins to extract bounded sitemap/navigation URL files without fetching articles. Source completion is structural, not a site-coverage verdict. " +

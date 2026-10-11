@@ -27,6 +27,36 @@ func inventoryTestSession(t *testing.T, script string) *appServerSession {
 	return s
 }
 
+func TestWebInventoryThreadRegistrationOnlyOptsBoundedReadersIntoParallelCalls(t *testing.T) {
+	s := inventoryTestSession(t, "")
+	encoded, err := json.Marshal(s.threadRequestParams())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		DynamicTools []struct {
+			Name     string `json:"name"`
+			Parallel bool   `json:"supportsParallelToolCalls"`
+		} `json:"dynamicTools"`
+	}
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatal(err)
+	}
+	opted := 0
+	for _, tool := range wire.DynamicTools {
+		expected := tool.Name == webReadToolName || tool.Name == webInventoryToolName
+		if tool.Parallel != expected {
+			t.Fatalf("unexpected parallel admission for %s: %v", tool.Name, tool.Parallel)
+		}
+		if tool.Parallel {
+			opted++
+		}
+	}
+	if opted != 2 {
+		t.Fatalf("bounded reader registrations missing: %d", opted)
+	}
+}
+
 func TestWebInventoryBoundsRemainVisibleAfterCodexSchemaProjection(t *testing.T) {
 	// Codex's typed JsonSchema preserves descriptions/properties/items but drops
 	// maxItems, length, numeric-range and pattern keywords. Exercise that wire
