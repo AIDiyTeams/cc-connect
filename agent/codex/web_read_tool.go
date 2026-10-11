@@ -28,6 +28,42 @@ const (
 // by several conversations, so reads queue process-wide.
 var webReadSlots = make(chan struct{}, 2)
 
+// Serialize whole claims so two inventory calls cannot each hold one slot and
+// wait forever for the other. Single-page reads use the same admission gate.
+var webReadAdmission = make(chan struct{}, 1)
+
+func acquireWebReadSlots(ctx context.Context, count int) (func(), error) {
+	ctx, cancel := context.WithTimeout(ctx, webReadQueueWait)
+	defer cancel()
+	select {
+	case webReadAdmission <- struct{}{}:
+		defer func() { <-webReadAdmission }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	held := 0
+	release := func() {
+		for held > 0 {
+			<-webReadSlots
+			held--
+		}
+	}
+	for held < count {
+		select {
+		case webReadSlots <- struct{}{}:
+			held++
+		case <-ctx.Done():
+			release()
+			return nil, ctx.Err()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
+}
+
 // The reader handles untrusted pages, so it receives only what Node and the
 // browser need, never the bridge's provider keys or a session's capability tokens.
 var webReadEnvKeys = map[string]bool{
@@ -59,9 +95,13 @@ func webReadDynamicTool() map[string]any {
 
 // webReadScript returns Skills-OL's reader when it is installed; until then the tool is not offered.
 func (s *appServerSession) webReadScript() string {
+	return s.webReaderScript("web-read.mjs")
+}
+
+func (s *appServerSession) webReaderScript(name string) string {
 	for _, entry := range core.MergeEnv(os.Environ(), s.extraEnv) {
 		if root, ok := strings.CutPrefix(entry, "SKILLS_OL_DIR="); ok && root != "" {
-			path := filepath.Join(root, "web-read.mjs")
+			path := filepath.Join(root, name)
 			if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
 				return path
 			}
@@ -138,14 +178,14 @@ func (s *appServerSession) readWebPage(arguments map[string]any) (string, error)
 		args = append(args, "--render=always")
 	}
 
-	select {
-	case webReadSlots <- struct{}{}:
-		defer func() { <-webReadSlots }()
-	case <-time.After(webReadQueueWait):
+	release, err := acquireWebReadSlots(s.ctx, 1)
+	if err != nil {
+		if s.ctx.Err() != nil {
+			return "", s.ctx.Err()
+		}
 		return "", fmt.Errorf("the web page reader is busy; try again shortly")
-	case <-s.ctx.Done():
-		return "", s.ctx.Err()
 	}
+	defer release()
 	ctx, cancel := context.WithTimeout(s.ctx, webReadTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "node", args...)
