@@ -520,7 +520,7 @@ func TestCapabilityBrokerRealFileHelperMultipartReceipt(t *testing.T) {
 				t.Error("identity supplied by helper")
 			}
 		}
-		data, _ = json.Marshal(map[string]any{"code": 0, "data": map[string]any{"artifactUid": "art-receipt", "url": "https://assets.tomako.ai/profit.csv", "fileName": "profit.csv", "mimeType": "text/csv", "sizeBytes": len(content), "contentSha256": fmt.Sprintf("%x", sha256.Sum256(content)), "origin": map[string]any{"source": "chat", "conversationId": "csess-current", "responseId": runtime.TaskID}}})
+		data, _ = json.Marshal(map[string]any{"code": 0, "data": map[string]any{"artifactUid": "art-receipt", "url": "/api/workspaces/" + runtime.WorkspaceID + "/products/" + runtime.BrandID + "/artifacts/files/" + strings.Repeat("a", 64), "fileName": "profit.csv", "mimeType": "text/csv", "sizeBytes": len(content), "contentSha256": fmt.Sprintf("%x", sha256.Sum256(content)), "origin": map[string]any{"source": "chat", "conversationId": "csess-current", "responseId": runtime.TaskID}}})
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(data)), Header: http.Header{}}, nil
 	})}
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
