@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -302,6 +303,13 @@ func validateBrokerRequest(input brokerRequest, body []byte, runtime core.Sessio
 	}
 	path := strings.TrimPrefix(u.Path, prefix)
 	if input.CapabilityKind == "document" {
+		if path == "/artifacts/upload" && input.Method == "POST" && u.RawQuery == "" {
+			mediaType, parameters, err := mime.ParseMediaType(input.ContentType)
+			if err != nil || mediaType != "multipart/form-data" || parameters["boundary"] == "" {
+				return deny()
+			}
+			return u, nil
+		}
 		if path == "/content-documents/agent-operations" && input.Method == "POST" && u.RawQuery == "" {
 			return u, nil
 		}

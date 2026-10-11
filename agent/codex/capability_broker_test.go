@@ -2,8 +2,10 @@ package codex
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -446,5 +448,97 @@ func TestCapabilityBrokerXSearchWithPrivateWorkerIntegration(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), "synthetic-private") || strings.Contains(w.Body.String(), server.URL) {
 		t.Fatal("trusted provider identity or credentials escaped")
+	}
+}
+
+func TestCapabilityBrokerAllowsCurrentConversationFileUpload(t *testing.T) {
+	b, runtime := brokerFixture(t)
+	b.client = &http.Client{Transport: brokerRoundTrip(func(r *http.Request) (*http.Response, error) {
+		if r.Header.Get("X-Tomako-Machine-Capability") != runtime.DocumentCapabilityToken {
+			t.Fatal("wrong authority")
+		}
+		body, _ := io.ReadAll(r.Body)
+		if !bytes.Contains(body, []byte("month,profit")) {
+			t.Fatal("file bytes lost")
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"code":0,"data":{"artifactUid":"art-file","url":"https://test.tomako.ai/file.csv"}}`)), Header: http.Header{}}, nil
+	})}
+	input := brokerInput(b)
+	input.URL = b.origin + "/api/workspaces/ws-a/products/brand-a/artifacts/upload"
+	input.ContentType = "multipart/form-data; boundary=file-boundary"
+	input.BodyBase64 = base64.StdEncoding.EncodeToString([]byte("--file-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"profit.csv\"\r\nContent-Type: text/csv\r\n\r\nmonth,profit\nJan,60\r\n--file-boundary--\r\n"))
+	if w := invokeBroker(t, b, input); w.Code != 200 {
+		t.Fatalf("current response file delivery rejected: %d", w.Code)
+	}
+	for _, change := range []func(*brokerRequest){
+		func(r *brokerRequest) { r.URL = b.origin + "/api/workspaces/ws-a/products/other/artifacts/upload" },
+		func(r *brokerRequest) { r.URL += "?taskId=other" },
+		func(r *brokerRequest) { r.URL = b.origin + "/api/workspaces/ws-a/products/brand-a/artifacts/register" },
+		func(r *brokerRequest) { r.Method = "GET" },
+		func(r *brokerRequest) { r.CapabilityKind = "image" },
+		func(r *brokerRequest) { r.ContentType = "application/json" },
+		func(r *brokerRequest) { r.Revision = "old" },
+	} {
+		denied := input
+		change(&denied)
+		if w := invokeBroker(t, b, denied); w.Code != 403 {
+			t.Fatalf("invalid file route allowed: %d", w.Code)
+		}
+	}
+}
+
+// Optional matching Skills checkout makes this a real helper -> broker -> Portal-adapter boundary test.
+func TestCapabilityBrokerRealFileHelperMultipartReceipt(t *testing.T) {
+	helper := os.Getenv("CC_FILE_UPLOAD_HELPER")
+	if helper == "" {
+		t.Skip("set CC_FILE_UPLOAD_HELPER to the matching Skills helper")
+	}
+	b, runtime := brokerFixture(t)
+	content := []byte("month,profit\nJan,60")
+	filename := filepath.Join(t.TempDir(), "profit.csv")
+	if err := os.WriteFile(filename, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	b.client = &http.Client{Transport: brokerRoundTrip(func(r *http.Request) (*http.Response, error) {
+		if r.Header.Get("X-Tomako-Machine-Capability") != runtime.DocumentCapabilityToken {
+			t.Error("wrong capability")
+		}
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Error(err)
+		}
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			return nil, err
+		}
+		defer file.Close()
+		data, _ := io.ReadAll(file)
+		if !bytes.Equal(data, content) || header.Filename != "profit.csv" || r.FormValue("type") != "text/csv" {
+			t.Error("file changed in transport")
+		}
+		for _, key := range []string{"taskId", "userId", "sourceType", "conversationId"} {
+			if r.FormValue(key) != "" {
+				t.Error("identity supplied by helper")
+			}
+		}
+		data, _ = json.Marshal(map[string]any{"code": 0, "data": map[string]any{"artifactUid": "art-receipt", "url": "https://assets.tomako.ai/profit.csv", "fileName": "profit.csv", "mimeType": "text/csv", "sizeBytes": len(content), "contentSha256": fmt.Sprintf("%x", sha256.Sum256(content)), "origin": map[string]any{"source": "chat", "conversationId": "csess-current", "responseId": runtime.TaskID}}})
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(data)), Header: http.Header{}}, nil
+	})}
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-unix-socket") != b.socket {
+			t.Error("wrong relay socket")
+		}
+		r.RequestURI = r.URL.Path
+		b.serve(w, r)
+	}))
+	defer proxy.Close()
+	program := `const {uploadFile}=await import(process.argv[2]); const data=await uploadFile({file:process.argv[3],title:"profit"}); process.stdout.write(JSON.stringify(data));`
+	cmd := exec.Command("node", "--input-type=module", "-e", program, os.Args[0], helper, filename)
+	cmd.Env = append(os.Environ(), "TOMAKO_TASK_ENV_FILE=", "DOCUMENT_CAPABILITY_TOKEN=tomako-broker:document", "TOMAKO_TASK_ID="+runtime.TaskID, "TOMAKO_WORKSPACE_ID="+runtime.WorkspaceID, "TOMAKO_BRAND_ID="+runtime.BrandID, "SKILL_RESULT_API_URL="+b.origin, "TOMAKO_CAPABILITY_SOCKET="+b.socket, "TOMAKO_CAPABILITY_REVISION="+b.revision, "TOMAKO_CAPABILITY_PROXY=1", "HTTP_PROXY="+proxy.URL)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("real helper failed: %v %s", err, output)
+	}
+	if !bytes.Contains(output, []byte(`"artifactUid":"art-receipt"`)) || bytes.Contains(output, []byte(runtime.DocumentCapabilityToken)) {
+		t.Fatal("invalid public file receipt")
 	}
 }
