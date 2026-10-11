@@ -13,47 +13,56 @@ import (
 var taskRuntimeIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$`)
 
 func updateTaskRuntimeEnv(existingPath string, runtime core.SessionRuntime) (string, error) {
+	content, err := taskRuntimeEnvContent(runtime)
+	if err != nil {
+		return existingPath, err
+	}
+	if existingPath == "" && content == "" {
+		return "", nil
+	}
+	return writeTaskRuntimeEnv(existingPath, content)
+}
+
+func taskRuntimeEnvContent(runtime core.SessionRuntime) (string, error) {
 	token := strings.TrimSpace(runtime.MachineCapabilityToken)
 	imageToken := strings.TrimSpace(runtime.ImageCapabilityToken)
 	documentToken := strings.TrimSpace(runtime.DocumentCapabilityToken)
 	employeeToken := strings.TrimSpace(runtime.EmployeeCommandCapabilityToken)
+	productToken := strings.TrimSpace(runtime.ProductUpdateCapabilityToken)
 	envelope := strings.TrimSpace(runtime.TaskAuthorityEnvelopeB64)
-	if token == "" && imageToken == "" && documentToken == "" && employeeToken == "" && envelope == "" {
-		if existingPath == "" {
-			return "", nil
-		}
-		// Keep the path already bound to the thread, but revoke prior authority.
-		return writeTaskRuntimeEnv(existingPath, "")
+	if token == "" && imageToken == "" && documentToken == "" && employeeToken == "" && productToken == "" && envelope == "" {
+		return "", nil
 	}
 	if (token == "") != (envelope == "") {
-		return existingPath, fmt.Errorf("machine capability and task authority envelope must be supplied together")
+		return "", fmt.Errorf("machine capability and task authority envelope must be supplied together")
 	}
 	if imageToken == "" {
 		imageToken = token
 	}
 	taskID := strings.TrimSpace(runtime.TaskID)
 	if !taskRuntimeIDPattern.MatchString(taskID) {
-		return existingPath, fmt.Errorf("valid task id is required for machine authority")
+		return "", fmt.Errorf("valid task id is required for machine authority")
 	}
 	for label, value := range map[string]string{
 		"machine capability":          token,
 		"image capability":            imageToken,
 		"document capability":         documentToken,
 		"employee command capability": employeeToken,
+		"product update capability":   productToken,
 		"task authority envelope":     envelope,
 	} {
 		if strings.ContainsAny(value, "\r\n\x00") {
-			return existingPath, fmt.Errorf("%s contains forbidden control characters", label)
+			return "", fmt.Errorf("%s contains forbidden control characters", label)
 		}
 	}
 
 	for _, value := range []string{runtime.WorkspaceID, runtime.BrandID} {
 		if value != "" && !taskRuntimeIDPattern.MatchString(value) {
-			return existingPath, fmt.Errorf("invalid task runtime scope")
+			return "", fmt.Errorf("invalid task runtime scope")
 		}
 	}
 	if token == "" && (runtime.WorkspaceID == "" || runtime.BrandID == "") {
-		return existingPath, fmt.Errorf("image authority requires workspace and brand scope")
+		return "", fmt.Errorf("image authority requires workspace and brand scope")
 	}
 	lines := []string{
 		"export MACHINE_CAPABILITY_TOKEN=" + shellSingleQuote(token),
@@ -71,7 +80,10 @@ func updateTaskRuntimeEnv(existingPath string, runtime core.SessionRuntime) (str
 	if documentToken != "" {
 		lines = append(lines, "export DOCUMENT_CAPABILITY_TOKEN="+shellSingleQuote(documentToken))
 	}
-	return writeTaskRuntimeEnv(existingPath, strings.Join(lines, "\n"))
+	if productToken != "" {
+		lines = append(lines, "export PRODUCT_UPDATE_CAPABILITY_TOKEN="+shellSingleQuote(productToken))
+	}
+	return strings.Join(lines, "\n"), nil
 }
 
 func writeTaskRuntimeEnv(existingPath, content string) (string, error) {

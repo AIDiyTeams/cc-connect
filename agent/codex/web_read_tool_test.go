@@ -172,3 +172,28 @@ func TestWebReadToolShowsThePageAddressInTheConversation(t *testing.T) {
 		t.Fatalf("activity=%+v", event.PublicActivity)
 	}
 }
+
+func TestWebReadReceiptUsesOnlyCurrentSessionScratch(t *testing.T) {
+	s := webReadTestSession(t, `process.stdout.write(JSON.stringify({cwd:process.cwd(), host:process.env.TOMAKO_WEB_READ_HOST_IO, scratch:process.env.TOMAKO_WEB_READ_SCRATCH_DIR}));`)
+	s.permissionsProfile = "workspace-fenced"
+	if _, err := s.readWebPage(map[string]any{"url": "https://example.com/"}); err == nil {
+		t.Fatal("fenced reader without session scratch must fail closed")
+	}
+	s.sandboxScratchDir = filepath.Join(s.workDir, ".tmp", "session-a")
+	if err := os.MkdirAll(s.sandboxScratchDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	output, err := s.readWebPage(map[string]any{"url": "https://example.com/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatal(err)
+	}
+	expected, _ := filepath.EvalSymlinks(s.sandboxScratchDir)
+	actual, _ := filepath.EvalSymlinks(got["cwd"])
+	if actual != expected || got["host"] != "1" || got["scratch"] != s.sandboxScratchDir {
+		t.Fatalf("unexpected host receipt scope: %+v", got)
+	}
+}

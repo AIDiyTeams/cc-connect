@@ -93,10 +93,10 @@ func resolveCodexHomeForConfig(explicit string) (string, error) {
 //     symlink is safe and rotated keys propagate to all per-user workspaces.
 //   - config.toml CANNOT be symlinked: Codex writes per-user [projects.*] trust
 //     entries into it on startup, which would funnel every user's trust into the
-//     shared global file. Instead, provider routing and fixed permission profiles
-//     (model_provider, model, [model_providers.*], [permissions.*], etc.) are
-//     synced from global on every
-//     StartSession — per-user trust entries are preserved. Editing the global
+//     shared global file. Provider routing is synced on every StartSession.
+//     Fenced sessions rebuild only their selected profile from the brand
+//     runtime contract; host filesystem grants are not inherited. Per-user
+//     trust entries are preserved. Editing the global
 //     config.toml's provider section thus takes effect for every user on its next
 //     session, giving a single source of truth equivalent to a symlink.
 //
@@ -112,6 +112,9 @@ func ensureCodexHomeInheritedConfig(codexHome, permissionsProfile, sharedSkillsD
 		return err
 	}
 	if filepath.Clean(globalHome) == filepath.Clean(home) {
+		if strings.TrimSpace(permissionsProfile) != "" {
+			return fmt.Errorf("codex: fenced session requires a private codex home")
+		}
 		return nil
 	}
 	if err := os.MkdirAll(home, 0o755); err != nil {
@@ -130,12 +133,15 @@ func ensureCodexHomeInheritedConfig(codexHome, permissionsProfile, sharedSkillsD
 	}
 	if readErr == nil {
 		providerCfg := extractProviderConfig(string(globalData))
-		providerCfg = addPermissionReadPath(providerCfg, permissionsProfile, sharedSkillsDir)
+		providerCfg, err = fencedInheritedPermissions(providerCfg, permissionsProfile, sharedSkillsDir)
+		if err != nil {
+			return err
+		}
 		if strings.TrimSpace(providerCfg) != "" {
 			perUserData, perr := os.ReadFile(perUserConfig)
 			switch {
 			case os.IsNotExist(perr):
-				if werr := os.WriteFile(perUserConfig, []byte(providerCfg+"\n"), 0o644); werr != nil {
+				if werr := writeFileAtomic(perUserConfig, []byte(providerCfg+"\n"), 0o600); werr != nil {
 					return fmt.Errorf("codex: write per-user config.toml: %w", werr)
 				}
 				slog.Debug("codex: created per-user config.toml with global provider config", "dst", perUserConfig)
@@ -146,7 +152,7 @@ func ensureCodexHomeInheritedConfig(codexHome, permissionsProfile, sharedSkillsD
 				// [model_providers.*]; per-user [projects.*] trust must come after
 				// to keep provider keys at the root scope.
 				merged := providerCfg + "\n\n" + strings.TrimRight(trustPart, "\n") + "\n"
-				if werr := os.WriteFile(perUserConfig, []byte(merged), 0o644); werr != nil {
+				if werr := writeFileAtomic(perUserConfig, []byte(merged), 0o600); werr != nil {
 					return fmt.Errorf("codex: sync provider config: %w", werr)
 				}
 				slog.Debug("codex: synced global provider config into per-user config.toml", "dst", perUserConfig)
@@ -178,51 +184,6 @@ func ensureCodexHomeInheritedConfig(codexHome, permissionsProfile, sharedSkillsD
 	return nil
 }
 
-// addPermissionReadPath grants the active fenced profile read-only access to the
-// environment-specific shared Skills directory. The host's global Codex config
-// may point at a production symlink, while cc-connect test intentionally selects
-// a different Skills root through SKILLS_OL_DIR. Without adding that exact root
-// to the inherited profile, Codex can discover the Skill but sandboxed tool calls
-// cannot read or execute its companion scripts.
-func addPermissionReadPath(config, permissionsProfile, sharedSkillsDir string) string {
-	profile := strings.TrimSpace(permissionsProfile)
-	dir := filepath.Clean(strings.TrimSpace(sharedSkillsDir))
-	if profile == "" || dir == "." || !filepath.IsAbs(dir) {
-		return config
-	}
-
-	header := fmt.Sprintf("[permissions.%s.filesystem]", profile)
-	permission := fmt.Sprintf("%q = %q", dir, "read")
-	lines := strings.Split(config, "\n")
-	inTargetSection := false
-	insertAt := -1
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "[") {
-			if inTargetSection {
-				insertAt = i
-				break
-			}
-			inTargetSection = trimmed == header
-			continue
-		}
-		if inTargetSection && strings.HasPrefix(trimmed, fmt.Sprintf("%q", dir)) {
-			return config
-		}
-	}
-	if inTargetSection && insertAt == -1 {
-		insertAt = len(lines)
-	}
-	if insertAt == -1 {
-		return config
-	}
-
-	lines = append(lines, "")
-	copy(lines[insertAt+1:], lines[insertAt:])
-	lines[insertAt] = permission
-	return strings.Join(lines, "\n")
-}
-
 // extractTrustOnly returns the per-user-specific parts of a codex config.toml
 // ([projects.*] trust sections and any non-shared top-level keys), stripping
 // provider routing and permissions config that is re-synced from the global
@@ -235,8 +196,8 @@ func extractTrustOnly(config string) string {
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "[") {
-			inSharedSection = strings.HasPrefix(trimmed, "[model_providers.") ||
-				strings.HasPrefix(trimmed, "[permissions.")
+			inSharedSection = trimmed == "[model_providers]" || trimmed == "[permissions]" ||
+				strings.HasPrefix(trimmed, "[model_providers.") || strings.HasPrefix(trimmed, "[permissions.")
 			if inSharedSection {
 				continue
 			}
@@ -273,8 +234,8 @@ func extractProviderConfig(config string) string {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "[") {
 			seenSection = true
-			inSharedSection = strings.HasPrefix(trimmed, "[model_providers.") ||
-				strings.HasPrefix(trimmed, "[permissions.")
+			inSharedSection = trimmed == "[model_providers]" || trimmed == "[permissions]" ||
+				strings.HasPrefix(trimmed, "[model_providers.") || strings.HasPrefix(trimmed, "[permissions.")
 		}
 		switch {
 		case inSharedSection:

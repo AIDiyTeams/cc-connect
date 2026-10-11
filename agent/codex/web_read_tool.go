@@ -235,6 +235,14 @@ func (s *appServerSession) readWebPage(arguments map[string]any) (string, error)
 	cmd := exec.CommandContext(ctx, "node", args...)
 	cmd.Dir = s.workDir
 	cmd.Env = webReadEnv()
+	if s.permissionsProfile != "" && s.sandboxScratchDir == "" {
+		return "", fmt.Errorf("web reader session scratch is unavailable")
+	}
+	if s.sandboxScratchDir != "" {
+		// The trusted session setup owns this directory; model arguments cannot select it.
+		cmd.Dir = s.sandboxScratchDir
+		cmd.Env = append(cmd.Env, "TOMAKO_WEB_READ_HOST_IO=1", "TOMAKO_WEB_READ_SCRATCH_DIR="+s.sandboxScratchDir)
+	}
 	stdout := &limitedBuffer{limit: webReadOutputLimit}
 	stderr := &limitedBuffer{limit: 4096}
 	cmd.Stdout = stdout

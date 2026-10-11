@@ -131,7 +131,7 @@ func TestResumedThreadToolsReceiveRotatingAuthorityWithoutReResume(t *testing.T)
 	testResumedThreadAuthority(t, "")
 }
 
-func TestFencedResumedThreadAuthorityStaysInReadOnlyBrandDirectory(t *testing.T) {
+func TestFencedResumedThreadUsesBrokerHandlesWithoutReResume(t *testing.T) {
 	testResumedThreadAuthority(t, "tomako-brand-fence")
 }
 
@@ -169,6 +169,11 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
   [Console]::Out.WriteLine('{"id":' + $request.id + ',"result":' + $result + '}')
 }
 `
+	// The fenced child deliberately drops arbitrary supervisor environment. The
+	// trusted fake executable owns its output path, just as the real executable
+	// owns its protocol implementation.
+	shellScript = strings.Replace(shellScript, "#!/bin/sh\n", "#!/bin/sh\nCC_TEST_RUNTIME_REQUESTS="+shellSingleQuote(requestsFile)+"\n", 1)
+	powershellScript = "$env:CC_TEST_RUNTIME_REQUESTS = '" + strings.ReplaceAll(requestsFile, "'", "''") + "'\n" + powershellScript
 	writeFakeCodexScript(t, workDir, shellScript, powershellScript)
 	t.Setenv("PATH", workDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CC_TEST_RUNTIME_REQUESTS", requestsFile)
@@ -180,6 +185,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		extraEnv = append(extraEnv, "SKILL_RESULT_API_URL=https://test.tomako.ai")
 	}
 	s, err := newAppServerSession(context.Background(), "", workDir, "test-model", "low", "", permissionsProfile, "thread-existing", "", "", extraEnv, "")
 	if err != nil {
@@ -224,8 +230,8 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
 	if err != nil || string(processEnv) != boundPath {
 		t.Fatal("app-server child tools do not inherit the same authority path as shell tools")
 	}
-	if permissionsProfile != "" && filepath.Dir(filepath.Dir(boundPath)) != filepath.Join(workDir, ".codex") {
-		t.Fatal("authority file is outside the brand's read-only .codex mount and is invisible inside the filesystem fence")
+	if permissionsProfile != "" && (s.capabilityBroker == nil || strings.HasPrefix(boundPath, workDir+string(filepath.Separator))) {
+		t.Fatal("fenced session must expose only its isolated broker runtime")
 	}
 	assertBoundContents := func(expected string) {
 		body, err := os.ReadFile(boundPath)
@@ -233,8 +239,12 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
 			t.Fatal(err)
 		}
 		if expected == "" {
-			if len(body) != 0 {
+			if len(body) != 0 && (s.capabilityBroker == nil || strings.Contains(string(body), "CAPABILITY_TOKEN=")) {
 				t.Fatal("unscoped turn retained prior authority")
+			}
+		} else if permissionsProfile != "" {
+			if strings.Contains(string(body), expected) || !strings.Contains(string(body), "export MACHINE_CAPABILITY_TOKEN='tomako-broker:machine'") {
+				t.Fatal("fenced authority must contain a handle, never credential bytes")
 			}
 		} else if !strings.Contains(string(body), "export MACHINE_CAPABILITY_TOKEN='"+expected+"'") {
 			t.Fatal("tool's original shell environment cannot resolve current turn authority")

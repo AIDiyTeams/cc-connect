@@ -235,6 +235,7 @@ type SessionRuntime struct {
 	ImageCapabilityToken           string `json:"image_capability_token,omitempty"`
 	DocumentCapabilityToken        string `json:"document_capability_token,omitempty"`
 	EmployeeCommandCapabilityToken string `json:"employee_command_capability_token,omitempty"`
+	ProductUpdateCapabilityToken   string `json:"product_update_capability_token,omitempty"`
 	TaskAuthorityEnvelopeB64       string `json:"task_authority_envelope_b64,omitempty"`
 	// OutputSchema is supplied by the authenticated control plane, never parsed
 	// from user prose. A session must explicitly support native constrained output.

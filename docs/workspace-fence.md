@@ -57,12 +57,12 @@ description = "Tomako brand workspace fence"
 
 [permissions.tomako-brand-fence.filesystem]
 ":minimal" = "read"
-"/home/ubuntu/Skills-OL" = "read"
 
 [permissions.tomako-brand-fence.filesystem.":workspace_roots"]
 "." = "write"
-".codex" = "read"
+".codex" = "none"
 ".codex/memories" = "write"
+".tmp" = "none"
 
 [permissions.tomako-brand-fence.network]
 enabled = true
@@ -71,12 +71,24 @@ enabled = true
 `:minimal` exposes the system binaries and libraries required to run tools.
 The current brand workspace is the only customer-data root mounted into the
 sandbox. The shared Skill library is mounted read-only. A narrower
-`.codex/memories` write rule overrides the `.codex` read-only rule without
-making config, auth, and session state writable.
+`.codex/memories` write rule reopens only brand memory under the unreadable
+`.codex` tree. Each process receives only its conversation scratch and current
+capability broker handle through startup overrides.
 
-cc-connect copies the host-managed provider and `[permissions.*]` sections into
-each brand-specific `CODEX_HOME` on session start. Per-brand `[projects.*]`
-trust entries remain private.
+cc-connect copies host-managed provider routing into a private brand-specific
+`CODEX_HOME` on session start. For a fenced session, the selected named profile
+must exist, but its filesystem rules are rebuilt: `:minimal`, brand workspace,
+private-state exclusions, and only the active `SKILLS_OL_DIR`. Historical absolute
+paths, profile inheritance, extra workspace roots, and socket/domain exceptions
+are not copied. The host profile's `network.enabled` value remains authoritative;
+startup overrides register the current session's managed proxy. Per-brand
+`[projects.*]` trust entries remain private, and config replacement is atomic.
+
+This requires the matching Codex runtime fixes: readonly child mounts under a
+hidden parent, exact Linux UDS relay, and implicit read access to the runtime's
+trusted executable files (including resolved arg0 symlink targets). Do not grant
+an entire installation directory to compensate for a missing runtime grant.
+Neither machine paths nor manual host config edits are part of this contract.
 
 Configure the project in cc-connect:
 

@@ -11,12 +11,16 @@ import (
 // codexDefaultBaseInstructions is the built-in base prompt that Codex CLI
 // 0.153.4 selects for the generic (non GPT-5.x) model family. It was captured
 // from a Test thread's session_meta so the override below changes only the
-// user-communication guidance and leaves every tool, sandbox and planning rule
+// product identity and user-communication guidance, leaving tool, sandbox and planning rules
 // exactly as Codex ships it. Refresh the file when the bridge host upgrades
 // Codex; the unit test pins its checksum so a refresh is always deliberate.
 //
 //go:embed assets/codex-default-base-instructions.md
 var codexDefaultBaseInstructions string
+
+const codexNativeIdentity = "You are a coding agent running in the Codex CLI, a terminal-based coding assistant. Codex CLI is an open source project led by OpenAI. You are expected to be precise, safe, and helpful."
+const codexNativeIdentityNote = "Within this context, Codex refers to the open-source agentic coding interface (not the old Codex language model built by OpenAI)."
+const tomakoProductIdentity = "You are Tomako, an AI assistant helping users complete authorized business tasks. Be precise, safe, and helpful."
 
 // publicConversationSection replaces Codex's "Preamble messages" and "Sharing
 // progress updates" guidance for application-managed conversations. Those
@@ -142,6 +146,14 @@ func publicConversationBaseInstructions() (string, error) {
 }
 
 func composePublicConversationBase(base, conversation, finalAnswer, validation string) (string, error) {
+	if !strings.HasPrefix(base, codexNativeIdentity+"\n\n") ||
+		strings.Count(base, codexNativeIdentity) != 1 || strings.Count(base, codexNativeIdentityNote) != 1 {
+		return "", fmt.Errorf("codex base instructions: native identity must match the pinned template")
+	}
+	// The application owns its public identity. Provider attribution in the
+	// upstream CLI introduction is not part of Tomako's capability contract.
+	base = strings.Replace(base, codexNativeIdentity, tomakoProductIdentity, 1)
+	base = strings.Replace(base, codexNativeIdentityNote+"\n\n", "", 1)
 	out, err := replaceBetweenMarkers(base, preambleSectionStart, preambleSectionEnd,
 		strings.TrimSpace(conversation)+"\n\n")
 	if err != nil {

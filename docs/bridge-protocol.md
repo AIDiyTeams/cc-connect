@@ -53,7 +53,9 @@ The Bridge Protocol allows **external platform adapters** written in any program
 
 Task authority belongs in the authenticated `runtime` fields
 `machine_capability_token`, `image_capability_token`, `task_authority_envelope_b64`
-and `task_id`. It is never derived from user text. Exact matching legacy markers
+and `task_id`; scoped document, employee and product updates use
+`document_capability_token`, `employee_command_capability_token` and
+`product_update_capability_token`. It is never derived from user text. Exact matching legacy markers
 at the beginning of a prompt are removed before Skill routing. Sessions that
 implement `ToolAuthoritySession` pass authority to tools outside model prompts;
 other adapters retain the legacy marker fallback after routing.
@@ -63,6 +65,28 @@ before their first thread start/resume. Its path stays fixed; each turn atomical
 replaces the contents, and an unscoped turn clears old credentials. Closing the
 session removes the file. Re-resuming an already loaded Codex thread cannot add
 shell config, so delaying this binding until after history recovery is invalid.
+
+Fenced Tomako app-server sessions keep credential bytes in the bridge supervisor.
+Their runtime file contains only scope, a rotating task generation and
+`tomako-broker:<kind>` handles. Handles do not authenticate public requests.
+The process-specific managed network proxy relays the exact registered Unix
+socket; the sandbox cannot connect directly to localhost/private networks or a
+sibling session's socket. The bridge admits declared platform operations at the
+configured Portal origin, adds current credentials and a fresh nonce, and
+retains Portal as the authority for business ownership and permissions. Unknown
+operations, expired generations, redirects and raw upstream failures fail closed.
+
+The file fence hides the brand's runtime/config/history and sibling scratch
+directories while preserving shared brand memory, current conversation scratch,
+public Skill dependencies and user outputs. Native image reference staging
+enforces the same private paths with descriptor-relative no-symlink opens.
+X search and disclaimer generation run the existing fixed implementations in a
+trusted process, so their provider credentials are not inherited by shell tools.
+
+This contract requires the corresponding Codex Linux exact Unix-socket relay
+and nested read-only mount fix, plus the Skills capability transport. Deploy and
+verify those dependencies before the bridge. A legacy unfenced generic adapter
+does not provide this isolation guarantee and is not a Tomako deployment path.
 
 ```
 ┌──────────────────────────────────────────────────────┐
