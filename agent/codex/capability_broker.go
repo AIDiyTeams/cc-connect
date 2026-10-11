@@ -254,6 +254,25 @@ var brokerImageRoute = regexp.MustCompile(`^/images/(generate|reference-upload|b
 var brokerBacklinkRoute = regexp.MustCompile(`^/backlinks(?:/template|/[A-Za-z0-9_:-]+|/tasks(?:/[A-Za-z0-9_:-]+(?:/events|/operations)?)?)?$`)
 var brokerExternalResultRoute = regexp.MustCompile(`^/external-data/results/[a-f0-9]{64}$`)
 
+// Portal names every work plan "wp-" + a lowercase UUID; nothing else is a plan.
+var brokerCmoPlanRoute = regexp.MustCompile(`^/cmo/handoffs/wp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(/messages)?$`)
+
+// brokerCmoRoute admits the CMO coordination operations Portal documents for the
+// turn's cmo.coordinate capability. Portal still owns roster, authorization,
+// active-turn and idempotency checks; this only fixes each operation's shape.
+func brokerCmoRoute(method, path string) bool {
+	switch path {
+	case "/cmo/reception":
+		return method == "GET" || method == "POST"
+	case "/cmo/context":
+		return method == "GET"
+	case "/cmo/handoffs":
+		return method == "POST"
+	}
+	match := brokerCmoPlanRoute.FindStringSubmatch(path)
+	return match != nil && (match[1] == "" && method == "GET" || match[1] == "/messages" && method == "POST")
+}
+
 // The registry admits existing, scoped product capabilities only. It does not
 // classify natural language or replace Portal's identity/resource authorization.
 func validateBrokerRequest(input brokerRequest, body []byte, runtime core.SessionRuntime, origin string) (*url.URL, error) {
@@ -341,7 +360,11 @@ func validateBrokerRequest(input brokerRequest, body []byte, runtime core.Sessio
 		if path == "/agent-update" && input.Method == "PATCH" {
 			return u, nil
 		}
-		if (path == "/cmo/reception" || path == "/blog-seo-skill-reads") && input.Method == "POST" {
+		// Machine CMO calls take their conversation from the token, never a query.
+		if brokerCmoRoute(input.Method, path) && u.RawQuery == "" {
+			return u, nil
+		}
+		if path == "/blog-seo-skill-reads" && input.Method == "POST" {
 			return u, nil
 		}
 		if path == "/visual-assets/video-upload" && input.Method == "POST" {
