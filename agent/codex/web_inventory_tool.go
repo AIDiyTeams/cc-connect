@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/url"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -17,7 +19,7 @@ const webInventoryToolName = "tomako_read_web_inventory"
 func webInventoryDynamicTool() map[string]any {
 	filePage := func(receipt bool) map[string]any {
 		properties := map[string]any{
-			"path":   map[string]any{"type": "string", "minLength": 1, "maxLength": 4096, "description": "Existing task-local .tmp JSON file. Real-path containment and file size are validated by the reader."},
+			"path":   map[string]any{"type": "string", "minLength": 1, "maxLength": 4096, "description": "Existing current-session scratch JSON file. The host validates file scope and size."},
 			"offset": map[string]any{"type": "integer", "minimum": 0, "description": "Zero-based offset; default 0."},
 			"limit":  map[string]any{"type": "integer", "minimum": 1, "maximum": 50, "description": "Maximum entries; default 50."},
 		}
@@ -251,6 +253,9 @@ func (s *appServerSession) readWebInventory(arguments map[string]any) (string, e
 	if err != nil {
 		return "", err
 	}
+	if s.permissionsProfile != "" && s.sandboxScratchDir == "" {
+		return "", fmt.Errorf("web inventory requires the session's authorized scratch directory")
+	}
 	script := s.webReaderScript("web-inventory.mjs")
 	if script == "" {
 		return "", fmt.Errorf("web inventory is not installed for this conversation")
@@ -269,6 +274,13 @@ func (s *appServerSession) readWebInventory(arguments map[string]any) (string, e
 	cmd.Cancel = func() error { return forceKillCmd(cmd) }
 	cmd.WaitDelay = time.Second
 	cmd.Dir, cmd.Env, cmd.Stdin = s.workDir, webReadEnv(), bytes.NewReader(input)
+	if s.sandboxScratchDir != "" {
+		closeFiles, err := s.prepareInventoryFiles(cmd, arguments)
+		if err != nil {
+			return "", err
+		}
+		defer closeFiles()
+	}
 	stdout, stderr := &limitedBuffer{limit: maxBytes + 1}, &limitedBuffer{limit: 4096}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	if err := cmd.Run(); err != nil {
@@ -286,4 +298,49 @@ func (s *appServerSession) readWebInventory(arguments map[string]any) (string, e
 		return "", fmt.Errorf("web inventory returned invalid or oversized JSON; do not treat it as evidence")
 	}
 	return string(output), nil
+}
+
+// The server owns scratchDir and its ancestors. Input descriptors pin every
+// traversed component. The child starts in scratchDir, so its cwd pins the
+// authorized directory for exclusive, direct-child receipt creation.
+func (s *appServerSession) prepareInventoryFiles(cmd *exec.Cmd, arguments map[string]any) (func(), error) {
+	cleanup := func() {
+		for _, file := range cmd.ExtraFiles {
+			_ = file.Close()
+		}
+	}
+	cmd.Dir = s.sandboxScratchDir
+	cmd.Env = append(cmd.Env, "TOMAKO_WEB_INVENTORY_HOST_IO=1",
+		"TOMAKO_WEB_INVENTORY_SCRATCH_DIR="+s.sandboxScratchDir)
+	for _, mode := range []string{"sourceFile", "receipt"} {
+		page, present := arguments[mode].(map[string]any)
+		if !present {
+			continue
+		}
+		path := page["path"].(string)
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(s.workDir, path)
+		}
+		relative, err := filepath.Rel(s.sandboxScratchDir, path)
+		if err != nil || !filepath.IsLocal(relative) || relative == "." {
+			return nil, fmt.Errorf("web inventory input must be inside this session's scratch directory")
+		}
+		file, err := openImageWithoutSymlinks(s.sandboxScratchDir, relative)
+		if err != nil {
+			return nil, fmt.Errorf("web inventory input file is unavailable")
+		}
+		cmd.ExtraFiles = append(cmd.ExtraFiles, file)
+		info, err := file.Stat()
+		maxBytes := int64(1024 * 1024)
+		if mode == "receipt" {
+			maxBytes = 32 * 1024 * 1024
+		}
+		if err != nil || !info.Mode().IsRegular() || info.Size() > maxBytes {
+			cleanup()
+			return nil, fmt.Errorf("web inventory input must be a bounded regular file")
+		}
+		cmd.Env = append(cmd.Env, "TOMAKO_WEB_INVENTORY_INPUT_FD="+strconv.Itoa(2+len(cmd.ExtraFiles)),
+			"TOMAKO_WEB_INVENTORY_INPUT_PATH="+filepath.Join(s.sandboxScratchDir, relative))
+	}
+	return cleanup, nil
 }

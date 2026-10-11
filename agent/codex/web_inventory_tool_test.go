@@ -2,7 +2,9 @@ package codex
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -320,5 +322,93 @@ func TestWebInventoryDiscoveryKeepsSharedNetworkBudget(t *testing.T) {
 	_, err = s.readWebInventory(map[string]any{"discover": map[string]any{"sources": []any{map[string]any{"kind": "SITEMAP", "url": "https://public.example/sitemap.xml"}}, "allowedOrigins": []any{"https://public.example"}}})
 	if err == nil || !strings.Contains(err.Error(), "shared reader budget") {
 		t.Fatalf("discovery bypassed shared budget: %v", err)
+	}
+}
+
+func TestWebInventoryFencedMissingScratchFailsClosed(t *testing.T) {
+	s := inventoryTestSession(t, `import fs from 'node:fs';fs.writeFileSync('started','yes');process.stdout.write('{}');`)
+	s.permissionsProfile = "tomako-brand-fence"
+	if _, err := s.readWebInventory(map[string]any{"urls": []any{"https://example.com"}}); err == nil {
+		t.Fatal("fenced inventory started without an authorized scratch directory")
+	}
+	if _, err := os.Stat(filepath.Join(s.workDir, "started")); !os.IsNotExist(err) {
+		t.Fatal("reader process started without an authorized scratch directory")
+	}
+}
+
+func TestWebInventoryFencedInstalledReaderIntegration(t *testing.T) {
+	script := os.Getenv("CC_WEB_INVENTORY_SCRIPT")
+	if script == "" {
+		t.Skip("set CC_WEB_INVENTORY_SCRIPT to test the installed Skills reader")
+	}
+	s := inventoryTestSession(t, "")
+	s.extraEnv = []string{"SKILLS_OL_DIR=" + filepath.Dir(script)}
+	s.permissionsProfile = "tomako-brand-fence"
+	s.sandboxScratchDir = filepath.Join(s.workDir, ".tmp", "tasks", "own")
+	sibling := filepath.Join(s.workDir, ".tmp", "tasks", "sibling")
+	content := []byte(`{"version":1,"shallow":true,"origin":"https://example.com","urls":["https://example.com/synthetic"],"rows":[{"index":0,"url":"https://example.com/synthetic","status":"ok","title":"Synthetic receipt"}],"remaining":[]}`)
+	for _, dir := range []string{s.sandboxScratchDir, sibling} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "receipt.json"), content, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	input := func(path string) map[string]any {
+		return map[string]any{"receipt": map[string]any{"path": path, "sha256": fmt.Sprintf("%x", sha256.Sum256(content))}}
+	}
+	if _, err := s.readWebInventory(input(filepath.Join(s.sandboxScratchDir, "receipt.json"))); err != nil {
+		t.Fatalf("same-session receipt was rejected: %v", err)
+	}
+	if _, err := s.readWebInventory(input(filepath.Join(sibling, "receipt.json"))); err == nil {
+		t.Fatal("trusted reader returned another session's receipt")
+	}
+	alias := filepath.Join(s.sandboxScratchDir, "sibling-alias.json")
+	if err := os.Symlink(filepath.Join(sibling, "receipt.json"), alias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.readWebInventory(input(alias)); err == nil {
+		t.Fatal("trusted reader followed a sibling receipt alias")
+	}
+}
+
+func TestWebInventoryFencedReaderUsesAuthorizedWorkingDirectoryAndInputDescriptor(t *testing.T) {
+	t.Setenv("TOMAKO_WEB_INVENTORY_HOST_IO", "untrusted-parent")
+	s := inventoryTestSession(t, `import fs from 'node:fs';
+ const body=fs.readFileSync(Number(process.env.TOMAKO_WEB_INVENTORY_INPUT_FD),'utf8');
+ fs.writeFileSync('receipt.json',body,{flag:'wx',mode:0o600});
+ process.stdout.write(JSON.stringify({host:process.env.TOMAKO_WEB_INVENTORY_HOST_IO,source:JSON.parse(body),cwd:fs.realpathSync(process.cwd())}));`)
+	s.permissionsProfile = "tomako-brand-fence"
+	s.sandboxScratchDir = filepath.Join(s.workDir, ".tmp", "tasks", "own")
+	if err := os.MkdirAll(s.sandboxScratchDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(s.sandboxScratchDir, "urls.json")
+	body := `["https://example.com/one"]`
+	if err := os.WriteFile(source, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := s.readWebInventory(map[string]any{"sourceFile": map[string]any{"path": source}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Host, Cwd string
+		Source    []string
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	actual, _ := filepath.EvalSymlinks(s.sandboxScratchDir)
+	if result.Host != "1" || result.Cwd != actual || len(result.Source) != 1 {
+		t.Fatalf("incorrect scoped reader context: %s", out)
+	}
+	data, err := os.ReadFile(filepath.Join(s.sandboxScratchDir, "receipt.json"))
+	if err != nil || string(data) != body {
+		t.Fatalf("receipt roundtrip: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.workDir, "receipt.json")); !os.IsNotExist(err) {
+		t.Fatal("receipt written outside session directory")
 	}
 }
