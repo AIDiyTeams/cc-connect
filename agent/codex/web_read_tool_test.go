@@ -111,6 +111,49 @@ func TestWebReadToolReportsAReaderFailureInsteadOfAnEmptyPage(t *testing.T) {
 	}
 }
 
+func TestWebReadToolExactRangeAndOutlineArguments(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not installed")
+	}
+	s := webReadTestSession(t, `process.stdout.write(JSON.stringify(process.argv.slice(2)));`)
+	for _, tc := range []struct {
+		args map[string]any
+		want []string
+	}{
+		{map[string]any{"url": "https://example.com/", "start": float64(11997), "endExclusive": float64(11998)}, []string{"--end-exclusive=11998", "--start=11997"}},
+		{map[string]any{"url": "https://example.com/", "mode": "outline", "outlineOffset": float64(40), "outlineLimit": float64(10)}, []string{"--mode=outline", "--outline-offset=40", "--outline-limit=10"}},
+	} {
+		output, err := s.readWebPage(tc.args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, arg := range tc.want {
+			if !strings.Contains(output, arg) {
+				t.Fatalf("missing %s: %s", arg, output)
+			}
+		}
+	}
+	for _, args := range []map[string]any{
+		{"start": float64(5), "endExclusive": float64(5)}, {"endExclusive": float64(24001)},
+		{"endExclusive": "3"}, {"start": float64(-1), "endExclusive": float64(1)},
+		{"mode": "outline", "start": float64(0)}, {"mode": "outline", "endExclusive": float64(2)},
+		{"mode": "outline", "outlineLimit": float64(51)}, {"mode": "outline", "outlineOffset": float64(-1)},
+		{"outlineLimit": float64(1)}, {"mode": "summary"},
+	} {
+		args["url"] = "https://example.com/"
+		if _, err := s.readWebPage(args); err == nil {
+			t.Fatalf("accepted invalid range/outline args: %v", args)
+		}
+	}
+	// Descriptions survive Codex's typed schema projection even when numeric constraints do not.
+	schema := webReadDynamicTool()["inputSchema"].(map[string]any)["properties"].(map[string]any)
+	for field, bound := range map[string]string{"endExclusive": "24000", "outlineLimit": "50", "outlineOffset": "nonnegative"} {
+		if !strings.Contains(schema[field].(map[string]any)["description"].(string), bound) {
+			t.Fatalf("missing visible bound %s", field)
+		}
+	}
+}
+
 func TestWebReadToolShowsThePageAddressInTheConversation(t *testing.T) {
 	s := webReadTestSession(t, "")
 	s.handleItemStarted(map[string]any{"type": "dynamicToolCall", "id": "item-1", "tool": webReadToolName,

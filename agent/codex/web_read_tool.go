@@ -78,14 +78,18 @@ func webReadDynamicTool() map[string]any {
 		"deferLoading": false,
 		"description": "Read one public web page and get its readable text, final URL, title and links, with a status that says whether the page was actually read. " +
 			"Use it to check facts on the source itself, such as official pricing, documentation and announcements, instead of fetching pages with shell commands. " +
-			"Long pages come in parts: call again with start to continue. Any status other than ok means the page was not read, so facts from it remain unverified. " +
+			"Long pages come in parts: use the returned nextStart, never estimate fixed offsets. Use mode=outline for a bounded heading directory (not a body read), then choose exact [start,endExclusive) UTF-16 ranges of 1 to 24000 characters. Results include source metadata and a task-local hashed receipt. Any status other than ok means the page was not read, so facts from it remain unverified. " +
 			"Pages are fetched directly and rendered in a browser when they look script-built; set render to true when the text still looks incomplete, for example missing prices or table values.",
 		"inputSchema": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"url":    map[string]any{"type": "string", "format": "uri", "description": "Absolute http(s) URL of a public page."},
-				"start":  map[string]any{"type": "integer", "minimum": 0, "description": "Character offset given by a previous result to continue a long page; omit to read from the beginning."},
-				"render": map[string]any{"type": "boolean", "description": "Load the page in a browser even when the fetched HTML looks complete."},
+				"url":           map[string]any{"type": "string", "format": "uri", "description": "Absolute http(s) URL of a public page."},
+				"start":         map[string]any{"type": "integer", "minimum": 0, "description": "Character offset given by a previous result to continue a long page; omit to read from the beginning."},
+				"render":        map[string]any{"type": "boolean", "description": "Load the page in a browser even when the fetched HTML looks complete."},
+				"mode":          map[string]any{"type": "string", "enum": []string{"body", "outline"}, "description": "body (default) reads text; outline only lists actual body heading locations and is not body evidence."},
+				"endExclusive":  map[string]any{"type": "integer", "description": "Body only: exclusive end offset, greater than start by 1 to 24000 UTF-16 code units. Reads the exact range, including tiny missing spans, without line-boundary adjustment."},
+				"outlineOffset": map[string]any{"type": "integer", "description": "Outline only: nonnegative heading offset from outlinePage.nextOffset, default 0."},
+				"outlineLimit":  map[string]any{"type": "integer", "description": "Outline only: 1 to 50 headings, default 40. Follow outlinePage.nextOffset until null when needed."},
 			},
 			"required":             []string{"url"},
 			"additionalProperties": false,
@@ -171,6 +175,46 @@ func (s *appServerSession) readWebPage(arguments map[string]any) (string, error)
 		return "", fmt.Errorf("web page reading is not installed for this conversation")
 	}
 	args := []string{script, parsed.String(), "--format=agent"}
+	mode := "body"
+	if value, exists := arguments["mode"]; exists {
+		mode, _ = value.(string)
+		if mode != "body" && mode != "outline" {
+			return "", fmt.Errorf("mode must be body or outline")
+		}
+		args = append(args, "--mode="+mode)
+	}
+	if endValue, exists := arguments["endExclusive"]; exists {
+		end, valid := nonNegativeInt(endValue)
+		start := 0
+		if value, exists := arguments["start"]; exists {
+			var ok bool
+			start, ok = nonNegativeInt(value)
+			if !ok {
+				return "", fmt.Errorf("exact range start must be a nonnegative integer")
+			}
+		}
+		if mode != "body" || !valid || end <= start || end-start > 24000 {
+			return "", fmt.Errorf("body range must contain 1 to 24000 UTF-16 code units")
+		}
+		args = append(args, fmt.Sprintf("--end-exclusive=%d", end))
+	}
+	if mode == "outline" {
+		if _, exists := arguments["start"]; exists {
+			return "", fmt.Errorf("outline cannot request a body start")
+		}
+	}
+	for _, field := range []struct {
+		key, flag string
+		max       int
+	}{{"outlineOffset", "outline-offset", math.MaxInt32}, {"outlineLimit", "outline-limit", 50}} {
+		if value, exists := arguments[field.key]; exists {
+			n, ok := nonNegativeInt(value)
+			if mode != "outline" || !ok || n > field.max || (field.key == "outlineLimit" && n == 0) {
+				return "", fmt.Errorf("invalid %s: outline offset must be nonnegative, limit 1 to 50", field.key)
+			}
+			args = append(args, fmt.Sprintf("--%s=%d", field.flag, n))
+		}
+	}
 	if start, ok := nonNegativeInt(arguments["start"]); ok && start > 0 {
 		args = append(args, fmt.Sprintf("--start=%d", start))
 	}

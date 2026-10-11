@@ -25,6 +25,55 @@ func inventoryTestSession(t *testing.T, script string) *appServerSession {
 	return s
 }
 
+func TestWebInventoryBoundsRemainVisibleAfterCodexSchemaProjection(t *testing.T) {
+	// Codex's typed JsonSchema preserves descriptions/properties/items but drops
+	// maxItems, length, numeric-range and pattern keywords. Exercise that wire
+	// projection so a hard-rejected request is not advertised without its bounds.
+	type visibleSchema struct {
+		Description string                     `json:"description"`
+		Properties  map[string]json.RawMessage `json:"properties"`
+		Items       json.RawMessage            `json:"items"`
+	}
+	encoded, err := json.Marshal(webInventoryDynamicTool()["inputSchema"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, required := range map[string]string{
+		"urls":                          "1 to 50",
+		"urls.items":                    "2048 bytes",
+		"discover.sources":              "1 to 8",
+		"discover.sources.items.url":    "2048 bytes",
+		"discover.allowedOrigins":       "1 to 4",
+		"discover.allowedOrigins.items": "512 bytes",
+		"sourceFile.path":               "4096 bytes",
+		"sourceFile.offset":             "nonnegative",
+		"sourceFile.limit":              "1 to 50",
+		"receipt.sha256":                "64 hexadecimal",
+	} {
+		t.Run(path, func(t *testing.T) {
+			raw := json.RawMessage(encoded)
+			for _, part := range strings.Split(path, ".") {
+				var node visibleSchema
+				if err := json.Unmarshal(raw, &node); err != nil {
+					t.Fatal(err)
+				}
+				if part == "items" {
+					raw = node.Items
+				} else {
+					raw = node.Properties[part]
+				}
+			}
+			var leaf visibleSchema
+			if err := json.Unmarshal(raw, &leaf); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(leaf.Description, required) {
+				t.Fatalf("model-visible description %q lost required bound %q", leaf.Description, required)
+			}
+		})
+	}
+}
+
 func TestWebInventoryToolUsesTheConversationBoundaryAndInstalledScript(t *testing.T) {
 	s := inventoryTestSession(t, "")
 	offered := func() bool {

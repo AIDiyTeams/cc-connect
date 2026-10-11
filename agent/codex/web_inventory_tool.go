@@ -17,13 +17,13 @@ const webInventoryToolName = "tomako_read_web_inventory"
 func webInventoryDynamicTool() map[string]any {
 	filePage := func(receipt bool) map[string]any {
 		properties := map[string]any{
-			"path":   map[string]any{"type": "string", "minLength": 1, "maxLength": 4096, "description": "Existing task-local .tmp JSON file. Real-path containment and file size are validated by the reader."},
-			"offset": map[string]any{"type": "integer", "minimum": 0, "description": "Zero-based offset; default 0."},
-			"limit":  map[string]any{"type": "integer", "minimum": 1, "maximum": 50, "description": "Maximum entries; default 50."},
+			"path":   map[string]any{"type": "string", "minLength": 1, "maxLength": 4096, "description": "Nonempty task-local .tmp JSON file path, at most 4096 bytes. Real-path containment and file size are validated by the reader."},
+			"offset": map[string]any{"type": "integer", "minimum": 0, "description": "Zero-based nonnegative integer offset; default 0."},
+			"limit":  map[string]any{"type": "integer", "minimum": 1, "maximum": 50, "description": "Integer from 1 to 50 entries; default 50."},
 		}
 		required := []string{"path"}
 		if receipt {
-			properties["sha256"] = map[string]any{"type": "string", "pattern": "^[a-fA-F0-9]{64}$", "description": "Exact SHA-256 returned with the inventory receipt."}
+			properties["sha256"] = map[string]any{"type": "string", "pattern": "^[a-fA-F0-9]{64}$", "description": "Exact SHA-256 returned with the inventory receipt: 64 hexadecimal characters."}
 			required = append(required, "sha256")
 		}
 		return map[string]any{"type": "object", "additionalProperties": false, "properties": properties, "required": required}
@@ -41,16 +41,16 @@ func webInventoryDynamicTool() map[string]any {
 			"oneOf": []map[string]any{{"required": []string{"urls"}}, {"required": []string{"sourceFile"}}, {"required": []string{"receipt"}}, {"required": []string{"discover"}}},
 			"properties": map[string]any{
 				"urls": map[string]any{"type": "array", "minItems": 1, "maxItems": 50,
-					"items":       map[string]any{"type": "string", "format": "uri", "maxLength": 2048},
-					"description": "Public http(s) URLs from the same origin. Input indexes are preserved in rows and remaining."},
+					"items":       map[string]any{"type": "string", "format": "uri", "maxLength": 2048, "description": "Public URL, at most 2048 bytes."},
+					"description": "Supply 1 to 50 public http(s) URLs from the same origin. Input indexes are preserved in rows and remaining."},
 				"sourceFile": filePage(false),
 				"receipt":    filePage(true),
 				"discover": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"sources", "allowedOrigins"}, "properties": map[string]any{
-					"allowedOrigins": map[string]any{"type": "array", "minItems": 1, "maxItems": 4, "items": map[string]any{"type": "string", "maxLength": 512}, "description": "Explicit public HTTP(S) origins. No paths, credentials or nonstandard ports."},
+					"allowedOrigins": map[string]any{"type": "array", "minItems": 1, "maxItems": 4, "items": map[string]any{"type": "string", "maxLength": 512, "description": "Public origin, at most 512 bytes."}, "description": "Supply 1 to 4 explicit public HTTP(S) origins. No paths, credentials or nonstandard ports."},
 					"sources": map[string]any{"type": "array", "minItems": 1, "maxItems": 8, "items": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"kind", "url"}, "properties": map[string]any{
 						"kind": map[string]any{"type": "string", "enum": []string{"SITEMAP", "CONTENT_DIRECTORY", "SITE_NAVIGATION"}},
-						"url":  map[string]any{"type": "string", "maxLength": 2048},
-					}}, "description": "Fetch at most 12 source documents, depth 3, two shared workers. Only sitemap indexes and rel=next are followed; other links need Agent selection."},
+						"url":  map[string]any{"type": "string", "maxLength": 2048, "description": "Public source URL, at most 2048 bytes."},
+					}}, "description": "Supply 1 to 8 explicit sources per call. Expansion may fetch at most 12 source documents, depth 3, two shared workers. Only sitemap indexes and rel=next are followed; other links need Agent selection."},
 				}},
 			},
 		},
