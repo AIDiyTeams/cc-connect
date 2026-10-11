@@ -162,7 +162,7 @@ func TestWebInventoryFailsClosedForInvalidOrOversizedOutput(t *testing.T) {
 		if err == nil || out != "" {
 			t.Fatalf("invalid result accepted: %q %v", out, err)
 		}
-		if len(webReadSlots) != 0 {
+		if len(webInventorySlots) != 0 {
 			t.Fatal("failed call leaked slots")
 		}
 	}
@@ -194,7 +194,7 @@ func TestWebInventoryCancellationStopsProcessAndReleasesBudget(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("cancelled inventory did not stop")
 	}
-	if len(webReadSlots) != 0 || len(webReadAdmission) != 0 {
+	if len(webInventorySlots) != 0 {
 		t.Fatal("cancelled inventory leaked budget")
 	}
 }
@@ -284,6 +284,13 @@ func TestWebInventoryReceiptReadDoesNotWaitForNetworkBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
+	for i := 0; i < 3; i++ {
+		releaseHTTP, err := acquireWebInventorySlot(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer releaseHTTP()
+	}
 	s := inventoryTestSession(t, `let input='';for await(const x of process.stdin) input+=x;process.stdout.write(JSON.stringify({input:JSON.parse(input),page:{nextOffset:null,complete:true}}));`)
 	ctx, cancel := context.WithTimeout(s.ctx, time.Second)
 	defer cancel()
@@ -292,23 +299,25 @@ func TestWebInventoryReceiptReadDoesNotWaitForNetworkBudget(t *testing.T) {
 	if err != nil || !strings.Contains(out, `"complete":true`) {
 		t.Fatalf("local receipt blocked by network budget: %v %s", err, out)
 	}
-	if len(webReadSlots) != 2 {
+	if len(webReadSlots) != 2 || len(webInventorySlots) != 3 {
 		t.Fatal("receipt changed network budget")
 	}
 }
 
-func TestWebInventorySourceFileKeepsSharedNetworkBudget(t *testing.T) {
-	release, err := acquireWebReadSlots(context.Background(), 2)
-	if err != nil {
-		t.Fatal(err)
+func TestWebInventorySourceFileKeepsBoundedHTTPBudget(t *testing.T) {
+	for i := 0; i < 3; i++ {
+		release, err := acquireWebInventorySlot(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer release()
 	}
-	defer release()
 	s := inventoryTestSession(t, `import fs from 'node:fs';fs.writeFileSync('started','yes');process.stdout.write('{}');`)
 	ctx, cancel := context.WithTimeout(s.ctx, 40*time.Millisecond)
 	defer cancel()
 	s.ctx = ctx
-	_, err = s.readWebInventory(map[string]any{"sourceFile": map[string]any{"path": ".tmp/urls.json"}})
-	if err == nil || !strings.Contains(err.Error(), "shared reader budget") {
+	_, err := s.readWebInventory(map[string]any{"sourceFile": map[string]any{"path": ".tmp/urls.json"}})
+	if err == nil || !strings.Contains(err.Error(), "shared HTTP inventory budget") {
 		t.Fatalf("scan bypassed shared budget: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(s.workDir, "started")); !os.IsNotExist(err) {
@@ -358,18 +367,20 @@ func TestWebInventoryDiscoverExplicitSourcesValidation(t *testing.T) {
 	}
 }
 
-func TestWebInventoryDiscoveryKeepsSharedNetworkBudget(t *testing.T) {
-	release, err := acquireWebReadSlots(context.Background(), 2)
-	if err != nil {
-		t.Fatal(err)
+func TestWebInventoryDiscoveryKeepsBoundedHTTPBudget(t *testing.T) {
+	for i := 0; i < 3; i++ {
+		release, err := acquireWebInventorySlot(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer release()
 	}
-	defer release()
 	s := inventoryTestSession(t, `process.stdout.write('{}');`)
 	ctx, cancel := context.WithTimeout(s.ctx, 40*time.Millisecond)
 	defer cancel()
 	s.ctx = ctx
-	_, err = s.readWebInventory(map[string]any{"discover": map[string]any{"sources": []any{map[string]any{"kind": "SITEMAP", "url": "https://public.example/sitemap.xml"}}, "allowedOrigins": []any{"https://public.example"}}})
-	if err == nil || !strings.Contains(err.Error(), "shared reader budget") {
+	_, err := s.readWebInventory(map[string]any{"discover": map[string]any{"sources": []any{map[string]any{"kind": "SITEMAP", "url": "https://public.example/sitemap.xml"}}, "allowedOrigins": []any{"https://public.example"}}})
+	if err == nil || !strings.Contains(err.Error(), "shared HTTP inventory budget") {
 		t.Fatalf("discovery bypassed shared budget: %v", err)
 	}
 }
@@ -459,5 +470,80 @@ func TestWebInventoryFencedReaderUsesAuthorizedWorkingDirectoryAndInputDescripto
 	}
 	if _, err := os.Stat(filepath.Join(s.workDir, "receipt.json")); !os.IsNotExist(err) {
 		t.Fatal("receipt written outside session directory")
+	}
+}
+
+// Stub child processes hold their acquired budgets; no public HTTP is requested.
+func TestWebInventoryThreeBatchesDoNotStarveSinglePageReader(t *testing.T) {
+	releaseReaders, err := acquireWebReadSlots(context.Background(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readersHeld := true
+	defer func() {
+		if readersHeld {
+			releaseReaders()
+		}
+	}()
+	sessions := make([]*appServerSession, 4)
+	done := make([]chan error, 4)
+	for i := range sessions {
+		sessions[i] = inventoryTestSession(t, `import fs from 'node:fs';fs.writeFileSync('started','yes');setInterval(()=>{},1000);`)
+		done[i] = make(chan error, 1)
+	}
+	start := func(i int) {
+		go func() {
+			_, err := sessions[i].readWebInventory(map[string]any{"urls": []any{"https://example.com/"}})
+			done[i] <- err
+		}()
+	}
+	started := func(i int) bool { _, err := os.Stat(filepath.Join(sessions[i].workDir, "started")); return err == nil }
+	waitStart := func(i int) {
+		t.Helper()
+		until := time.Now().Add(5 * time.Second)
+		for !started(i) {
+			if time.Now().After(until) {
+				t.Fatalf("batch %d did not start concurrently", i)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		start(i)
+	}
+	for i := 0; i < 3; i++ {
+		waitStart(i)
+	}
+	releaseReaders()
+	readersHeld = false
+	start(3)
+	time.Sleep(80 * time.Millisecond)
+	if started(3) {
+		t.Fatal("more than three two-worker inventory batches admitted")
+	}
+	reader := webReadTestSession(t, `process.stdout.write('reader-ok')`)
+	readerCtx, cancel := context.WithTimeout(reader.ctx, time.Second)
+	defer cancel()
+	reader.ctx = readerCtx
+	if out, err := reader.readWebPage(map[string]any{"url": "https://example.com/"}); err != nil || out != "reader-ok" {
+		t.Fatalf("inventory starved single-page reader: %v %q", err, out)
+	}
+	sessions[0].cancel()
+	waitStart(3)
+	for _, s := range sessions {
+		s.cancel()
+	}
+	for i := range done {
+		select {
+		case err := <-done[i]:
+			if err == nil {
+				t.Fatal("cancelled stub unexpectedly succeeded")
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("cancelled stub did not release")
+		}
+	}
+	if len(webInventorySlots) != 0 || len(webReadSlots) != 0 {
+		t.Fatal("cancelled calls leaked a budget")
 	}
 }
