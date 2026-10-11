@@ -209,22 +209,33 @@ func (b *capabilityBroker) serve(w http.ResponseWriter, r *http.Request) {
 		brokerReject(w, http.StatusBadGateway)
 		return
 	}
-	// Portal marks only explicitly constructed public operation errors. Keep
-	// their recovery contract; arbitrary diagnostics still stay inside Portal.
-	publicError := response.StatusCode >= 400 && response.StatusCode < 500 &&
-		response.Header.Get("X-Tomako-Public-Error") == "v1"
-	if response.StatusCode >= 400 && !publicError {
+	// Server failures stay inside Portal. Client errors carry the same message
+	// Portal already shows the person, so the Agent can correct its input
+	// instead of mistaking a validation error for missing authority.
+	if response.StatusCode >= 500 {
 		brokerReject(w, response.StatusCode)
 		return
 	}
 	limit := brokerMaxBody
-	if publicError {
+	if response.StatusCode >= 400 {
 		limit = 16 << 10
 	}
 	result, err := io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
-	if err != nil || len(result) > limit || publicError && !validBrokerPublicError(result, response.StatusCode) {
+	if err != nil || len(result) > limit {
 		brokerReject(w, http.StatusBadGateway)
 		return
+	}
+	if response.StatusCode >= 400 {
+		// A marked error keeps its recovery values; any other body is reduced to its message.
+		if response.Header.Get("X-Tomako-Public-Error") != "v1" || !validBrokerPublicError(result, response.StatusCode) {
+			if result = brokerClientErrorMessage(result, response.StatusCode); result == nil {
+				brokerReject(w, response.StatusCode)
+				return
+			}
+		}
+		if retry := response.Header.Get("Retry-After"); retry != "" && len(retry) <= 32 {
+			w.Header().Set("Retry-After", retry)
+		}
 	}
 	for _, secret := range []string{runtime.MachineCapabilityToken, runtime.ImageCapabilityToken,
 		runtime.DocumentCapabilityToken, runtime.EmployeeCommandCapabilityToken, runtime.ProductUpdateCapabilityToken} {

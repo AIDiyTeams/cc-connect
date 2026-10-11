@@ -35,3 +35,26 @@ func validBrokerPublicError(body []byte, status int) bool {
 	}
 	return true
 }
+
+// brokerClientErrorMessage keeps only the person-facing message of a Portal
+// client error; data, paths and any other fields are dropped.
+func brokerClientErrorMessage(body []byte, status int) []byte {
+	var portal struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(body, &portal) != nil {
+		return nil
+	}
+	message := strings.TrimSpace(portal.Message)
+	if message == "" || utf8.RuneCountInString(message) > 1024 {
+		return nil
+	}
+	result, err := json.Marshal(struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}{status, message})
+	if err != nil {
+		return nil
+	}
+	return result
+}

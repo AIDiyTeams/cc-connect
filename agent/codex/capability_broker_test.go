@@ -203,8 +203,8 @@ func TestCapabilityBrokerPreservesExistingScopedRouteFamilies(t *testing.T) {
 	}
 }
 
-func TestCapabilityBrokerHidesUpstreamFailureDiagnostics(t *testing.T) {
-	for _, status := range []int{400, 401, 403, 404, 409, 429, 500, 502} {
+func TestCapabilityBrokerHidesServerFailureDiagnostics(t *testing.T) {
+	for _, status := range []int{500, 502, 503} {
 		b, _ := brokerFixture(t)
 		b.client = &http.Client{Transport: brokerRoundTrip(func(*http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(`{"message":"provider route and stack trace synthetic-private"}`))}, nil
@@ -212,6 +212,32 @@ func TestCapabilityBrokerHidesUpstreamFailureDiagnostics(t *testing.T) {
 		w := invokeBroker(t, b, brokerInput(b))
 		if w.Code != status || strings.Contains(w.Body.String(), "synthetic-private") || !strings.Contains(w.Body.String(), "CAPABILITY_UNAVAILABLE") {
 			t.Fatalf("unsafe status %d", status)
+		}
+	}
+}
+
+// A validation or quota error must reach the Agent as Portal states it, otherwise
+// the Agent reads "unavailable" as missing authority and stops a valid task.
+func TestCapabilityBrokerReturnsClientErrorMessageOnly(t *testing.T) {
+	for _, status := range []int{400, 402, 403, 404, 409, 429} {
+		b, _ := brokerFixture(t)
+		b.client = &http.Client{Transport: brokerRoundTrip(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: status, Header: http.Header{"Retry-After": []string{"7"}, "Set-Cookie": []string{"private=secret"}},
+				Body: io.NopCloser(strings.NewReader(`{"code":40001,"message":"keywords[2].intent is required","data":{"trace":"synthetic-private"},"path":"/internal"}`))}, nil
+		})}
+		w := invokeBroker(t, b, brokerInput(b))
+		want := fmt.Sprintf(`{"code":%d,"message":"keywords[2].intent is required"}`, status)
+		if w.Code != status || w.Body.String() != want || w.Header().Get("Retry-After") != "7" || w.Header().Get("Set-Cookie") != "" {
+			t.Fatalf("client error changed: %d %s", w.Code, w.Body.String())
+		}
+	}
+	for _, body := range []string{"<html>Bad Request</html>", `{"message":" "}`, `{"error":"no message"}`} {
+		b, _ := brokerFixture(t)
+		b.client = &http.Client{Transport: brokerRoundTrip(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 400, Body: io.NopCloser(strings.NewReader(body))}, nil
+		})}
+		if w := invokeBroker(t, b, brokerInput(b)); w.Code != 400 || !strings.Contains(w.Body.String(), "CAPABILITY_UNAVAILABLE") {
+			t.Fatalf("unstructured client error escaped: %s", w.Body.String())
 		}
 	}
 }
@@ -227,17 +253,37 @@ func TestCapabilityBrokerPreservesOnlyPortalPublicErrorContract(t *testing.T) {
 	}{
 		{"document-recovery", 409, "v1", conflict, true},
 		{"public-validation", 400, "v1", `{"code":400,"message":"A required public field is missing"}`, true},
-		{"unmarked", 409, "", conflict, false},
-		{"unknown-version", 409, "v2", conflict, false},
 		{"server-diagnostic", 500, "v1", `{"code":500,"message":"internal private stack"}`, false},
-		{"unknown-field", 409, "v1", `{"code":409,"message":"conflict","stack":"private"}`, false},
-		{"unknown-recovery", 409, "v1", `{"code":409,"message":"conflict","data":{"provider":"private"}}`, false},
-		{"mismatched-status", 409, "v1", `{"code":400,"message":"conflict"}`, false},
-		{"negative-offset", 409, "v1", `{"code":409,"message":"conflict","data":{"currentOffset":-1}}`, false},
 		{"blank-message", 409, "v1", `{"code":409,"message":" "}`, false},
 		{"oversized-message", 409, "v1", `{"code":409,"message":"` + strings.Repeat("x", 1025) + `"}`, false},
-		{"trailing-json", 409, "v1", conflict + `{}`, false},
 		{"reflected-secret", 409, "v1", `{"code":409,"message":"synthetic-doc-secret-7913"}`, false},
+	}
+	// Without a valid marker only the message survives; recovery values and other fields are dropped.
+	for _, c := range []struct{ name, marker, body string }{
+		{"unmarked", "", conflict},
+		{"unknown-version", "v2", conflict},
+		{"unknown-field", "v1", `{"code":409,"message":"Read the current document before continuing","stack":"private"}`},
+		{"unknown-recovery", "v1", `{"code":409,"message":"Read the current document before continuing","data":{"provider":"private"}}`},
+		{"mismatched-status", "v1", `{"code":400,"message":"Read the current document before continuing"}`},
+		{"trailing-json", "v1", conflict + `{}`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b, _ := brokerFixture(t)
+			b.client = &http.Client{Transport: brokerRoundTrip(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: 409, Body: io.NopCloser(strings.NewReader(c.body)),
+					Header: http.Header{"X-Tomako-Public-Error": []string{c.marker}}}, nil
+			})}
+			w := invokeBroker(t, b, brokerInput(b))
+			if c.name == "trailing-json" {
+				if !strings.Contains(w.Body.String(), "CAPABILITY_UNAVAILABLE") {
+					t.Fatalf("malformed body escaped: %s", w.Body.String())
+				}
+				return
+			}
+			if w.Code != 409 || w.Body.String() != `{"code":409,"message":"Read the current document before continuing"}` {
+				t.Fatalf("unexpected projection: %s", w.Body.String())
+			}
+		})
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -520,7 +566,7 @@ func TestCapabilityBrokerRealFileHelperMultipartReceipt(t *testing.T) {
 				t.Error("identity supplied by helper")
 			}
 		}
-		data, _ = json.Marshal(map[string]any{"code": 0, "data": map[string]any{"artifactUid": "art-receipt", "url": "https://assets.tomako.ai/profit.csv", "fileName": "profit.csv", "mimeType": "text/csv", "sizeBytes": len(content), "contentSha256": fmt.Sprintf("%x", sha256.Sum256(content)), "origin": map[string]any{"source": "chat", "conversationId": "csess-current", "responseId": runtime.TaskID}}})
+		data, _ = json.Marshal(map[string]any{"code": 0, "data": map[string]any{"artifactUid": "art-receipt", "url": "/api/workspaces/" + runtime.WorkspaceID + "/products/" + runtime.BrandID + "/artifacts/files/" + strings.Repeat("a", 64), "fileName": "profit.csv", "mimeType": "text/csv", "sizeBytes": len(content), "contentSha256": fmt.Sprintf("%x", sha256.Sum256(content)), "origin": map[string]any{"source": "chat", "conversationId": "csess-current", "responseId": runtime.TaskID}}})
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(data)), Header: http.Header{}}, nil
 	})}
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
