@@ -203,6 +203,98 @@ func TestCapabilityBrokerPreservesExistingScopedRouteFamilies(t *testing.T) {
 	}
 }
 
+// Regression: broker mode admitted only POST /cmo/reception, so the CMO could
+// not read its roster or hand work to a colleague (2026-10-11 Test rollout).
+func TestCapabilityBrokerCmoCoordination_AdmitsHandoffLifecycle(t *testing.T) {
+	b, runtime := brokerFixture(t)
+	prefix := b.origin + "/api/workspaces/ws-a/products/brand-a"
+	const plan = "/cmo/handoffs/wp-0f8e4a2c-9b1d-3c5e-8a7f-1234567890ab"
+	cases := []struct{ method, path, body string }{
+		{"GET", "/cmo/reception", ""}, {"POST", "/cmo/reception", `{"action":"pause"}`},
+		{"GET", "/cmo/context", ""},
+		{"POST", "/cmo/handoffs", `{"sourceMessageId":"cmsg-user","employeeId":"emp-a","executionKind":"conversation"}`},
+		{"GET", plan, ""}, {"POST", plan + "/messages", `{"sourceMessageId":"cmsg-user"}`},
+	}
+	for _, kind := range []string{"image", "machine"} {
+		for _, c := range cases {
+			t.Run(kind+" "+c.method+" "+c.path, func(t *testing.T) {
+				input := brokerRequest{URL: prefix + c.path, Method: c.method, CapabilityKind: kind}
+				if _, err := validateBrokerRequest(input, []byte(c.body), runtime, b.origin); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}
+
+func TestCapabilityBrokerCmoCoordination_RejectsOtherShapes(t *testing.T) {
+	b, runtime := brokerFixture(t)
+	prefix := b.origin + "/api/workspaces/ws-a/products/brand-a"
+	const plan = "/cmo/handoffs/wp-0f8e4a2c-9b1d-3c5e-8a7f-1234567890ab"
+	cases := []struct{ name, kind, method, path, body string }{
+		{"context-write", "image", "POST", "/cmo/context", "{}"},
+		{"handoff-list", "image", "GET", "/cmo/handoffs", ""},
+		{"handoff-patch", "image", "PATCH", "/cmo/handoffs", "{}"},
+		{"plan-write", "image", "POST", plan, "{}"},
+		{"plan-put", "image", "PUT", plan, "{}"},
+		{"messages-read", "image", "GET", plan + "/messages", ""},
+		{"messages-subpath", "image", "POST", plan + "/messages/x", "{}"},
+		{"plan-subpath", "image", "GET", plan + "/status", ""},
+		{"plan-uppercase", "image", "GET", strings.ToUpper(plan), ""},
+		{"plan-foreign-id", "image", "GET", "/cmo/handoffs/gp-0123456789abcdef0123456789abcdef", ""},
+		{"plan-short-id", "image", "GET", "/cmo/handoffs/wp-1", ""},
+		{"browser-begin", "image", "POST", "/cmo/reception/begin", "{}"},
+		{"context-query", "image", "GET", "/cmo/context?sessionId=csess-other", ""},
+		{"plan-query", "image", "GET", plan + "?sessionId=csess-other", ""},
+		{"reception-query", "image", "POST", "/cmo/reception?sessionId=csess-other", "{}"},
+		{"handoff-query", "image", "POST", "/cmo/handoffs?sessionId=csess-other", "{}"},
+		{"get-with-body", "image", "GET", "/cmo/context", "{}"},
+		{"document-kind", "document", "GET", "/cmo/context", ""},
+		{"employee-kind", "employee", "POST", "/cmo/handoffs", "{}"},
+		{"product-kind", "product", "POST", plan + "/messages", "{}"},
+		{"sibling-brand", "image", "GET", "/../brand-b/cmo/context", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			input := brokerRequest{URL: prefix + c.path, Method: c.method, CapabilityKind: c.kind}
+			if _, err := validateBrokerRequest(input, []byte(c.body), runtime, b.origin); err == nil {
+				t.Fatal("accepted an undocumented CMO operation")
+			}
+		})
+	}
+	input := brokerRequest{URL: b.origin + "/api/workspaces/ws-a/products/brand-b/cmo/context", Method: "GET", CapabilityKind: "image"}
+	if _, err := validateBrokerRequest(input, nil, runtime, b.origin); err == nil {
+		t.Fatal("accepted a sibling product's CMO context")
+	}
+}
+
+func TestCapabilityBrokerCmoHandoffForwardsCurrentImageAuthority(t *testing.T) {
+	b, runtime := brokerFixture(t)
+	const handoff = `{"sourceMessageId":"cmsg-user","contextMessageIds":[],"employeeId":"emp-a","executionKind":"conversation","title":"t","brief":"b"}`
+	receipt := `{"code":0,"data":{"planId":"wp-0f8e4a2c-9b1d-3c5e-8a7f-1234567890ab","status":"SCHEDULED"}}`
+	var seen []string
+	b.client = &http.Client{Transport: brokerRoundTrip(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		if r.Header.Get("X-Tomako-Machine-Capability") != runtime.ImageCapabilityToken || len(r.Header.Get("X-Tomako-Machine-Nonce")) != 32 {
+			t.Fatal("missing current CMO authority")
+		}
+		seen = append(seen, r.Method+" "+r.URL.Path+" "+string(body))
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(receipt)), Header: http.Header{}}, nil
+	})}
+	prefix := b.origin + "/api/workspaces/ws-a/products/brand-a"
+	for _, c := range []struct{ method, path, body string }{{"GET", "/cmo/context", ""}, {"POST", "/cmo/handoffs", handoff}} {
+		input := brokerRequest{Revision: b.revision, URL: prefix + c.path, Method: c.method, CapabilityKind: "image",
+			ContentType: "application/json", BodyBase64: base64.StdEncoding.EncodeToString([]byte(c.body))}
+		if w := invokeBroker(t, b, input); w.Code != 200 || w.Body.String() != receipt {
+			t.Fatalf("%s %s: %d %s", c.method, c.path, w.Code, w.Body.String())
+		}
+	}
+	want := []string{"GET /api/workspaces/ws-a/products/brand-a/cmo/context ", "POST /api/workspaces/ws-a/products/brand-a/cmo/handoffs " + handoff}
+	if strings.Join(seen, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("upstream requests changed: %q", seen)
+	}
+}
+
 func TestCapabilityBrokerHidesServerFailureDiagnostics(t *testing.T) {
 	for _, status := range []int{500, 502, 503} {
 		b, _ := brokerFixture(t)
