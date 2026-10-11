@@ -1629,7 +1629,9 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 
 	if err := writeJSON(conn, &adapter.writeMu, map[string]any{
 		"type": "register_ack", "ok": true,
-		"runtime_capabilities": []string{"output_schema_v1", "turn_budget_v1"},
+		// team_coordination_tool_v1: a runtime cmo_api gives the Agent the typed
+		// tomako_team_coordination tool, so Portal may name it in the prompt.
+		"runtime_capabilities": []string{"output_schema_v1", "turn_budget_v1", "team_coordination_tool_v1"},
 		"instance_id":          bs.instanceID,
 	}); err != nil {
 		slog.Debug("bridge: write register ack failed", "error", err)
@@ -1924,6 +1926,8 @@ func normalizeSessionRuntime(runtime SessionRuntime) SessionRuntime {
 	runtime.EmployeeCommandCapabilityToken = boundedSecretValue(runtime.EmployeeCommandCapabilityToken, 16*1024)
 	runtime.ProductUpdateCapabilityToken = boundedSecretValue(runtime.ProductUpdateCapabilityToken, 16*1024)
 	runtime.TaskAuthorityEnvelopeB64 = boundedSecretValue(runtime.TaskAuthorityEnvelopeB64, 192*1024)
+	// Not a secret, but a malformed API must be dropped whole, never truncated.
+	runtime.CmoAPI = boundedSecretValue(runtime.CmoAPI, 512)
 	switch strings.ToLower(strings.TrimSpace(runtime.ReasoningEffort)) {
 	case "low", "medium", "high", "xhigh":
 		runtime.ReasoningEffort = strings.ToLower(strings.TrimSpace(runtime.ReasoningEffort))

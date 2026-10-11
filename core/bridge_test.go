@@ -146,7 +146,8 @@ func register(t *testing.T, conn *websocket.Conn, platform string, caps []string
 		t.Fatalf("register failed: %v", ack["error"])
 	}
 	capsOut, _ := ack["runtime_capabilities"].([]any)
-	if len(capsOut) != 2 || capsOut[0] != "output_schema_v1" || capsOut[1] != "turn_budget_v1" {
+	if len(capsOut) != 3 || capsOut[0] != "output_schema_v1" || capsOut[1] != "turn_budget_v1" ||
+		capsOut[2] != "team_coordination_tool_v1" {
 		t.Fatalf("missing constrained output capability: %#v", ack)
 	}
 }
@@ -1809,9 +1810,17 @@ func TestNormalizeSessionRuntime_WhitelistsModalitiesAndBoundsOpaqueValues(t *te
 	}
 	invalid := normalizeSessionRuntime(SessionRuntime{
 		MachineCapabilityToken: "secret\nleak",
+		CmoAPI:                 "https://test.tomako.ai/api/workspaces/w/products/p/cmo\nX-Injected: 1",
 	})
-	if invalid.MachineCapabilityToken != "" {
+	if invalid.MachineCapabilityToken != "" || invalid.CmoAPI != "" {
 		t.Fatalf("control-character secret was retained: %#v", invalid)
+	}
+	cmo := normalizeSessionRuntime(SessionRuntime{CmoAPI: " https://test.tomako.ai/api/workspaces/w/products/p/cmo "})
+	if cmo.CmoAPI != "https://test.tomako.ai/api/workspaces/w/products/p/cmo" {
+		t.Fatalf("CMO API = %q", cmo.CmoAPI)
+	}
+	if long := normalizeSessionRuntime(SessionRuntime{CmoAPI: "https://test.tomako.ai/" + strings.Repeat("a", 600)}); long.CmoAPI != "" {
+		t.Fatal("an oversized CMO API must be dropped, never truncated into another path")
 	}
 }
 

@@ -59,6 +59,8 @@ type threadResumeResponse struct {
 	ReasoningEffort *string `json:"reasoningEffort"`
 	Thread          struct {
 		ID string `json:"id"`
+		// Path is the rollout whose session metadata holds the resumed tools.
+		Path string `json:"path"`
 	} `json:"thread"`
 }
 
@@ -198,6 +200,11 @@ type appServerSession struct {
 	archiveUsed        bool
 	archiveTaskID      string
 	voiceSubmission    userVoiceSubmission
+
+	// threadTeamTool records whether the current thread carries the team
+	// coordination tool. Resume restores the tools a thread started with, so a
+	// conversation from before the tool cannot gain it; see team_coordination_tool.go.
+	threadTeamTool atomic.Bool
 
 	closeOnce sync.Once
 	wg        sync.WaitGroup
@@ -511,13 +518,15 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 		s.threadBrandTools = s.isBrandAnalysisRuntime()
 		s.threadArchiveTools = s.isUserVoiceArchiveRuntime()
 		s.threadVoiceTools = s.isUserVoiceJudgmentRuntime()
+		s.threadTeamTool.Store(s.resumedThreadHasTeamTool(resp.Thread.ID, resp.Thread.Path))
 		slog.Info("codex app-server thread resumed", "thread_id", resp.Thread.ID)
 		s.emitLifecycle("agent_thread_ready", time.Since(startedAt))
 		return nil
 	}
 
 	var resp threadStartResponse
-	if err := s.request("thread/start", s.threadRequestParams(), &resp); err != nil {
+	params := s.threadRequestParams()
+	if err := s.request("thread/start", params, &resp); err != nil {
 		return err
 	}
 	if resp.Thread.ID == "" {
@@ -528,6 +537,7 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 	s.threadBrandTools = s.isBrandAnalysisRuntime()
 	s.threadArchiveTools = s.isUserVoiceArchiveRuntime()
 	s.threadVoiceTools = s.isUserVoiceJudgmentRuntime()
+	s.threadTeamTool.Store(dynamicToolsInclude(params, teamCoordinationToolName))
 	slog.Info("codex app-server thread started", "thread_id", resp.Thread.ID)
 	s.emitLifecycle("agent_thread_ready", time.Since(startedAt))
 	return nil
@@ -602,6 +612,11 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	if s.formToolAvailable() && !s.isBrandAnalysisRuntime() && !s.isUserVoiceArchiveRuntime() && !s.isUserVoiceJudgmentRuntime() {
 		tools, _ := params["dynamicTools"].([]map[string]any)
 		params["dynamicTools"] = append(tools, formDynamicTool())
+	}
+	// Turns that carry CMO authority coordinate the team; see team_coordination_tool.go.
+	if s.teamCoordinationToolAvailable() {
+		tools, _ := params["dynamicTools"].([]map[string]any)
+		params["dynamicTools"] = append(tools, teamCoordinationDynamicTool())
 	}
 	// Conversations read public pages through the platform reader; see web_read_tool.go.
 	if s.webReadToolAvailable() {
@@ -833,7 +848,8 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	searchChanged := s.webSearch != normalizeWebSearch(runtime.WebSearch)
 	previousReasoningCapability := needsReasoningCapability(s.model, s.effort)
 	s.runtime = runtime
-	if runtime.DeveloperInstructions != "" {
+	// A CMO turn may need the team coordination fallback below its policy.
+	if runtime.DeveloperInstructions != "" || runtime.CmoAPI != "" {
 		s.developerInstructionsManaged = true
 	}
 	if model := strings.TrimSpace(runtime.GatewayModel); model != "" {
@@ -897,6 +913,7 @@ func (s *appServerSession) RefreshCapabilityAuthority(fresh core.SessionRuntime)
 	runtime.EmployeeCommandCapabilityToken = fresh.EmployeeCommandCapabilityToken
 	runtime.ProductUpdateCapabilityToken = fresh.ProductUpdateCapabilityToken
 	runtime.TaskAuthorityEnvelopeB64 = fresh.TaskAuthorityEnvelopeB64
+	runtime.CmoAPI = fresh.CmoAPI
 	envFile, err := s.writeSessionRuntime(runtime)
 	if err != nil {
 		return err
@@ -939,6 +956,9 @@ func (s *appServerSession) turnDeveloperInstructions() map[string]any {
 	policy := s.runtime.DeveloperInstructions
 	if imageRuntimeAuthorized(s.runtime) {
 		policy = imageFramingInstructions + "\n\n" + imageSchedulingInstructions + "\n\n" + policy
+	}
+	if s.runtime.CmoAPI != "" && !s.threadTeamTool.Load() {
+		policy = teamCoordinationHelperFallback + "\n\n" + policy
 	}
 	if policy != "" {
 		prefix := "You are in Default mode. The following current application instructions replace earlier application instructions in this collaboration-mode block and remain in effect until replaced by later collaboration instructions.\n\n"
@@ -1313,6 +1333,22 @@ func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRa
 		}
 		go func() {
 			result, err := s.searchWeb(params.Arguments)
+			if err != nil {
+				s.writeDynamicToolResponse(rawID, false, err.Error())
+				return
+			}
+			s.writeDynamicToolResponse(rawID, true, result)
+		}()
+		return
+	}
+	if params.Tool == teamCoordinationToolName {
+		call, err := s.prepareTeamCoordination(params.Arguments)
+		if err != nil {
+			s.writeDynamicToolResponse(rawID, false, err.Error())
+			return
+		}
+		go func() {
+			result, err := call.run()
 			if err != nil {
 				s.writeDynamicToolResponse(rawID, false, err.Error())
 				return
