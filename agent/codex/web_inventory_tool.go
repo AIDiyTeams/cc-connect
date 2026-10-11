@@ -16,6 +16,26 @@ import (
 
 const webInventoryToolName = "tomako_read_web_inventory"
 
+// Inventory and discovery force direct HTTP in Skills-OL. Admit at most three
+// two-worker batches process-wide; they never consume the browser-capable pool.
+var webInventorySlots = make(chan struct{}, 3)
+
+func acquireWebInventorySlot(ctx context.Context) (func(), error) {
+	ctx, cancel := context.WithTimeout(ctx, webReadQueueWait)
+	defer cancel()
+	select {
+	case webInventorySlots <- struct{}{}:
+		release := func() { <-webInventorySlots }
+		if err := ctx.Err(); err != nil {
+			release()
+			return nil, err
+		}
+		return release, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func webInventoryDynamicTool() map[string]any {
 	filePage := func(receipt bool) map[string]any {
 		properties := map[string]any{
@@ -32,7 +52,7 @@ func webInventoryDynamicTool() map[string]any {
 	}
 	return map[string]any{
 		"type": "function", "name": webInventoryToolName, "deferLoading": false,
-		"description": "Screen up to 50 public URLs from one origin for a shallow website inventory with two shared workers. " +
+		"description": "Screen up to 50 public URLs from one origin for a shallow website inventory with two HTTP workers per batch, sharing a process-wide limit of three batches (six HTTP workers), separate from the single-page browser budget. " +
 			"Returns titles, descriptions, headings and short snippets, not a full-page read or proof of content coverage. " +
 			"Use discover with explicit source kinds and allowed origins to extract bounded sitemap/navigation URL files without fetching articles. Source completion is structural, not a site-coverage verdict. " +
 			"Use a sourceFile JSON URL list to avoid copying URL arrays, or receipt plus its SHA-256 to page existing compact rows without network requests. " +
@@ -52,7 +72,7 @@ func webInventoryDynamicTool() map[string]any {
 					"sources": map[string]any{"type": "array", "minItems": 1, "maxItems": 8, "items": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"kind", "url"}, "properties": map[string]any{
 						"kind": map[string]any{"type": "string", "enum": []string{"SITEMAP", "CONTENT_DIRECTORY", "SITE_NAVIGATION"}},
 						"url":  map[string]any{"type": "string", "maxLength": 2048, "description": "Public source URL, at most 2048 bytes."},
-					}}, "description": "Supply 1 to 8 explicit sources per call. Expansion may fetch at most 12 source documents, depth 3, two shared workers. Only sitemap indexes and rel=next are followed; other links need Agent selection."},
+					}}, "description": "Supply 1 to 8 explicit sources per call. Expansion may fetch at most 12 source documents, depth 3, two HTTP workers per batch within the shared six-worker inventory budget. Only sitemap indexes and rel=next are followed; other links need Agent selection."},
 				}},
 			},
 		},
@@ -261,9 +281,9 @@ func (s *appServerSession) readWebInventory(arguments map[string]any) (string, e
 		return "", fmt.Errorf("web inventory is not installed for this conversation")
 	}
 	if _, readingReceipt := arguments["receipt"]; !readingReceipt {
-		release, err := acquireWebReadSlots(s.ctx, 2)
+		release, err := acquireWebInventorySlot(s.ctx)
 		if err != nil {
-			return "", fmt.Errorf("web inventory could not acquire the shared reader budget: %w", err)
+			return "", fmt.Errorf("web inventory could not acquire the shared HTTP inventory budget: %w", err)
 		}
 		defer release()
 	}

@@ -28,8 +28,8 @@ const (
 // by several conversations, so reads queue process-wide.
 var webReadSlots = make(chan struct{}, 2)
 
-// Serialize whole claims so two inventory calls cannot each hold one slot and
-// wait forever for the other. Single-page reads use the same admission gate.
+// Serialize whole browser-capable reader claims and release partial claims on
+// cancellation. Direct-HTTP inventories use their own bounded batch budget.
 var webReadAdmission = make(chan struct{}, 1)
 
 func acquireWebReadSlots(ctx context.Context, count int) (func(), error) {
