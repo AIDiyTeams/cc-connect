@@ -32,18 +32,26 @@ func webInventoryDynamicTool() map[string]any {
 		"type": "function", "name": webInventoryToolName, "deferLoading": false,
 		"description": "Screen up to 50 public URLs from one origin for a shallow website inventory with two shared workers. " +
 			"Returns titles, descriptions, headings and short snippets, not a full-page read or proof of content coverage. " +
+			"Use discover with explicit source kinds and allowed origins to extract bounded sitemap/navigation URL files without fetching articles. Source completion is structural, not a site-coverage verdict. " +
 			"Use a sourceFile JSON URL list to avoid copying URL arrays, or receipt plus its SHA-256 to page existing compact rows without network requests. " +
 			"Follow page.nextOffset for more saved rows and source.nextOffset for more source URLs. Output is bounded to 24000 bytes. " +
 			"Use tomako_read_web_page for pages requiring deeper evidence. The receipt retains full results; screening decisions belong to the Agent.",
 		"inputSchema": map[string]any{
 			"type": "object", "additionalProperties": false,
-			"oneOf": []map[string]any{{"required": []string{"urls"}}, {"required": []string{"sourceFile"}}, {"required": []string{"receipt"}}},
+			"oneOf": []map[string]any{{"required": []string{"urls"}}, {"required": []string{"sourceFile"}}, {"required": []string{"receipt"}}, {"required": []string{"discover"}}},
 			"properties": map[string]any{
 				"urls": map[string]any{"type": "array", "minItems": 1, "maxItems": 50,
 					"items":       map[string]any{"type": "string", "format": "uri", "maxLength": 2048},
 					"description": "Public http(s) URLs from the same origin. Input indexes are preserved in rows and remaining."},
 				"sourceFile": filePage(false),
 				"receipt":    filePage(true),
+				"discover": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"sources", "allowedOrigins"}, "properties": map[string]any{
+					"allowedOrigins": map[string]any{"type": "array", "minItems": 1, "maxItems": 4, "items": map[string]any{"type": "string", "maxLength": 512}, "description": "Explicit public HTTP(S) origins. No paths, credentials or nonstandard ports."},
+					"sources": map[string]any{"type": "array", "minItems": 1, "maxItems": 8, "items": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"kind", "url"}, "properties": map[string]any{
+						"kind": map[string]any{"type": "string", "enum": []string{"SITEMAP", "CONTENT_DIRECTORY", "SITE_NAVIGATION"}},
+						"url":  map[string]any{"type": "string", "maxLength": 2048},
+					}}, "description": "Fetch at most 12 source documents, depth 3, two shared workers. Only sitemap indexes and rel=next are followed; other links need Agent selection."},
+				}},
 			},
 		},
 	}
@@ -55,15 +63,19 @@ func (s *appServerSession) webInventoryToolAvailable() bool {
 
 func webInventoryInput(arguments map[string]any) ([]byte, int, error) {
 	for key := range arguments {
-		if key != "urls" && key != "sourceFile" && key != "receipt" && key != "deadlineMs" && key != "maxOutputBytes" {
+		if key != "urls" && key != "sourceFile" && key != "receipt" && key != "discover" && key != "deadlineMs" && key != "maxOutputBytes" {
 			return nil, 0, fmt.Errorf("unsupported web inventory argument: %s", key)
 		}
 	}
 	modes := 0
-	for _, key := range []string{"urls", "sourceFile", "receipt"} {
+	for _, key := range []string{"urls", "sourceFile", "receipt", "discover"} {
 		if value, present := arguments[key]; present {
 			modes++
-			if key != "urls" {
+			if key == "discover" {
+				if err := validateInventoryDiscovery(value); err != nil {
+					return nil, 0, err
+				}
+			} else if key != "urls" {
 				if err := validateInventoryFilePage(key, value); err != nil {
 					return nil, 0, err
 				}
@@ -71,7 +83,7 @@ func webInventoryInput(arguments map[string]any) ([]byte, int, error) {
 		}
 	}
 	if modes != 1 {
-		return nil, 0, fmt.Errorf("exactly one of urls, sourceFile or receipt is required")
+		return nil, 0, fmt.Errorf("exactly one of urls, sourceFile, receipt or discover is required")
 	}
 	if value, present := arguments["urls"]; present {
 		if err := validateInventoryURLs(value); err != nil {
@@ -94,6 +106,81 @@ func webInventoryInput(arguments map[string]any) ([]byte, int, error) {
 	}
 	input, err := json.Marshal(arguments)
 	return input, maxBytes, err
+}
+
+// This is protocol validation. URL resolution, redirects and task-file containment
+// remain enforced by the reader; no source kind is inferred from prose or URLs.
+func validateInventoryDiscovery(value any) error {
+	discovery, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("discover must be an object")
+	}
+	for key := range discovery {
+		if key != "sources" && key != "allowedOrigins" {
+			return fmt.Errorf("unsupported discover argument: %s", key)
+		}
+	}
+	originOf := func(value any, originOnly bool) (string, error) {
+		address, ok := value.(string)
+		parsed, err := url.Parse(address)
+		if !ok || len(address) > 2048 || err != nil || parsed.Hostname() == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || !isPublicHostname(parsed.Hostname()) || (parsed.Port() != "" && parsed.Port() != "80" && parsed.Port() != "443") {
+			return "", fmt.Errorf("discovery requires public HTTP(S) URLs on standard ports")
+		}
+		if originOnly && (len(address) > 512 || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "") {
+			return "", fmt.Errorf("allowedOrigins cannot contain paths, queries or fragments")
+		}
+		port := parsed.Port()
+		if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
+			port = ""
+		}
+		host := strings.ToLower(parsed.Hostname())
+		if strings.Contains(host, ":") {
+			host = "[" + host + "]"
+		}
+		if port != "" {
+			host += ":" + port
+		}
+		return parsed.Scheme + "://" + host, nil
+	}
+	origins, ok := discovery["allowedOrigins"].([]any)
+	if !ok || len(origins) < 1 || len(origins) > 4 {
+		return fmt.Errorf("discover.allowedOrigins must contain 1 to 4 origins")
+	}
+	allowed := map[string]bool{}
+	for _, origin := range origins {
+		normalized, err := originOf(origin, true)
+		if err != nil {
+			return err
+		}
+		allowed[normalized] = true
+	}
+	sources, ok := discovery["sources"].([]any)
+	if !ok || len(sources) < 1 || len(sources) > 8 {
+		return fmt.Errorf("discover.sources must contain 1 to 8 sources")
+	}
+	for _, value := range sources {
+		source, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("discovery source must be an object")
+		}
+		for key := range source {
+			if key != "url" && key != "kind" {
+				return fmt.Errorf("unsupported discovery source argument: %s", key)
+			}
+		}
+		kind, ok := source["kind"].(string)
+		if !ok || (kind != "SITEMAP" && kind != "CONTENT_DIRECTORY" && kind != "SITE_NAVIGATION") {
+			return fmt.Errorf("invalid discovery source kind")
+		}
+		origin, err := originOf(source["url"], false)
+		if err != nil {
+			return err
+		}
+		if !allowed[origin] {
+			return fmt.Errorf("discovery source origin is not allowed")
+		}
+	}
+	return nil
 }
 
 func validateInventoryFilePage(mode string, value any) error {

@@ -268,7 +268,7 @@ func TestWebInventorySourceFileKeepsSharedNetworkBudget(t *testing.T) {
 func TestWebInventorySchemaUsesExclusiveSourcesWithoutOutputKnobs(t *testing.T) {
 	schema := webInventoryDynamicTool()["inputSchema"].(map[string]any)
 	properties := schema["properties"].(map[string]any)
-	for _, key := range []string{"urls", "sourceFile", "receipt"} {
+	for _, key := range []string{"urls", "sourceFile", "receipt", "discover"} {
 		if properties[key] == nil {
 			t.Fatalf("missing mode %s", key)
 		}
@@ -278,7 +278,47 @@ func TestWebInventorySchemaUsesExclusiveSourcesWithoutOutputKnobs(t *testing.T) 
 			t.Fatalf("model still controls %s", key)
 		}
 	}
-	if modes, ok := schema["oneOf"].([]map[string]any); !ok || len(modes) != 3 {
+	if modes, ok := schema["oneOf"].([]map[string]any); !ok || len(modes) != 4 {
 		t.Fatal("schema does not require exactly one source")
+	}
+}
+
+func TestWebInventoryDiscoverExplicitSourcesValidation(t *testing.T) {
+	valid := map[string]any{"sources": []any{map[string]any{"kind": "SITEMAP", "url": "https://public.example/sitemap.xml"}}, "allowedOrigins": []any{"https://public.example"}}
+	if _, _, err := webInventoryInput(map[string]any{"discover": valid}); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]map[string]any{
+		"missing origins": {"sources": valid["sources"]},
+		"unknown kind":    {"sources": []any{map[string]any{"kind": "AUTO", "url": "https://public.example/"}}, "allowedOrigins": valid["allowedOrigins"]},
+		"outside origin":  {"sources": valid["sources"], "allowedOrigins": []any{"https://other.example"}},
+		"private origin":  {"sources": []any{map[string]any{"kind": "SITE_NAVIGATION", "url": "http://127.0.0.1/"}}, "allowedOrigins": []any{"http://127.0.0.1"}},
+		"origin path":     {"sources": valid["sources"], "allowedOrigins": []any{"https://public.example/path"}},
+		"extra field":     {"sources": valid["sources"], "allowedOrigins": valid["allowedOrigins"], "recursive": true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := webInventoryInput(map[string]any{"discover": value}); err == nil {
+				t.Fatal("accepted invalid discovery")
+			}
+		})
+	}
+	if _, _, err := webInventoryInput(map[string]any{"discover": valid, "urls": []any{"https://public.example/"}}); err == nil {
+		t.Fatal("accepted two modes")
+	}
+}
+
+func TestWebInventoryDiscoveryKeepsSharedNetworkBudget(t *testing.T) {
+	release, err := acquireWebReadSlots(context.Background(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	s := inventoryTestSession(t, `process.stdout.write('{}');`)
+	ctx, cancel := context.WithTimeout(s.ctx, 40*time.Millisecond)
+	defer cancel()
+	s.ctx = ctx
+	_, err = s.readWebInventory(map[string]any{"discover": map[string]any{"sources": []any{map[string]any{"kind": "SITEMAP", "url": "https://public.example/sitemap.xml"}}, "allowedOrigins": []any{"https://public.example"}}})
+	if err == nil || !strings.Contains(err.Error(), "shared reader budget") {
+		t.Fatalf("discovery bypassed shared budget: %v", err)
 	}
 }
