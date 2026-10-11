@@ -75,7 +75,7 @@ func webReadDynamicTool() map[string]any {
 	return map[string]any{
 		"type":         "function",
 		"name":         webReadToolName,
-		"deferLoading": false,
+		"deferLoading": false, "supportsParallelToolCalls": true,
 		"description": "Read one public web page and get its readable text, final URL, title and links, with a status that says whether the page was actually read. " +
 			"Use it to check facts on the source itself, such as official pricing, documentation and announcements, instead of fetching pages with shell commands. " +
 			"Long pages come in parts: use the returned nextStart, never estimate fixed offsets. Use mode=outline for a bounded heading directory (not a body read), then choose exact [start,endExclusive) UTF-16 ranges of 1 to 24000 characters. Results include source metadata and a task-local hashed receipt. Any status other than ok means the page was not read, so facts from it remain unverified. " +
