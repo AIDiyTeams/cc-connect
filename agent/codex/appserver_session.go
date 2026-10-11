@@ -417,6 +417,9 @@ func (s *appServerSession) startupArgs() []string {
 	// workspace's CODEX_HOME (about 100 MB per brand) although nothing uses it.
 	if strings.TrimSpace(s.permissionsProfile) != "" {
 		args = append(args, "-c", "features.plugins=false")
+		// Bundled system skills put this brand's CODEX_HOME path into the
+		// leading developer message; see prompt_cache.go.
+		args = append(args, "-c", "skills.bundled.enabled=false")
 	}
 	args = append(args, s.securityStartupArgs...)
 	return args
@@ -655,6 +658,7 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 			params["sandbox"] = sandbox
 		}
 	}
+	s.shareFencedPromptPrefix(params, config)
 	return params
 }
 
