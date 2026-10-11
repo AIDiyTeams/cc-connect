@@ -114,21 +114,16 @@ func TestCapabilityBrokerRejectsCrossScopeAndUnregisteredTransport(t *testing.T)
 			i.Method = "GET"
 			i.BodyBase64 = ""
 		},
-		"unknown-scoped-route": func(i *brokerRequest) { i.URL = b.origin + "/api/workspaces/ws-a/products/brand-a/admin/export" },
-		"wrong-kind":           func(i *brokerRequest) { i.CapabilityKind = "image" },
-		"invented-kind":        func(i *brokerRequest) { i.CapabilityKind = "admin" },
-		"missing-kind":         func(i *brokerRequest) { i.CapabilityKind = "" },
-		"missing-generation":   func(i *brokerRequest) { i.Revision = "" },
-		"sibling-generation":   func(i *brokerRequest) { i.Revision = "another-session" },
-		"delete":               func(i *brokerRequest) { i.Method = "DELETE" },
-		"get-with-body":        func(i *brokerRequest) { i.Method = "GET" },
-		"broken-body":          func(i *brokerRequest) { i.BodyBase64 = "not base64!" },
-		"read-attach": func(i *brokerRequest) {
-			i.URL = b.origin + "/api/workspaces/ws-a/products/brand-a/images/img-own/attach"
-			i.CapabilityKind = "image"
-			i.Method = "GET"
-			i.BodyBase64 = ""
+		"semicolon-segment": func(i *brokerRequest) {
+			i.URL = strings.Replace(i.URL, "/agent-operations", "/agent-operations;x=1", 1)
 		},
+		"invented-kind":      func(i *brokerRequest) { i.CapabilityKind = "admin" },
+		"missing-kind":       func(i *brokerRequest) { i.CapabilityKind = "" },
+		"missing-generation": func(i *brokerRequest) { i.Revision = "" },
+		"sibling-generation": func(i *brokerRequest) { i.Revision = "another-session" },
+		"delete":             func(i *brokerRequest) { i.Method = "DELETE" },
+		"get-with-body":      func(i *brokerRequest) { i.Method = "GET" },
+		"broken-body":        func(i *brokerRequest) { i.BodyBase64 = "not base64!" },
 	}
 	for name, change := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -227,44 +222,44 @@ func TestCapabilityBrokerCmoCoordination_AdmitsHandoffLifecycle(t *testing.T) {
 	}
 }
 
-func TestCapabilityBrokerCmoCoordination_RejectsOtherShapes(t *testing.T) {
+// Operation shape, token kind and conversation are Portal's to decide (its capability scope, and
+// CmoAgentService takes the conversation from the token); the broker keeps scope and transport rules.
+func TestCapabilityBrokerCmoCoordination_RejectsOutsideCurrentScope(t *testing.T) {
 	b, runtime := brokerFixture(t)
 	prefix := b.origin + "/api/workspaces/ws-a/products/brand-a"
-	const plan = "/cmo/handoffs/wp-0f8e4a2c-9b1d-3c5e-8a7f-1234567890ab"
-	cases := []struct{ name, kind, method, path, body string }{
-		{"context-write", "image", "POST", "/cmo/context", "{}"},
-		{"handoff-list", "image", "GET", "/cmo/handoffs", ""},
-		{"handoff-patch", "image", "PATCH", "/cmo/handoffs", "{}"},
-		{"plan-write", "image", "POST", plan, "{}"},
-		{"plan-put", "image", "PUT", plan, "{}"},
-		{"messages-read", "image", "GET", plan + "/messages", ""},
-		{"messages-subpath", "image", "POST", plan + "/messages/x", "{}"},
-		{"plan-subpath", "image", "GET", plan + "/status", ""},
-		{"plan-uppercase", "image", "GET", strings.ToUpper(plan), ""},
-		{"plan-foreign-id", "image", "GET", "/cmo/handoffs/gp-0123456789abcdef0123456789abcdef", ""},
-		{"plan-short-id", "image", "GET", "/cmo/handoffs/wp-1", ""},
-		{"browser-begin", "image", "POST", "/cmo/reception/begin", "{}"},
-		{"context-query", "image", "GET", "/cmo/context?sessionId=csess-other", ""},
-		{"plan-query", "image", "GET", plan + "?sessionId=csess-other", ""},
-		{"reception-query", "image", "POST", "/cmo/reception?sessionId=csess-other", "{}"},
-		{"handoff-query", "image", "POST", "/cmo/handoffs?sessionId=csess-other", "{}"},
-		{"get-with-body", "image", "GET", "/cmo/context", "{}"},
-		{"document-kind", "document", "GET", "/cmo/context", ""},
-		{"employee-kind", "employee", "POST", "/cmo/handoffs", "{}"},
-		{"product-kind", "product", "POST", plan + "/messages", "{}"},
-		{"sibling-brand", "image", "GET", "/../brand-b/cmo/context", ""},
+	cases := []struct{ name, method, url, body string }{
+		{"get-with-body", "GET", prefix + "/cmo/context", "{}"},
+		{"sibling-brand-traversal", "GET", prefix + "/../brand-b/cmo/context", ""},
+		{"sibling-brand", "GET", b.origin + "/api/workspaces/ws-a/products/brand-b/cmo/context", ""},
+		{"sibling-workspace", "GET", b.origin + "/api/workspaces/ws-b/products/brand-a/cmo/context", ""},
+		{"delete", "DELETE", prefix + "/cmo/handoffs", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			input := brokerRequest{URL: prefix + c.path, Method: c.method, CapabilityKind: c.kind}
+			input := brokerRequest{URL: c.url, Method: c.method, CapabilityKind: "image"}
 			if _, err := validateBrokerRequest(input, []byte(c.body), runtime, b.origin); err == nil {
-				t.Fatal("accepted an undocumented CMO operation")
+				t.Fatal("accepted a request outside the current scope")
 			}
 		})
 	}
-	input := brokerRequest{URL: b.origin + "/api/workspaces/ws-a/products/brand-b/cmo/context", Method: "GET", CapabilityKind: "image"}
-	if _, err := validateBrokerRequest(input, nil, runtime, b.origin); err == nil {
-		t.Fatal("accepted a sibling product's CMO context")
+}
+
+// Regression: the per-route registry lagged Portal, so KOL discovery, user-voice research and every
+// newly added Agent endpoint reached the Agent as "unavailable" until a bridge release.
+func TestCapabilityBrokerForwardsAnyCurrentProductRouteToPortal(t *testing.T) {
+	b, runtime := brokerFixture(t)
+	prefix := b.origin + "/api/workspaces/ws-a/products/brand-a"
+	for _, c := range []struct{ kind, method, path string }{
+		{"machine", "POST", "/kol-employees/emp-kol/match"},
+		{"machine", "GET", "/kol-employees/emp-kol/discovery-tasks/cmsg-one/candidates?limit=20"},
+		{"machine", "POST", "/growth-opportunities/user-voice/research"},
+		{"employee", "GET", "/employees/moki/capabilities/content.operations/versions"},
+		{"image", "POST", "/a-future-agent-endpoint"},
+	} {
+		input := brokerRequest{URL: prefix + c.path, Method: c.method, CapabilityKind: c.kind}
+		if _, err := validateBrokerRequest(input, nil, runtime, b.origin); err != nil {
+			t.Fatalf("%s %s: %v", c.method, c.path, err)
+		}
 	}
 }
 
@@ -407,7 +402,7 @@ func TestCapabilityBrokerMetadataUsesDeclaredCurrentScope(t *testing.T) {
 		if _, err := validateBrokerRequest(input, body, runtime, b.origin); err != nil {
 			t.Fatalf("lost %s", capability)
 		}
-		for _, wrong := range []string{strings.Replace(string(body), runtime.TaskID, "cmsg-other", 1), strings.Replace(string(body), runtime.BrandID, "brand-other", 1), strings.Replace(string(body), capability, "tomako.admin-export", 1)} {
+		for _, wrong := range []string{strings.Replace(string(body), runtime.TaskID, "cmsg-other", 1), strings.Replace(string(body), runtime.BrandID, "brand-other", 1)} {
 			if _, err := validateBrokerRequest(input, []byte(wrong), runtime, b.origin); err == nil {
 				t.Fatal("accepted unscoped metadata request")
 			}
@@ -610,11 +605,6 @@ func TestCapabilityBrokerAllowsCurrentConversationFileUpload(t *testing.T) {
 	}
 	for _, change := range []func(*brokerRequest){
 		func(r *brokerRequest) { r.URL = b.origin + "/api/workspaces/ws-a/products/other/artifacts/upload" },
-		func(r *brokerRequest) { r.URL += "?taskId=other" },
-		func(r *brokerRequest) { r.URL = b.origin + "/api/workspaces/ws-a/products/brand-a/artifacts/register" },
-		func(r *brokerRequest) { r.Method = "GET" },
-		func(r *brokerRequest) { r.CapabilityKind = "image" },
-		func(r *brokerRequest) { r.ContentType = "application/json" },
 		func(r *brokerRequest) { r.Revision = "old" },
 	} {
 		denied := input

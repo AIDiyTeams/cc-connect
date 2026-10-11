@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -249,38 +248,17 @@ func (b *capabilityBroker) serve(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(result)
 }
 
-var brokerEmployeeRoute = regexp.MustCompile(`^/employees/[A-Za-z0-9_:-]+/(commands|capabilities/[A-Za-z0-9._:-]+(?:/versions(?:/[A-Za-z0-9_:-]+(?:/restore)?)?|/restore|/publish-preview)?)$`)
-var brokerImageRoute = regexp.MustCompile(`^/images/(generate|reference-upload|batch-reservation(?:/settle)?|batches/[A-Za-z0-9._:-]+/finalize|[A-Za-z0-9._:-]+/(?:status|attach))$`)
-var brokerBacklinkRoute = regexp.MustCompile(`^/backlinks(?:/template|/[A-Za-z0-9_:-]+|/tasks(?:/[A-Za-z0-9_:-]+(?:/events|/operations)?)?)?$`)
-var brokerExternalResultRoute = regexp.MustCompile(`^/external-data/results/[a-f0-9]{64}$`)
-
-// Portal names every work plan "wp-" + a lowercase UUID; nothing else is a plan.
-var brokerCmoPlanRoute = regexp.MustCompile(`^/cmo/handoffs/wp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(/messages)?$`)
-
-// brokerCmoRoute admits the CMO coordination operations Portal documents for the
-// turn's cmo.coordinate capability. Portal still owns roster, authorization,
-// active-turn and idempotency checks; this only fixes each operation's shape.
-func brokerCmoRoute(method, path string) bool {
-	switch path {
-	case "/cmo/reception":
-		return method == "GET" || method == "POST"
-	case "/cmo/context":
-		return method == "GET"
-	case "/cmo/handoffs":
-		return method == "POST"
-	}
-	match := brokerCmoPlanRoute.FindStringSubmatch(path)
-	return match != nil && (match[1] == "" && method == "GET" || match[1] == "/messages" && method == "POST")
-}
-
-// The registry admits existing, scoped product capabilities only. It does not
-// classify natural language or replace Portal's identity/resource authorization.
+// The broker keeps only checks Portal cannot make: a fixed origin, a normalized
+// path inside the current workspace and product, the current task on paths
+// that name it, and bounded methods. Which operation a token may perform is
+// decided by Portal's capability scope, so a new Agent endpoint needs no bridge
+// release, and an operation Portal does not grant is refused there.
 func validateBrokerRequest(input brokerRequest, body []byte, runtime core.SessionRuntime, origin string) (*url.URL, error) {
 	deny := func() (*url.URL, error) { return nil, fmt.Errorf("operation outside current capability") }
 	u, err := url.Parse(input.URL)
 	if err != nil || u.Scheme+"://"+u.Host != origin || u.User != nil || u.Fragment != "" ||
-		u.Opaque != "" || u.RawPath != "" || strings.Contains(u.Path, "\\") || strings.Contains(u.Path, "//") ||
-		strings.ContainsAny(input.ContentType, "\r\n") {
+		u.Opaque != "" || u.RawPath != "" || strings.ContainsAny(u.Path, "\\;") || strings.Contains(u.Path, "//") ||
+		strings.ContainsAny(input.ContentType, "\r\n") || len(u.RawQuery) > 4096 {
 		return deny()
 	}
 	for _, part := range strings.Split(u.Path, "/") {
@@ -309,7 +287,6 @@ func validateBrokerRequest(input brokerRequest, body []byte, runtime core.Sessio
 	}
 	if u.Path == "/api/metadata/invoke" && input.Method == "POST" && machine && u.RawQuery == "" {
 		var data struct {
-			Capability  string         `json:"capability"`
 			SubmittedBy string         `json:"submittedBy"`
 			Params      map[string]any `json:"params"`
 		}
@@ -317,73 +294,12 @@ func validateBrokerRequest(input brokerRequest, body []byte, runtime core.Sessio
 			data.Params["workspaceId"] != runtime.WorkspaceID || data.Params["productId"] != runtime.BrandID {
 			return deny()
 		}
-		switch data.Capability {
-		case "tomako.generate-video", "tomako.read-fal-video", "tomako.list-backlink-tasks",
-			"tomako.read-backlink-task", "tomako.read-backlink-mailbox", "tomako.list-backlink-approvals",
-			"tomako.create-backlink-task", "tomako.update-backlink-task", "tomako.send-backlink-email",
-			"tomako.verify-backlink-task", "tomako.reconcile-backlink-email", "tomako.sync-backlink-replies":
-			return u, nil
-		default:
-			return deny()
-		}
+		return u, nil
 	}
-	prefix := "/api/workspaces/" + runtime.WorkspaceID + "/products/" + runtime.BrandID
-	if !strings.HasPrefix(u.Path, prefix+"/") {
+	if !strings.HasPrefix(u.Path, "/api/workspaces/"+runtime.WorkspaceID+"/products/"+runtime.BrandID+"/") {
 		return deny()
 	}
-	path := strings.TrimPrefix(u.Path, prefix)
-	if input.CapabilityKind == "document" {
-		if path == "/artifacts/upload" && input.Method == "POST" && u.RawQuery == "" {
-			mediaType, parameters, err := mime.ParseMediaType(input.ContentType)
-			if err != nil || mediaType != "multipart/form-data" || parameters["boundary"] == "" {
-				return deny()
-			}
-			return u, nil
-		}
-		if path == "/content-documents/agent-operations" && input.Method == "POST" && u.RawQuery == "" {
-			return u, nil
-		}
-		if path == "/chat/agent-reply-checklists" && (input.Method == "GET" || input.Method == "PUT") && u.RawQuery == "" {
-			return u, nil
-		}
-	}
-	if input.CapabilityKind == "employee" && brokerEmployeeRoute.MatchString(path) && (input.Method == "GET" || input.Method == "POST") {
-		return u, nil
-	}
-	if input.CapabilityKind == "product" && path == "/agent-update" && input.Method == "PATCH" && u.RawQuery == "" {
-		return u, nil
-	}
-	if machine {
-		if path == "/agent-context" && input.Method == "GET" {
-			return u, nil
-		}
-		if path == "/agent-update" && input.Method == "PATCH" {
-			return u, nil
-		}
-		// Machine CMO calls take their conversation from the token, never a query.
-		if brokerCmoRoute(input.Method, path) && u.RawQuery == "" {
-			return u, nil
-		}
-		if path == "/blog-seo-skill-reads" && input.Method == "POST" {
-			return u, nil
-		}
-		if path == "/visual-assets/video-upload" && input.Method == "POST" {
-			return u, nil
-		}
-		if brokerImageRoute.MatchString(path) && (input.Method == "GET" && strings.HasSuffix(path, "/status") || input.Method == "POST" && !strings.HasSuffix(path, "/status")) {
-			return u, nil
-		}
-		if brokerBacklinkRoute.MatchString(path) && (input.Method == "GET" || input.Method == "POST") {
-			return u, nil
-		}
-		if input.Method == "GET" && (path == "/external-data/discover" || path == "/external-data/describe" || brokerExternalResultRoute.MatchString(path)) {
-			return u, nil
-		}
-		if path == "/external-data/execute" && input.Method == "POST" {
-			return u, nil
-		}
-	}
-	return deny()
+	return u, nil
 }
 
 type brokerXSearchRequest struct {
