@@ -237,6 +237,10 @@ type SessionRuntime struct {
 	EmployeeCommandCapabilityToken string `json:"employee_command_capability_token,omitempty"`
 	ProductUpdateCapabilityToken   string `json:"product_update_capability_token,omitempty"`
 	TaskAuthorityEnvelopeB64       string `json:"task_authority_envelope_b64,omitempty"`
+	// CmoAPI is the product's CMO coordination API, set by Portal only where it
+	// issues the cmo.coordinate capability. It is the explicit signal that this
+	// turn may coordinate the product's AI employees; never inferred from text.
+	CmoAPI string `json:"cmo_api,omitempty"`
 	// OutputSchema is supplied by the authenticated control plane, never parsed
 	// from user prose. A session must explicitly support native constrained output.
 	OutputSchema json.RawMessage `json:"output_schema,omitempty"`
