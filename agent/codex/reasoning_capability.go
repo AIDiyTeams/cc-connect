@@ -9,7 +9,8 @@ import "strings"
 // DeepSeek Responses supports reasoning.effort and accepts/ignores summary:
 // https://api-docs.deepseek.com/guides/responses_api/
 func needsReasoningCapability(model, effort string) bool {
-	model = strings.TrimSpace(model)
+	// "<route>-flex" is the gateway's flex-tier variant of the same model.
+	model = strings.TrimSuffix(strings.TrimSpace(model), "-flex")
 	if strings.TrimSpace(effort) == "" {
 		return false
 	}
