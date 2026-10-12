@@ -25,6 +25,10 @@ func TestUnattendedRunOffersNoQuestionOrFormTool(t *testing.T) {
 		}
 	}
 
+	if s.teamCoordinationToolAvailable() {
+		t.Fatal("unattended run must not coordinate the team")
+	}
+
 	s.runtime.ExecutionProfile = ""
 	attended := s.threadRequestParams()
 	if attended["config"].(map[string]any)["features.default_mode_request_user_input"] != true || !s.formToolAvailable() {

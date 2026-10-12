@@ -125,7 +125,8 @@ func (s *appServerSession) teamCoordinationScript() string {
 
 // Dedicated analysis workflows keep exactly the tools they were designed with.
 func (s *appServerSession) teamCoordinationToolAvailable() bool {
-	if s.isBrandAnalysisRuntime() || s.isUserVoiceArchiveRuntime() || s.isUserVoiceJudgmentRuntime() {
+	// A scheduled run delivers its own task; coordinating the team is for conversations a person is in.
+	if s.isBrandAnalysisRuntime() || s.isUserVoiceArchiveRuntime() || s.isUserVoiceJudgmentRuntime() || s.unattended() {
 		return false
 	}
 	s.runtimeMu.RLock()
