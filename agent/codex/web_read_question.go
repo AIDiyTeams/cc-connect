@@ -56,6 +56,10 @@ const webReadQuestionDescription = "Optional question mode: set question to have
 	"returning coverage, a short finding, verbatim quotes with their exact ranges and the read receipts, instead of the page text. " +
 	"Use it to check whether a related page already covers a task; read the body yourself when you will rewrite, cite at length or judge the whole page."
 
+// Every body read stays in this scheduled run's context and is paid again on each later step.
+const webReadUnattendedQuestionNote = "In this scheduled run, checking a fact with question mode costs a fraction of reading the body, " +
+	"because a body read stays in the context for every later step; read the body when you need its structure, tables or long passages."
+
 // webReadThreadTool offers question mode only when Portal routed a page reader.
 // Dynamic tools are fixed for a thread, so a later turn without that route
 // still refuses the mode at call time.
@@ -65,6 +69,9 @@ func (s *appServerSession) webReadThreadTool() map[string]any {
 		return tool
 	}
 	tool["description"] = tool["description"].(string) + " " + webReadQuestionDescription
+	if s.unattended() {
+		tool["description"] = tool["description"].(string) + " " + webReadUnattendedQuestionNote
+	}
 	properties := tool["inputSchema"].(map[string]any)["properties"].(map[string]any)
 	properties["question"] = map[string]any{"type": "string", "maxLength": webReadQuestionMaxRunes,
 		"description": "Body only: one specific question about this page, up to 1500 characters, for example whether it already explains a candidate article's user task and what it leaves out."}

@@ -249,7 +249,16 @@ type SessionRuntime struct {
 	// WebReader is the Portal-resolved route of the helper model that answers one
 	// question about a page read by the web page tool. Nil keeps that mode off.
 	WebReader *HelperModelRoute `json:"web_reader,omitempty"`
+	// ExecutionProfile "unattended" marks work Portal runs on a schedule with
+	// nobody watching (a standing task's run): no tool may wait on a person.
+	ExecutionProfile string `json:"execution_profile,omitempty"`
 }
+
+// ExecutionProfileUnattended is the only ExecutionProfile value; see SessionRuntime.
+const ExecutionProfileUnattended = "unattended"
+
+// Unattended reports whether nobody is present to answer this turn.
+func (r SessionRuntime) Unattended() bool { return r.ExecutionProfile == ExecutionProfileUnattended }
 
 // HelperModelRoute is a Portal-owned route for a bounded helper call made on a
 // turn's behalf. The bridge never picks or defaults such a model itself.

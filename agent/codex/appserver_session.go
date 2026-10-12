@@ -581,7 +581,8 @@ func (s *appServerSession) ensureThreadForSend() error {
 
 func (s *appServerSession) threadRequestParams() map[string]any {
 	config := map[string]any{
-		"features.default_mode_request_user_input": true,
+		// Nobody can answer a question in an unattended run; the Agent states its assumptions instead.
+		"features.default_mode_request_user_input": !s.unattended(),
 	}
 	if envFile := s.currentTaskRuntimeEnvFile(); envFile != "" {
 		config["shell_environment_policy.set.TOMAKO_TASK_ENV_FILE"] = envFile
@@ -868,6 +869,7 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	}
 	s.taskRuntimeEnvFile = envFile
 	searchChanged := s.webSearch != normalizeWebSearch(runtime.WebSearch)
+	profileChanged := s.runtime.Unattended() != runtime.Unattended()
 	previousReasoningCapability := needsReasoningCapability(s.model, s.effort)
 	s.runtime = runtime
 	// A CMO turn may need the team coordination fallback below its policy.
@@ -906,7 +908,7 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	}
 	s.archiveMu.Unlock()
 	s.threadMu.Lock()
-	if s.CurrentSessionID() != "" && (s.threadBrandTools != wantsBrandTools || s.threadArchiveTools != wantsArchiveTools || s.threadVoiceTools || s.isUserVoiceJudgmentRuntime() || searchChanged || reasoningCapabilityChanged) {
+	if s.CurrentSessionID() != "" && (s.threadBrandTools != wantsBrandTools || s.threadArchiveTools != wantsArchiveTools || s.threadVoiceTools || s.isUserVoiceJudgmentRuntime() || searchChanged || profileChanged || reasoningCapabilityChanged) {
 		s.threadID.Store("")
 		s.resumeID = ""
 	}
@@ -1254,6 +1256,15 @@ func (s *appServerSession) handleRequestUserInput(rawID json.RawMessage, paramsR
 	}
 
 	questions := appServerRequestUserInputQuestions(params.Questions)
+	// The question tool is not offered to unattended runs; should one still ask, it gets
+	// an immediate answer instead of a card that would hold the run until someone comes.
+	if len(questions) > 0 && s.unattended() {
+		_ = s.writeJSON(map[string]any{
+			"jsonrpc": "2.0", "id": rawID,
+			"result": unattendedRequestUserInputResponse(params.Questions),
+		})
+		return
+	}
 	if len(questions) == 0 {
 		_ = s.writeJSON(map[string]any{
 			"jsonrpc": "2.0", "id": rawID,
@@ -2159,6 +2170,25 @@ func appServerRequestUserInputRawOptions(options []appServerRequestUserInputOpti
 		})
 	}
 	return out
+}
+
+const unattendedAnswer = "Nobody can answer: this is an unattended scheduled run. Continue with the most reasonable assumption and state it in your report."
+
+func unattendedRequestUserInputResponse(questions []appServerRequestUserInputQuestion) appServerRequestUserInputResponse {
+	response := appServerRequestUserInputResponse{Answers: map[string]appServerRequestUserInputAnswer{}}
+	for _, q := range questions {
+		if id := strings.TrimSpace(q.ID); id != "" {
+			response.Answers[id] = appServerRequestUserInputAnswer{Answers: []string{unattendedAnswer}}
+		}
+	}
+	return response
+}
+
+// unattended: Portal marked this turn as a scheduled run with nobody watching.
+func (s *appServerSession) unattended() bool {
+	s.runtimeMu.RLock()
+	defer s.runtimeMu.RUnlock()
+	return s.runtime.Unattended()
 }
 
 func appServerRequestUserInputResponseFromResult(questions []appServerRequestUserInputQuestion, result core.PermissionResult) appServerRequestUserInputResponse {

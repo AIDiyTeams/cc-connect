@@ -67,7 +67,8 @@ func formDynamicTool() map[string]any {
 func (s *appServerSession) formToolAvailable() bool {
 	s.runtimeMu.RLock()
 	defer s.runtimeMu.RUnlock()
-	return strings.TrimSpace(s.runtime.ChatSessionID) != ""
+	// A form waits for a person; an unattended run has nobody to fill it in.
+	return strings.TrimSpace(s.runtime.ChatSessionID) != "" && !s.runtime.Unattended()
 }
 
 // parseFormRequest validates the Agent's form and turns each field into a question.

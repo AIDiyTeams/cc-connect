@@ -1631,7 +1631,8 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 		"type": "register_ack", "ok": true,
 		// team_coordination_tool_v1: a runtime cmo_api gives the Agent the typed
 		// tomako_team_coordination tool, so Portal may name it in the prompt.
-		"runtime_capabilities": []string{"output_schema_v1", "turn_budget_v1", "team_coordination_tool_v1"},
+		// execution_profile_v1: an unattended runtime gets no tool that waits on a person.
+		"runtime_capabilities": []string{"output_schema_v1", "turn_budget_v1", "team_coordination_tool_v1", "execution_profile_v1"},
 		"instance_id":          bs.instanceID,
 	}); err != nil {
 		slog.Debug("bridge: write register ack failed", "error", err)
@@ -1955,6 +1956,11 @@ func normalizeSessionRuntime(runtime SessionRuntime) SessionRuntime {
 	}
 	runtime.RequiredModalities = modalities
 	runtime.WebReader = normalizeHelperModelRoute(runtime.WebReader)
+	if strings.ToLower(strings.TrimSpace(runtime.ExecutionProfile)) == ExecutionProfileUnattended {
+		runtime.ExecutionProfile = ExecutionProfileUnattended
+	} else {
+		runtime.ExecutionProfile = ""
+	}
 	return runtime
 }
 
