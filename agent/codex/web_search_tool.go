@@ -186,7 +186,8 @@ func webSearchDynamicTool() map[string]any {
 		"description": "Search the public web and get result titles, URLs and snippets. " +
 			"Use it to find sources such as official pricing pages, documentation, announcements, reviews and news, then read the pages that matter with " + webReadToolName + ": a snippet alone does not verify a fact. " +
 			"Write queries the way you would type them into a search engine, in the language of the sources you want; several focused queries work better than one long one. " +
-			"Results come from a third-party index and can be incomplete or out of date.",
+			"Results come from a third-party index and can be incomplete or out of date. " +
+			"Use this search for routine lookups. A built-in web_search, when it is also offered, puts retrieved page content straight into the conversation and costs more; turn to it when this search does not surface what you need.",
 		"inputSchema": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
