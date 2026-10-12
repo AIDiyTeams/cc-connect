@@ -624,7 +624,7 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	// Conversations read public pages through the platform reader; see web_read_tool.go.
 	if s.webReadToolAvailable() {
 		tools, _ := params["dynamicTools"].([]map[string]any)
-		params["dynamicTools"] = append(tools, webReadDynamicTool())
+		params["dynamicTools"] = append(tools, s.webReadThreadTool())
 	}
 	if s.webInventoryToolAvailable() {
 		tools, _ := params["dynamicTools"].([]map[string]any)

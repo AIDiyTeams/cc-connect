@@ -1954,7 +1954,31 @@ func normalizeSessionRuntime(runtime SessionRuntime) SessionRuntime {
 		}
 	}
 	runtime.RequiredModalities = modalities
+	runtime.WebReader = normalizeHelperModelRoute(runtime.WebReader)
 	return runtime
+}
+
+// A helper route without a usable gateway model is dropped whole, never guessed.
+func normalizeHelperModelRoute(route *HelperModelRoute) *HelperModelRoute {
+	if route == nil {
+		return nil
+	}
+	out := HelperModelRoute{
+		LogicalModel:  boundedOpaqueValue(route.LogicalModel, 64),
+		GatewayModel:  boundedSecretValue(route.GatewayModel, 128),
+		RoutePolicyID: boundedOpaqueValue(route.RoutePolicyID, 64),
+	}
+	if out.GatewayModel == "" {
+		return nil
+	}
+	if route.RoutePolicyVersion > 0 {
+		out.RoutePolicyVersion = route.RoutePolicyVersion
+	}
+	switch effort := strings.ToLower(strings.TrimSpace(route.ReasoningEffort)); effort {
+	case "minimal", "low", "medium", "high":
+		out.ReasoningEffort = effort
+	}
+	return &out
 }
 
 func boundedOpaqueValue(value string, max int) string {

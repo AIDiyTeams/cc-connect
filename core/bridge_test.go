@@ -1824,6 +1824,24 @@ func TestNormalizeSessionRuntime_WhitelistsModalitiesAndBoundsOpaqueValues(t *te
 	}
 }
 
+func TestNormalizeSessionRuntime_KeepsOnlyAUsableWebReaderRoute(t *testing.T) {
+	runtime := normalizeSessionRuntime(SessionRuntime{WebReader: &HelperModelRoute{LogicalModel: " GPT_6_LUNA ",
+		GatewayModel: " tomako/gpt-6-luna ", ReasoningEffort: "LOW", RoutePolicyVersion: -2}})
+	if route := runtime.WebReader; route == nil || route.GatewayModel != "tomako/gpt-6-luna" || route.LogicalModel != "GPT_6_LUNA" ||
+		route.ReasoningEffort != "low" || route.RoutePolicyVersion != 0 {
+		t.Fatalf("route=%+v", route)
+	}
+	if normalizeSessionRuntime(SessionRuntime{WebReader: &HelperModelRoute{LogicalModel: "GPT_6_LUNA"}}).WebReader != nil {
+		t.Fatal("a route without a gateway model was kept")
+	}
+	if normalizeSessionRuntime(SessionRuntime{WebReader: &HelperModelRoute{GatewayModel: "tomako/x\nInjected: 1"}}).WebReader != nil {
+		t.Fatal("a multi-line gateway model was kept")
+	}
+	if normalizeSessionRuntime(SessionRuntime{WebReader: &HelperModelRoute{GatewayModel: "m", ReasoningEffort: "max"}}).WebReader.ReasoningEffort != "" {
+		t.Fatal("an unknown reasoning effort was kept")
+	}
+}
+
 func TestBridgeReplySourceRequiresEveryChunkToBeNativeAndSurvivesPreviewClone(t *testing.T) {
 	rc := newBridgeReplyCtx(nil, "session", "cmsg-test")
 	preview := cloneBridgeReplyCtx(rc)

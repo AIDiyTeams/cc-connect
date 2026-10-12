@@ -246,6 +246,19 @@ type SessionRuntime struct {
 	OutputSchema json.RawMessage `json:"output_schema,omitempty"`
 	// Trusted per-turn deadline; 0 keeps the engine default, 1..3600 seconds is bounded.
 	TurnBudgetSeconds int `json:"turn_budget_seconds,omitempty"`
+	// WebReader is the Portal-resolved route of the helper model that answers one
+	// question about a page read by the web page tool. Nil keeps that mode off.
+	WebReader *HelperModelRoute `json:"web_reader,omitempty"`
+}
+
+// HelperModelRoute is a Portal-owned route for a bounded helper call made on a
+// turn's behalf. The bridge never picks or defaults such a model itself.
+type HelperModelRoute struct {
+	LogicalModel       string `json:"logical_model,omitempty"`
+	GatewayModel       string `json:"gateway_model,omitempty"`
+	RoutePolicyID      string `json:"route_policy_id,omitempty"`
+	RoutePolicyVersion int64  `json:"route_policy_version,omitempty"`
+	ReasoningEffort    string `json:"reasoning_effort,omitempty"`
 }
 
 // EventType distinguishes different kinds of agent output.

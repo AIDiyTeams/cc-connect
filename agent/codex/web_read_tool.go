@@ -162,17 +162,29 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	return b.Buffer.Write(p)
 }
 
-func (s *appServerSession) readWebPage(arguments map[string]any) (string, error) {
+// webReadTarget validates the requested address and finds the installed reader.
+func (s *appServerSession) webReadTarget(arguments map[string]any) (*url.URL, string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(stringArg(arguments["url"])))
 	if err != nil || parsed.Hostname() == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return "", fmt.Errorf("url must be an absolute public http/https URL")
+		return nil, "", fmt.Errorf("url must be an absolute public http/https URL")
 	}
 	if !isPublicHostname(parsed.Hostname()) {
-		return "", fmt.Errorf("url host must be public")
+		return nil, "", fmt.Errorf("url host must be public")
 	}
 	script := s.webReadScript()
 	if script == "" {
-		return "", fmt.Errorf("web page reading is not installed for this conversation")
+		return nil, "", fmt.Errorf("web page reading is not installed for this conversation")
+	}
+	return parsed, script, nil
+}
+
+func (s *appServerSession) readWebPage(arguments map[string]any) (string, error) {
+	parsed, script, err := s.webReadTarget(arguments)
+	if err != nil {
+		return "", err
+	}
+	if _, asked := arguments["question"]; asked {
+		return s.answerWebPageQuestion(parsed, script, arguments)
 	}
 	args := []string{script, parsed.String(), "--format=agent"}
 	mode := "body"
@@ -222,49 +234,67 @@ func (s *appServerSession) readWebPage(arguments map[string]any) (string, error)
 		args = append(args, "--render=always")
 	}
 
+	release, err := s.acquireWebReader()
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	output, truncated, err := s.runWebReader(args, webReadOutputLimit)
+	if err != nil {
+		return "", err
+	}
+	if truncated {
+		output += "\n[Output cut at the tool limit; continue with start to read further.]"
+	}
+	return output, nil
+}
+
+func (s *appServerSession) acquireWebReader() (func(), error) {
 	release, err := acquireWebReadSlots(s.ctx, 1)
 	if err != nil {
 		if s.ctx.Err() != nil {
-			return "", s.ctx.Err()
+			return nil, s.ctx.Err()
 		}
-		return "", fmt.Errorf("the web page reader is busy; try again shortly")
+		return nil, fmt.Errorf("the web page reader is busy; try again shortly")
 	}
-	defer release()
+	return release, nil
+}
+
+// runWebReader runs one reader process in the session scratch with a
+// credential-free environment and returns its trimmed output.
+func (s *appServerSession) runWebReader(args []string, limit int) (string, bool, error) {
 	ctx, cancel := context.WithTimeout(s.ctx, webReadTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "node", args...)
 	cmd.Dir = s.workDir
 	cmd.Env = webReadEnv()
 	if s.permissionsProfile != "" && s.sandboxScratchDir == "" {
-		return "", fmt.Errorf("web reader session scratch is unavailable")
+		return "", false, fmt.Errorf("web reader session scratch is unavailable")
 	}
 	if s.sandboxScratchDir != "" {
 		// The trusted session setup owns this directory; model arguments cannot select it.
 		cmd.Dir = s.sandboxScratchDir
 		cmd.Env = append(cmd.Env, "TOMAKO_WEB_READ_HOST_IO=1", "TOMAKO_WEB_READ_SCRATCH_DIR="+s.sandboxScratchDir)
 	}
-	stdout := &limitedBuffer{limit: webReadOutputLimit}
+	stdout := &limitedBuffer{limit: limit}
 	stderr := &limitedBuffer{limit: 4096}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
-			return "", fmt.Errorf("reading the page timed out; facts from it remain unverified")
+			return "", false, fmt.Errorf("reading the page timed out; facts from it remain unverified")
 		}
 		message := strings.TrimSpace(stderr.String())
 		if message == "" {
 			message = err.Error()
 		}
-		return "", fmt.Errorf("the web page reader failed: %s", limitRunes(message, 300))
+		return "", false, fmt.Errorf("the web page reader failed: %s", limitRunes(message, 300))
 	}
 	output := strings.TrimSpace(stdout.String())
 	if output == "" {
-		return "", fmt.Errorf("the web page reader returned nothing")
+		return "", false, fmt.Errorf("the web page reader returned nothing")
 	}
-	if stdout.truncated {
-		output += "\n[Output cut at the tool limit; continue with start to read further.]"
-	}
-	return output, nil
+	return output, stdout.truncated, nil
 }
 
 // webReadPublicActivity shows a page read in the conversation the way native web
