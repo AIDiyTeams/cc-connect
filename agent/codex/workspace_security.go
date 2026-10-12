@@ -18,7 +18,7 @@ import (
 // profiles are rebuilt by fencedInheritedPermissions so stale host paths and
 // local network/socket exceptions cannot survive recursive CLI merging. Broker mode requires the Linux proxy's exact UDS relay and
 // read-only child mounts in the matching Codex release.
-func workspaceSecurityStartupArgs(profile, workDir, scratchDir, brokerPublicDir, sharedSkillsDir string) ([]string, error) {
+func workspaceSecurityStartupArgs(profile, workDir, scratchDir, brokerPublicDir, sharedSkillsDir string, excludedSkills ...string) ([]string, error) {
 	profile = strings.TrimSpace(profile)
 	if profile == "" {
 		return nil, nil
@@ -83,6 +83,14 @@ func workspaceSecurityStartupArgs(profile, workDir, scratchDir, brokerPublicDir,
 			filesystemRules += ", " + quote(filepath.Join(sharedSkillsDir, filepath.FromSlash(relative))) + " = " + quote("none")
 		}
 	}
+	var disabledSkills []string
+	for _, path := range excludedSkills {
+		if !filepath.IsAbs(path) || sharedSkillsDir == "" || !inside(filepath.Join(sharedSkillsDir, "skills"), path) || filepath.Dir(path) != filepath.Join(sharedSkillsDir, "skills") {
+			return nil, fmt.Errorf("codex: excluded skill must be a direct child of the shared skills directory")
+		}
+		filesystemRules += ", " + quote(path) + " = " + quote("none")
+		disabledSkills = append(disabledSkills, "{ path = "+quote(filepath.Join(path, "SKILL.md"))+", enabled = false }")
+	}
 	// Codex splits CLI override keys on every dot, without parsing TOML quoted
 	// key segments. Keep paths and profile names in the inline table value so
 	// dots, quotes and spaces cannot change the permission hierarchy.
@@ -96,6 +104,9 @@ func workspaceSecurityStartupArgs(profile, workDir, scratchDir, brokerPublicDir,
 		filesystemRules,
 	)
 	args := []string{"-c", override}
+	if len(disabledSkills) > 0 {
+		args = append(args, "-c", "skills.config = ["+strings.Join(disabledSkills, ", ")+"]")
+	}
 	if brokerPublicDir != "" {
 		// Keep general public web access, but route it through the managed proxy
 		// so direct localhost/private connections cannot bypass capability scope.

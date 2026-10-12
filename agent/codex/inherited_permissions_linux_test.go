@@ -27,7 +27,15 @@ func TestFencedInheritanceLegacySkillsCannotBypassSandbox(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, path := range []string{filepath.Join(current, "public.txt"), filepath.Join(current, "brand-analysis-pipeline.mjs"), filepath.Join(legacy, "private.txt")} {
+	for _, name := range []string{"excluded", "employee"} {
+		if err := os.MkdirAll(filepath.Join(current, "skills", name), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(current, "skills"), filepath.Join(brand, "skills")); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(current, "public.txt"), filepath.Join(current, "skills", "excluded", "SKILL.md"), filepath.Join(current, "skills", "employee", "SKILL.md"), filepath.Join(current, "brand-analysis-pipeline.mjs"), filepath.Join(legacy, "private.txt")} {
 		if err := os.WriteFile(path, []byte("synthetic"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -45,13 +53,16 @@ func TestFencedInheritanceLegacySkillsCannotBypassSandbox(t *testing.T) {
 	if err := ensureCodexHomeInheritedConfig(home, "brand", current); err != nil {
 		t.Fatal(err)
 	}
-	security, err := workspaceSecurityStartupArgs("brand", brand, scratch, "", current)
+	security, err := workspaceSecurityStartupArgs("brand", brand, scratch, "", current, filepath.Join(current, "skills", "excluded"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	args := append([]string{"sandbox"}, security...)
 	args = append(args, "--", "/bin/sh", "-ec", `
 test "$(cat "$1/public.txt")" = synthetic
+test "$(cat skills/employee/SKILL.md)" = synthetic
+! cat "$1/skills/excluded/SKILL.md" >/dev/null 2>&1
+! cat skills/excluded/SKILL.md >/dev/null 2>&1
 ! cat "$1/brand-analysis-pipeline.mjs" >/dev/null 2>&1
 ! cat "$2/private.txt" >/dev/null 2>&1
 ! cat "$3/private.txt" >/dev/null 2>&1

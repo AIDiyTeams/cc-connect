@@ -238,6 +238,8 @@ type appServerSession struct {
 	// Resumed threads may retain a previous turn's collaboration instructions.
 	// A later unscoped turn must explicitly restore Codex's built-in default.
 	developerInstructionsManaged bool
+	// Catalog and filesystem exclusions are immutable for a launched process.
+	workbenchSkillScope *bool
 
 	brandFlowMu sync.Mutex
 	brandFlow   brandAnalysisFlow
@@ -343,7 +345,19 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 			err = prepareConversationScratchDir(scratch, time.Now())
 		}
 		if err == nil {
-			s.securityStartupArgs, err = workspaceSecurityStartupArgs(s.permissionsProfile, workDir, scratch, filepath.Dir(s.taskRuntimeEnvFile), envValue(core.MergeEnv(os.Environ(), s.extraEnv), "SKILLS_OL_DIR"))
+			sharedDir := envValue(core.MergeEnv(os.Environ(), s.extraEnv), "SKILLS_OL_DIR")
+			if sharedDir != "" {
+				sharedDir, err = filepath.EvalSymlinks(sharedDir)
+			}
+			workbench := strings.TrimSpace(s.runtime.ChatSessionID) != ""
+			var excluded []string
+			if err == nil {
+				excluded, err = workbenchExcludedSkillPaths(sharedDir, workbench)
+			}
+			if err == nil {
+				s.securityStartupArgs, err = workspaceSecurityStartupArgs(s.permissionsProfile, workDir, scratch, filepath.Dir(s.taskRuntimeEnvFile), sharedDir, excluded...)
+				s.workbenchSkillScope = &workbench
+			}
 		}
 		if err != nil {
 			_ = s.Close()
@@ -843,6 +857,10 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	}
 	runtime.OutputSchema = append(json.RawMessage(nil), runtime.OutputSchema...)
 	s.runtimeMu.Lock()
+	if s.workbenchSkillScope != nil && *s.workbenchSkillScope != (strings.TrimSpace(runtime.ChatSessionID) != "") {
+		s.runtimeMu.Unlock()
+		return fmt.Errorf("codex: runtime skill scope changed; start a new session")
+	}
 	envFile, err := s.writeSessionRuntime(runtime)
 	if err != nil {
 		s.runtimeMu.Unlock()
