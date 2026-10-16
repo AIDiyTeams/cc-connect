@@ -118,6 +118,10 @@ func TestTeamCoordinationArgumentsMapToTheHelperContract(t *testing.T) {
 		{"status", map[string]any{"operation": "status", "planId": testPlanID}, []string{testPlanID}, ""},
 		{"message", map[string]any{"operation": "message", "planId": testPlanID, "sourceMessageId": "cmsg-later"}, []string{testPlanID},
 			`{"sourceMessageId":"cmsg-later"}`},
+		{"coordinator note", map[string]any{"operation": "message", "planId": testPlanID, "note": "Budget is 1.5M USD", "sourceMessageId": ""}, []string{testPlanID},
+			`{"note":"Budget is 1.5M USD"}`},
+		{"note with forwarded message", map[string]any{"operation": "message", "planId": testPlanID, "note": "Also this", "sourceMessageId": "cmsg-later"}, []string{testPlanID},
+			`{"note":"Also this","sourceMessageId":"cmsg-later"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			operation, args, stdin, err := teamCoordinationRequest(tc.arguments)
@@ -150,6 +154,9 @@ func TestTeamCoordinationArgumentsMapToTheHelperContract(t *testing.T) {
 		"status without plan":     {"operation": "status"},
 		"plan not from a receipt": {"operation": "status", "planId": "wp-../../context"},
 		"message without source":  {"operation": "message", "planId": testPlanID},
+		"blank note":              {"operation": "message", "planId": testPlanID, "note": "   "},
+		"long note":               {"operation": "message", "planId": testPlanID, "note": strings.Repeat("字", 4001)},
+		"note on handoff":         valid(map[string]any{"note": "smuggled"}),
 		"handoff without target":  valid(map[string]any{"employeeId": ""}),
 		"handoff id with spaces":  valid(map[string]any{"employeeId": "emp a"}),
 		"unknown execution kind":  valid(map[string]any{"executionKind": "publish"}),

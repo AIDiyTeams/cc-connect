@@ -52,12 +52,12 @@ var teamCoordinationOperationFields = map[string]map[string]bool{
 	"context": {},
 	"handoff": {"sourceMessageId": true, "contextMessageIds": true, "employeeId": true, "executionKind": true, "title": true, "brief": true},
 	"status":  {"planId": true},
-	"message": {"planId": true, "sourceMessageId": true},
+	"message": {"planId": true, "sourceMessageId": true, "note": true},
 }
 
 var teamCoordinationSchemaFields = map[string]bool{
 	"employeeId": true, "planId": true, "executionKind": true, "title": true, "brief": true,
-	"sourceMessageId": true, "contextMessageIds": true,
+	"sourceMessageId": true, "contextMessageIds": true, "note": true,
 }
 
 // A thread keeps the dynamic tools it started with: Codex restores them from the
@@ -70,7 +70,7 @@ const teamCoordinationHelperFallback = "Team coordination fallback: if " + teamC
 	"CMO_API='<trusted [CMO_API=...] value of this turn>' node \"${SKILLS_OL_DIR:?}/cmo-handoff.mjs\" " +
 	"context|handoff|status <planId>|message <planId>. The helper attaches current authority: never read, print " +
 	"or pass tokens or nonces, or hand-write HTTP. handoff takes {sourceMessageId,contextMessageIds,employeeId," +
-	"executionKind,title,brief} and message takes {sourceMessageId} as one JSON object on stdin, built with a " +
+	"executionKind,title,brief} and message takes {note,sourceMessageId} (either or both) as one JSON object on stdin, built with a " +
 	"JSON library or quoted heredoc; never shell-interpolate user text. Exit 0 prints the receipt; otherwise " +
 	"stderr gives the HTTP status, code and reason."
 
@@ -84,7 +84,8 @@ func teamCoordinationDynamicTool() map[string]any {
 			"(each employee's id, kind, title and capabilities), the user source message ids and current handoff receipts. " +
 			"operation=handoff submits one task the user explicitly asked an employee to do and returns a receipt " +
 			"(accepted means queued, not started or finished). operation=status reads a handoff by planId; " +
-			"operation=message forwards a later user message to that handoff. Credentials and request signing are handled by the platform.",
+			"operation=message sends that handoff's employee the coordinator's own words (note), a later user message (sourceMessageId), or both. "+
+			"Credentials and request signing are handled by the platform.",
 		"inputSchema": map[string]any{
 			"type": "object", "additionalProperties": false, "required": []string{"operation"},
 			"properties": map[string]any{
@@ -95,6 +96,7 @@ func teamCoordinationDynamicTool() map[string]any {
 				"title":           text("handoff: short task title."),
 				"brief":           text("Complete task brief in the conversation language"),
 				"sourceMessageId": text("handoff and message: the user source message id."),
+				"note":            text("message: your own words to the employee about this work, up to 4000 characters."),
 				"contextMessageIds": map[string]any{"type": "array", "maxItems": 30,
 					"items": map[string]any{"type": "string"}, "description": "handoff: other relevant user source message ids."},
 			},
@@ -228,11 +230,25 @@ func teamCoordinationRequest(arguments map[string]any) (operation string, args [
 		if err != nil {
 			return "", nil, nil, err
 		}
-		source, err := teamCoordinationID(arguments["sourceMessageId"], "sourceMessageId")
-		if err != nil {
-			return "", nil, nil, err
+		body := map[string]string{}
+		if !emptyToolArgument(arguments["sourceMessageId"]) {
+			source, err := teamCoordinationID(arguments["sourceMessageId"], "sourceMessageId")
+			if err != nil {
+				return "", nil, nil, err
+			}
+			body["sourceMessageId"] = source
 		}
-		stdin, _ = json.Marshal(map[string]string{"sourceMessageId": source})
+		if !emptyToolArgument(arguments["note"]) {
+			note, err := teamCoordinationText(arguments["note"], "note", 4_000)
+			if err != nil {
+				return "", nil, nil, err
+			}
+			body["note"] = note
+		}
+		if len(body) == 0 {
+			return "", nil, nil, fmt.Errorf("message needs note, sourceMessageId or both")
+		}
+		stdin, _ = json.Marshal(body)
 		return operation, []string{plan}, stdin, nil
 	}
 	var handoff teamCoordinationHandoff
