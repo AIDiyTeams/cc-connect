@@ -53,11 +53,12 @@ var teamCoordinationOperationFields = map[string]map[string]bool{
 	"handoff": {"sourceMessageId": true, "contextMessageIds": true, "employeeId": true, "executionKind": true, "title": true, "brief": true},
 	"status":  {"planId": true},
 	"message": {"planId": true, "sourceMessageId": true, "note": true},
+	"outcome": {"planId": true, "outcomeId": true},
 }
 
 var teamCoordinationSchemaFields = map[string]bool{
 	"employeeId": true, "planId": true, "executionKind": true, "title": true, "brief": true,
-	"sourceMessageId": true, "contextMessageIds": true, "note": true,
+	"sourceMessageId": true, "contextMessageIds": true, "note": true, "outcomeId": true,
 }
 
 // A thread keeps the dynamic tools it started with: Codex restores them from the
@@ -68,7 +69,7 @@ const teamCoordinationHelperFallback = "Team coordination fallback: if " + teamC
 	" is not among your tools in this conversation (a conversation keeps the tools it started with), " +
 	"perform the same CMO operations with the Skills-OL helper instead: " +
 	"CMO_API='<trusted [CMO_API=...] value of this turn>' node \"${SKILLS_OL_DIR:?}/cmo-handoff.mjs\" " +
-	"context|handoff|status <planId>|message <planId>. The helper attaches current authority: never read, print " +
+	"context|handoff|status <planId>|message <planId>|outcome <planId> <outcomeId>. The helper attaches current authority: never read, print " +
 	"or pass tokens or nonces, or hand-write HTTP. handoff takes {sourceMessageId,contextMessageIds,employeeId," +
 	"executionKind,title,brief} and message takes {note,sourceMessageId} (either or both) as one JSON object on stdin, built with a " +
 	"JSON library or quoted heredoc; never shell-interpolate user text. Exit 0 prints the receipt; otherwise " +
@@ -84,14 +85,17 @@ func teamCoordinationDynamicTool() map[string]any {
 			"(each employee's id, kind, title and capabilities), the user source message ids and current handoff receipts. " +
 			"operation=handoff submits one task the user explicitly asked an employee to do and returns a receipt " +
 			"(accepted means queued, not started or finished). operation=status reads a handoff by planId; " +
-			"operation=message sends that handoff's employee the coordinator's own words (note), a later user message (sourceMessageId), or both. "+
+			"operation=message sends that handoff's employee the coordinator's own words (note), a later user message (sourceMessageId), or both. " +
+			"operation=outcome reads one outcome that handoff's employee saved (outcomeId as listed for that work) with its readable text, " +
+			"so a delivery is judged by what was delivered. " +
 			"Credentials and request signing are handled by the platform.",
 		"inputSchema": map[string]any{
 			"type": "object", "additionalProperties": false, "required": []string{"operation"},
 			"properties": map[string]any{
-				"operation":       map[string]any{"type": "string", "enum": []string{"context", "handoff", "status", "message"}},
+				"operation":       map[string]any{"type": "string", "enum": []string{"context", "handoff", "status", "message", "outcome"}},
 				"employeeId":      text("handoff: the employee id from operation=context."),
-				"planId":          text("status and message: the wp-<uuid> planId from a receipt."),
+				"planId":          text("status, message and outcome: the wp-<uuid> planId from a receipt."),
+				"outcomeId":       text("outcome: the id of an outcome listed for that work in TEAM IN THIS CONVERSATION."),
 				"executionKind":   map[string]any{"type": "string", "enum": []string{"conversation", "content", "kol_discovery"}},
 				"title":           text("handoff: short task title."),
 				"brief":           text("Complete task brief in the conversation language"),
@@ -206,7 +210,7 @@ func teamCoordinationRequest(arguments map[string]any) (operation string, args [
 	operation, _ = arguments["operation"].(string)
 	fields, known := teamCoordinationOperationFields[operation]
 	if !known {
-		return "", nil, nil, fmt.Errorf("operation must be context, handoff, status or message")
+		return "", nil, nil, fmt.Errorf("operation must be context, handoff, status, message or outcome")
 	}
 	for key, value := range arguments {
 		if key == "operation" {
@@ -225,6 +229,16 @@ func teamCoordinationRequest(arguments map[string]any) (operation string, args [
 	case "status":
 		plan, err := teamCoordinationPlanID(arguments["planId"])
 		return operation, []string{plan}, nil, err
+	case "outcome":
+		plan, err := teamCoordinationPlanID(arguments["planId"])
+		if err != nil {
+			return "", nil, nil, err
+		}
+		outcome, err := teamCoordinationID(arguments["outcomeId"], "outcomeId")
+		if err != nil {
+			return "", nil, nil, err
+		}
+		return operation, []string{plan, outcome}, nil, nil
 	case "message":
 		plan, err := teamCoordinationPlanID(arguments["planId"])
 		if err != nil {

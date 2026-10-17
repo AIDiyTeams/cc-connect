@@ -63,7 +63,7 @@ func TestTeamCoordinationToolOfferedOnlyWithTrustedCmoAuthority(t *testing.T) {
 	}
 	schema := teamCoordinationDynamicTool()["inputSchema"].(map[string]any)
 	operation := schema["properties"].(map[string]any)["operation"].(map[string]any)
-	if strings.Join(operation["enum"].([]string), ",") != "context,handoff,status,message" ||
+	if strings.Join(operation["enum"].([]string), ",") != "context,handoff,status,message,outcome" ||
 		strings.Join(schema["required"].([]string), ",") != "operation" {
 		t.Fatalf("schema drifted from the documented operations: %#v", schema)
 	}
@@ -116,6 +116,8 @@ func TestTeamCoordinationArgumentsMapToTheHelperContract(t *testing.T) {
 			"executionKind": "kol_discovery", "title": "YouTube creators", "brief": "Find creators"}, nil,
 			`{"sourceMessageId":"cmsg-user","contextMessageIds":[],"employeeId":"emp-kol","executionKind":"kol_discovery","title":"YouTube creators","brief":"Find creators"}`},
 		{"status", map[string]any{"operation": "status", "planId": testPlanID}, []string{testPlanID}, ""},
+		{"outcome", map[string]any{"operation": "outcome", "planId": testPlanID, "outcomeId": "art-650c969ecb0b4227"},
+			[]string{testPlanID, "art-650c969ecb0b4227"}, ""},
 		{"message", map[string]any{"operation": "message", "planId": testPlanID, "sourceMessageId": "cmsg-later"}, []string{testPlanID},
 			`{"sourceMessageId":"cmsg-later"}`},
 		{"coordinator note", map[string]any{"operation": "message", "planId": testPlanID, "note": "Budget is 1.5M USD", "sourceMessageId": ""}, []string{testPlanID},
@@ -152,6 +154,9 @@ func TestTeamCoordinationArgumentsMapToTheHelperContract(t *testing.T) {
 		"API argument":            {"operation": "context", "cmoApi": "https://evil.example/cmo"},
 		"field of another op":     {"operation": "context", "planId": testPlanID},
 		"status without plan":     {"operation": "status"},
+		"outcome without id":      {"operation": "outcome", "planId": testPlanID},
+		"outcome id as a path":    {"operation": "outcome", "planId": testPlanID, "outcomeId": "art/../context"},
+		"outcome id on status":    {"operation": "status", "planId": testPlanID, "outcomeId": "art-1"},
 		"plan not from a receipt": {"operation": "status", "planId": "wp-../../context"},
 		"message without source":  {"operation": "message", "planId": testPlanID},
 		"blank note":              {"operation": "message", "planId": testPlanID, "note": "   "},
