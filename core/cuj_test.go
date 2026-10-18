@@ -2106,3 +2106,20 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 		t.Fatal("platB received no replies")
 	}
 }
+
+// Unsupported external sessions are visibly refused before commands or history can run.
+func TestCUJ_G1_ExternalIsolationFailsClosedWithoutAConfinedRuntime(t *testing.T) {
+	env := newCUJEnv(t)
+	defer env.engine.Stop()
+	for _, content := range []string{"/history", "!echo must-not-run", "write a draft"} {
+		before := len(env.plat.getSent())
+		env.engine.ReceiveMessage(env.plat, &Message{SessionKey: "test:external", Platform: "test", UserID: "external", MessageID: content, Content: content, ReplyCtx: "external", Runtime: SessionRuntime{IsolationKey: strings.Repeat("a", 64)}})
+		env.waitFor("isolation refusal", time.Second, func() bool { return len(env.plat.getSent()) > before })
+		if !strings.Contains(env.lastSent(), "cannot start securely") {
+			t.Fatalf("not refused: %s", env.lastSent())
+		}
+	}
+	if len(env.agent.sessions) != 0 {
+		t.Fatal("external request started an unconfined process")
+	}
+}

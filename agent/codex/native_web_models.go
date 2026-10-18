@@ -193,7 +193,7 @@ func (s *appServerSession) SupportsSessionRuntime(runtime core.SessionRuntime) b
 		model = s.model
 		s.runtimeMu.RUnlock()
 	}
-	return s.modelCatalogKind == kind && s.startupToolOutputTokens == toolOutputTokensFor(model, kind)
+	return s.isolationKey == runtime.IsolationKey && s.modelCatalogKind == kind && s.startupToolOutputTokens == toolOutputTokensFor(model, kind)
 }
 
 // Ordinary namespaced GPT has no Codex descriptor and otherwise gets a 10KB

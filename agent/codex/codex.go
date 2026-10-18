@@ -397,6 +397,13 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	return a.StartSessionWithRuntime(ctx, sessionID, core.SessionRuntime{})
 }
 
+// SupportsIsolatedSessions requires a local process with the fixed filesystem fence.
+func (a *Agent) SupportsIsolatedSessions() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.backend == "app_server" && a.permissionsProfile != "" && a.appServerURL == "stdio://"
+}
+
 func (a *Agent) StartSessionWithRuntime(ctx context.Context, sessionID string, runtime core.SessionRuntime) (core.AgentSession, error) {
 	a.mu.Lock()
 	mode := a.mode
@@ -426,7 +433,18 @@ func (a *Agent) StartSessionWithRuntime(ctx context.Context, sessionID string, r
 	}
 	provName, provAPIKey, provWireAPI, provHeaders := a.activeProviderCodexConfig()
 	a.mu.Unlock()
-	workDir = resolveSessionWorkDir(workDir, sessionWorkspaceBase, envValue(extraEnv, "CC_SESSION_KEY"))
+	if err := core.ValidateIsolationKey(runtime.IsolationKey); err != nil {
+		return nil, err
+	}
+	if runtime.IsolationKey != "" {
+		if backend != "app_server" || permissionsProfile == "" || appServerURL != "stdio://" || !core.IsIsolatedWorkspace(workDir, runtime.IsolationKey) {
+			return nil, fmt.Errorf("codex: external conversation requires a local fenced workspace")
+		}
+		// Never inherit a configured shared CODEX_HOME or session workspace override.
+		codexHome = filepath.Join(workDir, ".codex")
+	} else {
+		workDir = resolveSessionWorkDir(workDir, sessionWorkspaceBase, envValue(extraEnv, "CC_SESSION_KEY"))
+	}
 	if permissionsProfile != "" {
 		var err error
 		extraEnv, err = prepareFencedEnvironment(workDir, extraEnv)

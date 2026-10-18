@@ -2665,6 +2665,18 @@ func (e *Engine) startMessageRecallMonitor(sessionKey string) context.CancelFunc
 }
 
 func (e *Engine) handleMessage(p Platform, msg *Message) {
+	isolated := msg.Runtime.IsolationKey != ""
+	var isolatedWorkspace string
+	if isolated {
+		var err error
+		isolatedWorkspace, err = e.isolatedWorkspace(msg.Runtime)
+		if err != nil {
+			slog.Warn("external conversation refused", "error", err)
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgIsolationUnavailable))
+			return
+		}
+	}
+
 	if msg.Recalled {
 		e.handleMessageRecall(p, msg)
 		return
@@ -2733,7 +2745,9 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	// Resolve aliases on user text BEFORE merging ExtraContent, so reply
 	// quotes and platform context survive alias resolution (PR #420 fix).
-	content = e.resolveAlias(content)
+	if !isolated {
+		content = e.resolveAlias(content)
+	}
 	if msg.ExtraContent != "" {
 		if content == "" {
 			msg.Content = msg.ExtraContent
@@ -2769,6 +2783,9 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		// Java/Bridge business sessions share one workspace per Brand. Legacy
 		// sessions without a brand/project scope retain per-user routing.
 		workspace, brandScoped := e.brandWorkspacePath(msg.SessionKey)
+		if isolated {
+			workspace, brandScoped = isolatedWorkspace, true
+		}
 		channelName := ""
 		var err error
 		prefix := e.userDirPrefix()
@@ -2821,7 +2838,12 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			}
 
 			var effectiveWorkspace string
-			wsAgent, wsSessions, _, effectiveWorkspace, err = e.workspaceContext(workspace, msg.SessionKey)
+			if isolated {
+				wsAgent, wsSessions, err = e.getOrCreateWorkspaceAgent(workspace)
+				effectiveWorkspace = workspace
+			} else {
+				wsAgent, wsSessions, _, effectiveWorkspace, err = e.workspaceContext(workspace, msg.SessionKey)
+			}
 			if err != nil {
 				slog.Error("failed to create workspace agent", "workspace", workspace, "err", err)
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf("Failed to initialize workspace: %v", err))
@@ -2841,7 +2863,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
 	}
 
-	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
+	if !isolated && len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
 		if e.handleCommand(p, msg, content) {
 			return
 		}
@@ -2850,13 +2872,13 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	// Permission responses bypass the session lock.
 	// Must be after workspace resolution so interactiveKey is correct.
-	if e.handlePendingPermission(p, msg, content, interactiveKey) {
+	if !isolated && e.handlePendingPermission(p, msg, content, interactiveKey) {
 		return
 	}
 
 	// "!" prefix: treat as shell command (same as /shell)
 	// Placed after permission handling so "!yes" doesn't hijack permission responses.
-	if len(msg.Images) == 0 && strings.HasPrefix(content, "!") {
+	if !isolated && len(msg.Images) == 0 && strings.HasPrefix(content, "!") {
 		shellCmd := strings.TrimSpace(content[1:])
 		if shellCmd != "" {
 			// Check disabled / admin just like handleCommand does for "shell"
@@ -4134,6 +4156,19 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 }
 
 func startSessionWithRuntime(ctx context.Context, agent Agent, sessionID string, runtime SessionRuntime) (AgentSession, error) {
+	if err := ValidateIsolationKey(runtime.IsolationKey); err != nil {
+		return nil, err
+	}
+	if runtime.IsolationKey != "" {
+		confined, ok := agent.(IsolatedSessionAgent)
+		if !ok || !confined.SupportsIsolatedSessions() {
+			return nil, fmt.Errorf("external conversation isolation unavailable")
+		}
+		if _, ok := agent.(SessionRuntimeStarter); !ok {
+			return nil, fmt.Errorf("external conversation requires runtime startup")
+		}
+	}
+
 	if starter, ok := agent.(SessionRuntimeStarter); ok {
 		return starter.StartSessionWithRuntime(ctx, sessionID, runtime)
 	}

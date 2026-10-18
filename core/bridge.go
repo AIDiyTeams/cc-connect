@@ -1632,7 +1632,7 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 		// team_coordination_tool_v1: a runtime cmo_api gives the Agent the typed
 		// tomako_team_coordination tool, so Portal may name it in the prompt.
 		// execution_profile_v1: an unattended runtime gets no tool that waits on a person.
-		"runtime_capabilities": []string{"output_schema_v1", "turn_budget_v1", "team_coordination_tool_v1", "execution_profile_v1"},
+		"runtime_capabilities": []string{"output_schema_v1", "turn_budget_v1", "team_coordination_tool_v1", "execution_profile_v1", "external_isolation_v1"},
 		"instance_id":          bs.instanceID,
 	}); err != nil {
 		slog.Debug("bridge: write register ack failed", "error", err)
@@ -1792,6 +1792,11 @@ func (a *bridgeAdapter) handleMessage(raw json.RawMessage) {
 
 	if m.SessionKey == "" || m.UserID == "" {
 		slog.Debug("bridge: message missing required fields", "platform", a.platform)
+		return
+	}
+
+	if err := ValidateIsolationKey(m.Runtime.IsolationKey); err != nil {
+		a.sendTurnDispatchRejection(m, "INVALID_ISOLATION", "invalid external conversation scope")
 		return
 	}
 

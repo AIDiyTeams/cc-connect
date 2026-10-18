@@ -208,6 +208,9 @@ type Message struct {
 // It is never inferred from prompt text and must only be populated by a trusted
 // platform adapter such as the authenticated Tomako Bridge connection.
 type SessionRuntime struct {
+	// IsolationKey is a Portal-computed SHA-256 scope for one external conversation.
+	// It is trusted runtime metadata, never derived from message text.
+	IsolationKey string `json:"isolation_key,omitempty"`
 	// Explicit delivery keeps downloaded reference inputs out of generated results.
 	MediaDeliveryMode  string   `json:"media_delivery_mode,omitempty"`
 	Scene              string   `json:"scene,omitempty"`
