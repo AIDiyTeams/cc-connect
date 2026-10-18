@@ -224,6 +224,7 @@ type appServerSession struct {
 	runtimeMu             sync.RWMutex
 	usage                 *core.UsageReport
 	context               *core.ContextUsage
+	isolationKey          string // immutable startup boundary
 	runtime               core.SessionRuntime
 	taskRuntimeEnvFile    string
 	capabilityBroker      *capabilityBroker
@@ -313,6 +314,7 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 
 	if len(startupRuntime) > 0 {
 		runtime := startupRuntime[0]
+		s.isolationKey = runtime.IsolationKey
 		if err := s.SetSessionRuntime(runtime); err != nil {
 			s.capabilityBroker.close()
 			removeTaskRuntimeEnv(s.taskRuntimeEnvFile)
@@ -847,6 +849,13 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 // session only. turn/start repeats the model on every turn, so concurrent
 // sessions never depend on the Agent's process-wide provider switcher.
 func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error {
+	if err := core.ValidateIsolationKey(runtime.IsolationKey); err != nil {
+		return err
+	}
+	if runtime.IsolationKey != s.isolationKey {
+		return fmt.Errorf("codex: conversation isolation changed; start a new session")
+	}
+
 	if !s.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}

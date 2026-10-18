@@ -1166,3 +1166,11 @@ streaming; provisional prose itself never becomes answer history.
 Roll out the backward-compatible backend receiver before the bridge sender. Revert
 the sender before removing receiver support. Existing clients continue consuming
 the same public progress schema and old stored conversations remain readable.
+
+### External conversation isolation (Test pilot)
+
+`external_isolation_v1` advertises support for the authenticated runtime `isolation_key`: a lowercase 64-character SHA-256 digest computed by Portal over the installation/audience/conversation identity. Invalid nonempty keys are rejected, never normalized into ordinary access. Portal must check this capability before enabling external tasks.
+
+External requests require multi-workspace mode and an explicitly supporting agent. They use `external-conversations/<isolation_key>` below the configured base, independently of brand directories and session directory overrides. Symlinked scope paths are refused. Plain chat text cannot invoke aliases, slash commands, permission replies or shell shortcuts. The Codex adapter requires a local stdio app-server and the fixed filesystem fence, creates its private CODEX_HOME in that directory, and refuses shared session workspace overrides or live scope changes. Other adapters fail closed.
+
+This boundary does not grant business permissions. Portal still owns verified external actor identity, live group authorization, scoped context, child-task propagation, budgets, durable dispatch and result delivery. The bridge capability alone is not end-to-end Feishu acceptance.

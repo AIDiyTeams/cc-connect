@@ -641,6 +641,7 @@ const (
 	MsgWsSharedOnlyHint         MsgKey = "ws_shared_only_hint"
 	MsgWsNotFoundHint           MsgKey = "ws_not_found_hint"
 	MsgWsNotFoundHintGitOnly    MsgKey = "ws_not_found_hint_git_only"
+	MsgIsolationUnavailable     MsgKey = "isolation_unavailable"
 	MsgWsResolutionError        MsgKey = "ws_resolution_error"
 	MsgWsCloneProgress          MsgKey = "ws_clone_progress"
 	MsgWsCloneSuccess           MsgKey = "ws_clone_success"
@@ -4166,6 +4167,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "此頻道未找到工作區。請發送 git 倉庫地址，或使用 `/workspace init <git倉庫地址>`。",
 		LangJapanese:           "このチャンネルにワークスペースが見つかりません。git URL を送信するか、`/workspace init <git-url>` を使用してください。",
 		LangSpanish:            "No se encontró workspace para este canal. Envía una URL de repo git o usa `/workspace init <git-url>`.",
+	},
+	MsgIsolationUnavailable: {
+		LangEnglish:            "This conversation cannot start securely. Please ask the administrator to check the connection.",
+		LangChinese:            "当前会话的隔离环境尚未就绪，请管理员检查连接。",
+		LangTraditionalChinese: "目前會話的隔離環境尚未就緒，請管理員檢查連線。",
+		LangJapanese:           "この会話の分離環境は準備できていません。管理者に接続の確認を依頼してください。",
+		LangSpanish:            "El entorno aislado de esta conversación no está listo. Pide al administrador que revise la conexión.",
 	},
 	MsgWsResolutionError: {
 		LangEnglish:            "Workspace resolution error: %v",

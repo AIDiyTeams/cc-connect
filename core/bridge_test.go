@@ -146,8 +146,8 @@ func register(t *testing.T, conn *websocket.Conn, platform string, caps []string
 		t.Fatalf("register failed: %v", ack["error"])
 	}
 	capsOut, _ := ack["runtime_capabilities"].([]any)
-	if len(capsOut) != 4 || capsOut[0] != "output_schema_v1" || capsOut[1] != "turn_budget_v1" ||
-		capsOut[2] != "team_coordination_tool_v1" || capsOut[3] != "execution_profile_v1" {
+	if len(capsOut) != 5 || capsOut[0] != "output_schema_v1" || capsOut[1] != "turn_budget_v1" ||
+		capsOut[2] != "team_coordination_tool_v1" || capsOut[3] != "execution_profile_v1" || capsOut[4] != "external_isolation_v1" {
 		t.Fatalf("missing constrained output capability: %#v", ack)
 	}
 }

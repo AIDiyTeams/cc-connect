@@ -528,6 +528,12 @@ type SessionRuntimeStarter interface {
 	StartSessionWithRuntime(context.Context, string, SessionRuntime) (AgentSession, error)
 }
 
+// IsolatedSessionAgent explicitly supports a confined workspace and private runtime home.
+// Startup support alone does not imply this security contract.
+type IsolatedSessionAgent interface {
+	SupportsIsolatedSessions() bool
+}
+
 // SessionRuntimeCompatibility detects startup-only configuration changes that
 // require recycling a process rather than merely updating its next turn.
 type SessionRuntimeCompatibility interface {
