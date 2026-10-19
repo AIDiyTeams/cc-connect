@@ -63,7 +63,7 @@ func TestTeamCoordinationToolOfferedOnlyWithTrustedCmoAuthority(t *testing.T) {
 	}
 	schema := teamCoordinationDynamicTool()["inputSchema"].(map[string]any)
 	operation := schema["properties"].(map[string]any)["operation"].(map[string]any)
-	if strings.Join(operation["enum"].([]string), ",") != "context,handoff,status,message,outcome" ||
+	if strings.Join(operation["enum"].([]string), ",") != "context,handoff,status,message,outcome,review,report" ||
 		strings.Join(schema["required"].([]string), ",") != "operation" {
 		t.Fatalf("schema drifted from the documented operations: %#v", schema)
 	}
@@ -124,6 +124,18 @@ func TestTeamCoordinationArgumentsMapToTheHelperContract(t *testing.T) {
 			`{"note":"Budget is 1.5M USD"}`},
 		{"note with forwarded message", map[string]any{"operation": "message", "planId": testPlanID, "note": "Also this", "sourceMessageId": "cmsg-later"}, []string{testPlanID},
 			`{"note":"Also this","sourceMessageId":"cmsg-later"}`},
+		{"handoff with deliverables", map[string]any{"operation": "handoff", "sourceMessageId": "cmsg-user", "employeeId": "emp-content",
+			"executionKind": "content", "title": "Launch posts", "brief": "Three posts", "deliverables": []any{" 3 X 帖子 ", "每条 1 张配图"}}, nil,
+			`{"sourceMessageId":"cmsg-user","contextMessageIds":[],"employeeId":"emp-content","executionKind":"content","title":"Launch posts","brief":"Three posts","deliverables":["3 X 帖子","每条 1 张配图"]}`},
+		{"accepted review", map[string]any{"operation": "review", "planId": testPlanID, "verdict": "accepted", "delivered": float64(3)},
+			[]string{testPlanID}, `{"delivered":3,"verdict":"accepted"}`},
+		{"returned review", map[string]any{"operation": "review", "planId": testPlanID, "verdict": "returned", "note": "缺配图"},
+			[]string{testPlanID}, `{"note":"缺配图","verdict":"returned"}`},
+		{"report with a decision", map[string]any{"operation": "report", "sourceMessageId": "cmsg-user",
+			"asks": []any{map[string]any{"question": "预算封顶 $2,000？", "options": []any{"同意", "提高到 $3,000"}}}}, nil,
+			`{"sourceMessageId":"cmsg-user","asks":[{"question":"预算封顶 $2,000？","options":["同意","提高到 $3,000"]}]}`},
+		{"report closing clears decisions", map[string]any{"operation": "report", "sourceMessageId": "cmsg-user", "closing": "四项都齐了。"}, nil,
+			`{"sourceMessageId":"cmsg-user","asks":[],"closing":"四项都齐了。"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			operation, args, stdin, err := teamCoordinationRequest(tc.arguments)
@@ -170,6 +182,24 @@ func TestTeamCoordinationArgumentsMapToTheHelperContract(t *testing.T) {
 		"too many context ids":    valid(map[string]any{"contextMessageIds": tooMany}),
 		"context ids not a list":  valid(map[string]any{"contextMessageIds": "cmsg-1"}),
 		"handoff with a plan":     valid(map[string]any{"planId": testPlanID}),
+		"too many deliverables":   valid(map[string]any{"deliverables": []any{"1", "2", "3", "4", "5", "6", "7", "8", "9"}}),
+		"blank deliverable":       valid(map[string]any{"deliverables": []any{"posts", " "}}),
+		"review without plan":     {"operation": "review", "verdict": "accepted"},
+		"unknown verdict":         {"operation": "review", "planId": testPlanID, "verdict": "done"},
+		"returned without reason": {"operation": "review", "planId": testPlanID, "verdict": "returned"},
+		"fractional count":        {"operation": "review", "planId": testPlanID, "verdict": "accepted", "delivered": 1.5},
+		"count beyond the bound":  {"operation": "review", "planId": testPlanID, "verdict": "accepted", "delivered": float64(9)},
+		"long review note":        {"operation": "review", "planId": testPlanID, "verdict": "returned", "note": strings.Repeat("字", 501)},
+		"report without request":  {"operation": "report", "closing": "Done."},
+		"report on a plan":        {"operation": "report", "sourceMessageId": "cmsg-user", "planId": testPlanID},
+		"one-choice decision": {"operation": "report", "sourceMessageId": "cmsg-user",
+			"asks": []any{map[string]any{"question": "Go?", "options": []any{"Yes"}}}},
+		"extra ask field": {"operation": "report", "sourceMessageId": "cmsg-user",
+			"asks": []any{map[string]any{"question": "Go?", "options": []any{"Yes", "No"}, "default": "Yes"}}},
+		"four decisions": {"operation": "report", "sourceMessageId": "cmsg-user", "asks": []any{
+			map[string]any{"question": "a", "options": []any{"1", "2"}}, map[string]any{"question": "b", "options": []any{"1", "2"}},
+			map[string]any{"question": "c", "options": []any{"1", "2"}}, map[string]any{"question": "d", "options": []any{"1", "2"}}}},
+		"verdict on a message": {"operation": "message", "planId": testPlanID, "note": "x", "verdict": "accepted"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, _, _, err := teamCoordinationRequest(arguments); err == nil {
