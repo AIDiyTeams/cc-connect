@@ -557,6 +557,18 @@ type AgentSession interface {
 	Close() error
 }
 
+// TurnInterrupter is implemented by agent sessions that can end the running
+// turn without closing their process. Ending a turn in place keeps the
+// agent's own history whole and spares the next message a cold start, so the
+// engine prefers it over Close when a turn runs out of time or is stopped.
+//
+// A nil return means the turn is ending: the session emits that turn's
+// terminal Done event and then accepts the next Send. An error means the turn
+// could not be interrupted, and the caller closes the session instead.
+type TurnInterrupter interface {
+	Interrupt(ctx context.Context) error
+}
+
 // SessionRuntimeConfigurer is implemented by agent sessions that can apply a
 // trusted model-routing snapshot to the next Send call without mutating global
 // agent configuration or another concurrent session.

@@ -223,6 +223,8 @@ type appServerSession struct {
 	// finalReplyRequested marks that this reply already asked the model once
 	// for the final answer it ended without; see requestFinalReply.
 	finalReplyRequested bool
+	// interruptedTurn is the turn the engine asked to end through Interrupt.
+	interruptedTurn string
 
 	runtimeMu             sync.RWMutex
 	usage                 *core.UsageReport
@@ -814,6 +816,7 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	s.stateMu.Lock()
 	s.currentTurn = resp.Turn.ID
 	s.finalReplyRequested = false
+	s.interruptedTurn = ""
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.commentaryItems = nil
 	s.commentaryStreams = nil
@@ -2576,6 +2579,8 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 			switch {
 			case notif.Turn.Error != nil && strings.TrimSpace(notif.Turn.Error.Message) != "":
 				turnErr = fmt.Errorf("codex app-server turn failed: %s", notif.Turn.Error.Message)
+			case notif.Turn.Status == "interrupted" && s.endRequestedInterrupt(notif.Turn.ID):
+				return
 			case notif.Turn.Status == "failed", notif.Turn.Status == "interrupted":
 				turnErr = fmt.Errorf("codex app-server turn %s", notif.Turn.Status)
 			}
@@ -3195,6 +3200,67 @@ func (s *appServerSession) completeTurn(turnID string, turnErr error) {
 		return
 	}
 	s.finishTurn(voiceResult)
+}
+
+var _ core.TurnInterrupter = (*appServerSession)(nil)
+
+// Interrupt ends the running turn in place with app-server turn/interrupt,
+// keeping the process, its thread and the rollout whole for the next Send.
+// The app-server answers once the turn is aborted and then reports it as
+// turn/completed with status "interrupted"; endRequestedInterrupt turns that
+// into the Done result the engine waits for.
+func (s *appServerSession) Interrupt(ctx context.Context) error {
+	if !s.alive.Load() {
+		return fmt.Errorf("session is closed")
+	}
+	s.stateMu.Lock()
+	turnID := s.currentTurn
+	// Between a turn that ended without an answer and its follow-up there is
+	// no turn id the app-server would accept yet.
+	if turnID == "" || turnID == finalReplyPendingTurn {
+		s.stateMu.Unlock()
+		return fmt.Errorf("codex app-server has no running turn to interrupt")
+	}
+	s.interruptedTurn = turnID
+	s.stateMu.Unlock()
+
+	timeout := appServerRequestTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout = time.Until(deadline)
+	}
+	params := map[string]any{"threadId": s.CurrentSessionID(), "turnId": turnID}
+	err := s.requestWithTimeout("turn/interrupt", params, nil, timeout)
+	if err == nil {
+		return nil
+	}
+	s.stateMu.Lock()
+	ended := s.currentTurn != turnID
+	if !ended {
+		s.interruptedTurn = ""
+	}
+	s.stateMu.Unlock()
+	if ended {
+		// The turn finished on its own first; its ending is already reported.
+		return nil
+	}
+	return fmt.Errorf("codex app-server turn/interrupt: %w", err)
+}
+
+// endRequestedInterrupt completes a turn the engine interrupted. The engine
+// asked for this ending and has already told the user how the turn ended, so
+// it is a Done result rather than a failure, and unfinished prose is dropped.
+func (s *appServerSession) endRequestedInterrupt(turnID string) bool {
+	s.stateMu.Lock()
+	if s.interruptedTurn == "" || s.interruptedTurn != turnID || s.currentTurn != turnID {
+		s.stateMu.Unlock()
+		return false
+	}
+	s.interruptedTurn = ""
+	s.currentTurn = ""
+	s.pendingMsgs = s.pendingMsgs[:0]
+	s.stateMu.Unlock()
+	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+	return true
 }
 
 func (s *appServerSession) finishTurn(voiceResult string) {
