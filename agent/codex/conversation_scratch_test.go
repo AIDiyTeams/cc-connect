@@ -29,6 +29,14 @@ func threadTMPDIR(s *appServerSession) (string, bool) {
 	return text, ok
 }
 
+func TestAgentCommandsDisableOnlyTheEnvProxyWarning(t *testing.T) {
+	s, _ := conversationScratchTestSession(t, "csess-a")
+	got := s.threadRequestParams()["config"].(map[string]any)["shell_environment_policy.set.NODE_OPTIONS"]
+	if got != "--disable-warning=UNDICI-EHPA" {
+		t.Fatalf("NODE_OPTIONS = %v", got)
+	}
+}
+
 func turnInstructions(s *appServerSession) string {
 	text, _ := s.turnDeveloperInstructions()["settings"].(map[string]any)["developer_instructions"].(string)
 	return text

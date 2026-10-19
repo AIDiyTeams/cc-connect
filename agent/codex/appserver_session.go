@@ -593,6 +593,7 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	if scratch := s.prepareConversationScratch(time.Now()); scratch != "" {
 		config["shell_environment_policy.set.TMPDIR"] = scratch
 	}
+	config["shell_environment_policy.set.NODE_OPTIONS"] = agentNodeOptions
 	params := map[string]any{
 		"experimentalRawEvents":  false,
 		"persistExtendedHistory": false,
