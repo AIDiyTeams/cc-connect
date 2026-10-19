@@ -166,6 +166,9 @@ func TestSessionManager_GetOrCreateActive_Persists(t *testing.T) {
 	if s == nil {
 		t.Fatal("expected non-nil session")
 	}
+	// Creating a session does not write the store (platform read loops call
+	// it); the next save persists it.
+	sm1.Save()
 
 	// Reload from disk — session should survive
 	sm2 := NewSessionManager(path)
