@@ -443,13 +443,14 @@ const (
 )
 
 type InteractionRequest struct {
-	InteractionID string              `json:"interaction_id"`
-	Kind          InteractionKind     `json:"kind"`
-	ToolName      string              `json:"tool_name,omitempty"`
-	InputPreview  string              `json:"input_preview,omitempty"`
-	Questions     []UserQuestion      `json:"questions,omitempty"`
-	Options       []InteractionOption `json:"options,omitempty"`
-	Form          *InteractionForm    `json:"form,omitempty"`
+	InteractionID string                 `json:"interaction_id"`
+	Kind          InteractionKind        `json:"kind"`
+	ToolName      string                 `json:"tool_name,omitempty"`
+	InputPreview  string                 `json:"input_preview,omitempty"`
+	Questions     []UserQuestion         `json:"questions,omitempty"`
+	Options       []InteractionOption    `json:"options,omitempty"`
+	Form          *InteractionForm       `json:"form,omitempty"`
+	UserAction    *InteractionUserAction `json:"userAction,omitempty"`
 }
 
 type InteractionOption struct {

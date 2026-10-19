@@ -634,6 +634,11 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 		tools, _ := params["dynamicTools"].([]map[string]any)
 		params["dynamicTools"] = append(tools, formDynamicTool())
 	}
+	// The same conversations can ask the user for a browser step only they can do; see browser_help_tool.go.
+	if s.browserHelpToolAvailable() {
+		tools, _ := params["dynamicTools"].([]map[string]any)
+		params["dynamicTools"] = append(tools, browserHelpDynamicTool())
+	}
 	// Turns that carry CMO authority coordinate the team; see team_coordination_tool.go.
 	if s.teamCoordinationToolAvailable() {
 		tools, _ := params["dynamicTools"].([]map[string]any)
@@ -1337,6 +1342,14 @@ func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRa
 			return
 		}
 		s.handleFormToolCall(rawID, params.CallID, params.Arguments)
+		return
+	}
+	if params.Tool == browserHelpToolName {
+		if !s.browserHelpToolAvailable() {
+			s.writeDynamicToolResponse(rawID, false, "browser help is only available in a conversation")
+			return
+		}
+		s.handleBrowserHelpToolCall(rawID, params.CallID, params.Arguments)
 		return
 	}
 	if params.Tool == webReadToolName {
@@ -2830,6 +2843,9 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		if tool == formToolName {
 			// The answers are the user's own input; the trace records only that the form returned.
 			publicResult = "form returned"
+		}
+		if tool == browserHelpToolName {
+			publicResult = "browser help answered"
 		}
 		success := appServerToolSuccess(status, nil)
 		event := core.Event{

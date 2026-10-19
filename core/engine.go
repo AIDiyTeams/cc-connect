@@ -6089,6 +6089,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					InputPreview:  event.ToolInput,
 					Questions:     event.Questions,
 					Form:          event.Form,
+					UserAction:    event.UserAction,
 				}
 				if !isAskQuestion {
 					request.Options = []InteractionOption{

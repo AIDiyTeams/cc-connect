@@ -310,6 +310,14 @@ type UserQuestion struct {
 	AllowOther  bool                 `json:"allowOther,omitempty"`
 }
 
+// InteractionUserAction names a browser step only the user can do, so the app can
+// offer the matching one-click action beside the question.
+type InteractionUserAction struct {
+	Kind    string `json:"kind"`    // sign_in, connect_local_chrome or take_over
+	Site    string `json:"site"`    // the website or service the step is for
+	Browser string `json:"browser"` // local-chrome or cloud
+}
+
 // InteractionForm frames a set of questions answered together on one card.
 type InteractionForm struct {
 	Title       string `json:"title"`
@@ -332,23 +340,24 @@ type Event struct {
 	TraceID                  string          // stable tool/item id used to pair use and result audit events
 	PublicActivity           *PublicActivity // optional typed, public execution receipt
 	Content                  string
-	ContentProvisional       bool             // Native item phase is not final until item/completed.
-	ContentKind              string           // For EventThinking: "summary" (provider reasoning summary) or "raw" (full reasoning text).
-	ContentPartial           bool             // For EventThinking: a slice of a reasoning block still being written; the completed block follows.
-	ContentVersion           int64            // cumulative public commentary snapshot; zero is legacy completed prose
-	ContentDone              bool             // seals this commentary item, not the task
-	ToolName                 string           // populated for EventToolUse, EventPermissionRequest
-	ToolInput                string           // human-readable summary of tool input
-	ToolInputRaw             map[string]any   // raw tool input (for EventPermissionRequest, used in allow response)
-	ToolResult               string           // populated for EventToolResult
-	ToolStatus               string           // optional status for EventToolResult (e.g. completed/failed)
-	ToolExitCode             *int             // optional exit code for EventToolResult
-	ToolSuccess              *bool            // optional success flag for EventToolResult
-	SessionID                string           // agent-managed session ID for conversation continuity
-	RequestID                string           // unique request ID for EventPermissionRequest
-	Questions                []UserQuestion   // populated when ToolName == "AskUserQuestion"
-	Form                     *InteractionForm // set when the questions are the fields of one form
-	ProgressTasks            []ProgressTask   // populated for EventPlanUpdate; safe user-facing steps only
+	ContentProvisional       bool                   // Native item phase is not final until item/completed.
+	ContentKind              string                 // For EventThinking: "summary" (provider reasoning summary) or "raw" (full reasoning text).
+	ContentPartial           bool                   // For EventThinking: a slice of a reasoning block still being written; the completed block follows.
+	ContentVersion           int64                  // cumulative public commentary snapshot; zero is legacy completed prose
+	ContentDone              bool                   // seals this commentary item, not the task
+	ToolName                 string                 // populated for EventToolUse, EventPermissionRequest
+	ToolInput                string                 // human-readable summary of tool input
+	ToolInputRaw             map[string]any         // raw tool input (for EventPermissionRequest, used in allow response)
+	ToolResult               string                 // populated for EventToolResult
+	ToolStatus               string                 // optional status for EventToolResult (e.g. completed/failed)
+	ToolExitCode             *int                   // optional exit code for EventToolResult
+	ToolSuccess              *bool                  // optional success flag for EventToolResult
+	SessionID                string                 // agent-managed session ID for conversation continuity
+	RequestID                string                 // unique request ID for EventPermissionRequest
+	Questions                []UserQuestion         // populated when ToolName == "AskUserQuestion"
+	Form                     *InteractionForm       // set when the questions are the fields of one form
+	UserAction               *InteractionUserAction // set when the question asks for a browser step only the user can do
+	ProgressTasks            []ProgressTask         // populated for EventPlanUpdate; safe user-facing steps only
 	Done                     bool
 	Error                    error
 	InputTokens              int // token usage from agent result events
