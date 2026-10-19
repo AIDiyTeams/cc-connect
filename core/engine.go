@@ -374,6 +374,7 @@ type interactiveState struct {
 	mu                     sync.Mutex
 	stopCh                 chan struct{}
 	stopped                bool
+	turnInterrupt          chan struct{} // protected by mu; open while /stop can end the foreground turn in place
 	pending                *pendingPermission
 	pendingMessages        []queuedMessage // messages queued while session was busy
 	approveAll             bool            // when true, auto-approve all permission requests for this session
@@ -574,6 +575,40 @@ func (s *interactiveState) markStopped() {
 		s.stopCh = make(chan struct{})
 	}
 	close(s.stopCh)
+}
+
+// openTurnInterrupt lets /stop end the calling foreground turn in place.
+func (s *interactiveState) openTurnInterrupt() chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ch := make(chan struct{})
+	s.turnInterrupt = ch
+	return ch
+}
+
+func (s *interactiveState) closeTurnInterrupt(ch chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.turnInterrupt == ch {
+		s.turnInterrupt = nil
+	}
+}
+
+// requestTurnInterrupt asks the running foreground turn to end itself in
+// place. It refuses when no turn is listening, when the turn waits on the
+// user, or when its agent cannot interrupt a turn; /stop then closes the agent.
+func (s *interactiveState) requestTurnInterrupt() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped || s.turnInterrupt == nil || s.pending != nil {
+		return false
+	}
+	if _, ok := s.agentSession.(TurnInterrupter); !ok || !s.agentSession.Alive() {
+		return false
+	}
+	close(s.turnInterrupt)
+	s.turnInterrupt = nil
+	return true
 }
 
 // turnLaunch is the stop handle of a turn between taking the Session lock and
@@ -5384,6 +5419,24 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	events := state.agentSession.Events()
 	stopCh := state.stopSignal()
+	interruptCh := state.openTurnInterrupt()
+	defer state.closeTurnInterrupt(interruptCh)
+	// endInterruptedTurn finishes a turn /stop asked to end in place. The
+	// stop already answered the user and dropped what was queued before it.
+	endInterruptedTurn := func() {
+		slog.Info("stop requested: ending the agent turn in place", "session_key", sessionKey)
+		sp.discard()
+		state.mu.Lock()
+		state.eventsNeedResync = true
+		state.mu.Unlock()
+		if e.endTurnInPlace(sessionKey, state.agentSession, pendingSend) {
+			state.mu.Lock()
+			state.eventsNeedResync = false
+			state.mu.Unlock()
+			return
+		}
+		e.resetKeepingQueuedMessages(sessionKey, state)
+	}
 	for {
 		var event Event
 		var ok bool
@@ -5391,6 +5444,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		select {
 		case <-stopCh:
 			sp.discard()
+			return
+		case <-interruptCh:
+			endInterruptedTurn()
 			return
 		case event, ok = <-events:
 			if !ok {
@@ -5440,6 +5496,25 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 			e.failTurn(p, replyCtx, "AGENT_TURN_TIMEOUT", fmt.Sprintf(e.i18n.T(MsgError),
 				fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", turnLimit)))
+
+			// An agent that can end the turn in place keeps its process and
+			// history; what was queued behind the turn runs on it next.
+			if _, ok := state.agentSession.(TurnInterrupter); ok {
+				if e.endTurnInPlace(sessionKey, state.agentSession, pendingSend) {
+					slog.Info("timed-out agent turn ended in place; agent kept for the next message",
+						"session_key", sessionKey, "elapsed", time.Since(turnStart))
+					state.mu.Lock()
+					state.eventsNeedResync = false
+					state.mu.Unlock()
+					return
+				}
+				slog.Error("timed-out agent turn did not end in place; force-killing", "session_key", sessionKey)
+				state.mu.Lock()
+				state.eventsNeedResync = true
+				state.mu.Unlock()
+				e.resetKeepingQueuedMessages(sessionKey, state)
+				return
+			}
 
 			// Two-phase shutdown: first try a graceful stop so the agent can
 			// write its final state before dying (preserves --resume ability).
@@ -6091,6 +6166,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				Resolved:     make(chan struct{}),
 			}
 			state.mu.Lock()
+			// A /stop that asked this turn to end before it paused on the
+			// user is honored instead of leaving the stop behind the question.
+			select {
+			case <-interruptCh:
+				state.mu.Unlock()
+				endInterruptedTurn()
+				return
+			default:
+			}
 			state.pending = pending
 			state.mu.Unlock()
 
@@ -6894,6 +6978,73 @@ func takeQueuedMessages(state *interactiveState) []queuedMessage {
 	queued := state.pendingMessages
 	state.pendingMessages = nil
 	return queued
+}
+
+// endTurnInPlace interrupts the running turn of an agent that can end a turn
+// without closing its process, and waits up to the stop grace for that turn's
+// Done event. It reports whether the agent is ready for the next message;
+// false leaves the caller to close it. Only the turn's own event loop calls
+// it, since it reads the agent's events.
+func (e *Engine) endTurnInPlace(sessionKey string, agentSession AgentSession, pendingSend <-chan error) bool {
+	interrupter, ok := agentSession.(TurnInterrupter)
+	if !ok || !agentSession.Alive() {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(e.ctx, e.turnStopGrace)
+	defer cancel()
+	// Interrupt may wait for the agent to confirm while it is still emitting
+	// the turn's events, so read them meanwhile.
+	interrupted := make(chan error, 1)
+	go func() { interrupted <- interrupter.Interrupt(ctx) }()
+	events := agentSession.Events()
+	for {
+		select {
+		case evt, ok := <-events:
+			if !ok {
+				return false
+			}
+			if evt.Done {
+				return agentSession.Alive()
+			}
+		case err := <-interrupted:
+			interrupted = nil
+			if err != nil {
+				slog.Warn("agent turn could not be interrupted", "session_key", sessionKey, "error", err)
+				return false
+			}
+		case err := <-pendingSend:
+			pendingSend = nil
+			if err != nil {
+				return false
+			}
+		case <-ctx.Done():
+			slog.Warn("interrupted agent turn did not end within the stop grace",
+				"session_key", sessionKey, "grace_period", e.turnStopGrace)
+			return false
+		}
+	}
+}
+
+// interruptInteractiveTurn is /stop for an agent that can end a turn in
+// place: the turn ends, the agent stays for the conversation's next message,
+// and the messages queued before the stop are dropped as a stop drops them.
+// It returns false when the turn cannot be ended this way.
+func (e *Engine) interruptInteractiveTurn(sessionKey string) bool {
+	e.launchMu.Lock()
+	launching := len(e.turnLaunches[sessionKey]) > 0
+	e.launchMu.Unlock()
+	if launching {
+		return false
+	}
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if state == nil || !state.requestTurnInterrupt() {
+		return false
+	}
+	slog.Info("stop: ending the running turn in place", "session_key", sessionKey)
+	e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
+	return true
 }
 
 // resetKeepingQueuedMessages tears down a conversation whose turn the engine
@@ -10819,12 +10970,12 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 	// latest forked session, so resuming after /stop is safe and no longer
 	// triggers the recycling loop from issue #830.
 	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
-	if !e.stopInteractiveSession(iKey, p, msg.ReplyCtx) {
+	if !e.stopInteractiveTurn(iKey, p, msg.ReplyCtx) {
 		// Fallback: try suffix scan in case interactiveKeyForSessionKey
 		// resolved a different key than the one used to store the state
 		// (e.g. workspace binding lookup inconsistency).
 		if found := e.findInteractiveKeyForSession(msg.SessionKey); found != "" && found != iKey {
-			if e.stopInteractiveSession(found, p, msg.ReplyCtx) {
+			if e.stopInteractiveTurn(found, p, msg.ReplyCtx) {
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
 				return
 			}
@@ -10868,6 +11019,15 @@ func (e *Engine) cmdCancel(p Platform, msg *Message) {
 
 func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platform, quietReplyCtx any) bool {
 	return e.stopInteractiveSessionWithOptions(sessionKey, true)
+}
+
+// stopInteractiveTurn is the user's stop: it ends the running turn in place
+// when the agent can, and otherwise closes the agent like stopInteractiveSession.
+func (e *Engine) stopInteractiveTurn(sessionKey string, quietPlatform Platform, quietReplyCtx any) bool {
+	if e.interruptInteractiveTurn(sessionKey) {
+		return true
+	}
+	return e.stopInteractiveSession(sessionKey, quietPlatform, quietReplyCtx)
 }
 
 func (e *Engine) stopInteractiveSessionSilently(sessionKey string) bool {
@@ -12822,7 +12982,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 
 	case "/stop":
 		stoppedKey := interactiveKey
-		stopped := e.stopInteractiveSession(stoppedKey, nil, nil)
+		stopped := e.stopInteractiveTurn(stoppedKey, nil, nil)
 		if !stopped {
 			// Bridge card actions only carry the raw session key. A task message
 			// may have selected an explicit runtime workspace (for example a
@@ -12833,7 +12993,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			// recovery already used by the text /stop command.
 			if found := e.findInteractiveKeyForSession(sessionKey); found != "" && found != stoppedKey {
 				stoppedKey = found
-				stopped = e.stopInteractiveSession(stoppedKey, nil, nil)
+				stopped = e.stopInteractiveTurn(stoppedKey, nil, nil)
 			}
 		}
 		if stopped {
