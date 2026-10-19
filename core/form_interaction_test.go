@@ -51,9 +51,10 @@ func TestFormAnswersKeepTheirValuesForTheRequestingTool(t *testing.T) {
 }
 
 func TestARequiredFormFieldCannotBeSkipped(t *testing.T) {
-	e, rec := formInteractionEngine(t, []UserQuestion{{ID: "round_size", Question: "Round size", InputType: "number", Required: true}})
+	e, rec := formInteractionEngine(t, []UserQuestion{{ID: "round_size", Question: "Round size", InputType: "number", Required: true}, {ID: "notes", Question: "Notes", InputType: "text"}})
 	if err := e.RespondInteraction("test:chat:user1", "interaction-form", "", map[string][]string{
 		"round_size": {interactionSkippedAnswer},
+		"notes":      {"Some notes"},
 	}); err == nil {
 		t.Fatal("skipping a required field must be refused")
 	}
@@ -134,5 +135,17 @@ func TestARefusedAnswerDoesNotTouchTheTurnCredentials(t *testing.T) {
 	}
 	if len(session.order) != 0 {
 		t.Fatalf("order = %v, want nothing applied for a refused answer", session.order)
+	}
+}
+
+func TestWholeFormSkipReachesAgentIncludingRequiredFields(t *testing.T) {
+	e, rec := formInteractionEngine(t, []UserQuestion{{ID: "facts", Question: "Facts", InputType: "textarea", Required: true}})
+	if err := e.RespondInteraction("test:chat:user1", "interaction-form", "", map[string][]string{"facts": {interactionSkippedAnswer}}); err != nil {
+		t.Fatal(err)
+	}
+	answers, _ := rec.lastResult.UpdatedInput["answers"].(map[string]any)
+	values, _ := answers["facts"].([]string)
+	if len(values) != 1 || values[0] != interactionSkippedAnswer {
+		t.Fatalf("skip must be preserved: %#v", answers)
 	}
 }
