@@ -4441,8 +4441,10 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 // loop must not wait for another conversation's startup. Startup is
 // serialised per agent instance by its startup mutex instead, because the
 // per-session env and platform prompt are injected into the shared Agent and
-// read back by StartSession. interactiveMu is held only to read the existing
-// state and to publish the new one.
+// read back by StartSession; it is held until the new state is published, so
+// concurrent startups of one conversation spawn a single agent.
+// interactiveMu is held only to read the existing state and to publish the
+// new one.
 //
 // A stop or reset of the conversation while its agent is starting has already
 // cleared the conversation's state, so the started agent is not published; it
@@ -4467,13 +4469,17 @@ func (e *Engine) getOrCreateInteractiveStateWithRuntime(sessionKey string, p Pla
 	}
 	startup := e.beginInteractiveStartup(sessionKey)
 	start := e.startInteractiveAgent(sessionKey, p, session, sessions, agent, ccSessionKey, runtime)
-	unlockStartup()
 
 	if start.canceled {
 		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true}
-		return e.publishInteractiveState(sessionKey, newState, startup)
+		state := e.publishInteractiveState(sessionKey, newState, startup)
+		unlockStartup()
+		return state
 	}
 	if start.err != nil {
+		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true}
+		state := e.publishInteractiveState(sessionKey, newState, startup)
+		unlockStartup()
 		slog.Error("failed to start interactive session", "error", start.err, "elapsed", start.elapsed)
 		e.hooks.Emit(HookEvent{
 			Event:      HookEventError,
@@ -4481,20 +4487,12 @@ func (e *Engine) getOrCreateInteractiveStateWithRuntime(sessionKey string, p Pla
 			Platform:   p.Name(),
 			Error:      fmt.Sprintf("failed to start session: %v", start.err),
 		})
-		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true}
-		return e.publishInteractiveState(sessionKey, newState, startup)
+		return state
 	}
 	agentSession := start.session
-	if start.elapsed >= slowAgentStart {
-		slog.Warn("slow agent session start", "elapsed", start.elapsed, "agent", agent.Name(), "session_id", start.sessionID)
-	}
-	// Surface any startup warning (e.g. permission mode downgrade under root) to the IM user.
-	if warner, ok := agentSession.(StartupWarner); ok {
-		if msg := warner.StartupWarning(); msg != "" {
-			e.send(p, replyCtx, msg)
-		}
-	}
 
+	// The startup lock is held until the state is published, so a caller
+	// waiting for it finds this agent instead of starting a second one.
 	if newID := agentSession.CurrentSessionID(); newID != "" {
 		// Track the latest session ID Claude reports. Each --resume forks a new
 		// session_id, so the stored ID must follow the live process or a later
@@ -4522,11 +4520,22 @@ func (e *Engine) getOrCreateInteractiveStateWithRuntime(sessionKey string, p Pla
 		eventsNeedResync: true,
 	}
 	state := e.publishInteractiveState(sessionKey, newState, startup)
+	unlockStartup()
+
+	if start.elapsed >= slowAgentStart {
+		slog.Warn("slow agent session start", "elapsed", start.elapsed, "agent", agent.Name(), "session_id", start.sessionID)
+	}
 	if state.isStopped() {
 		slog.Info("agent started for a stopped turn or during shutdown; closing it",
 			"session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "elapsed", start.elapsed)
 		e.closeAgentSessionAsync(sessionKey, agentSession)
 		return state
+	}
+	// Surface any startup warning (e.g. permission mode downgrade under root) to the IM user.
+	if warner, ok := agentSession.(StartupWarner); ok {
+		if msg := warner.StartupWarning(); msg != "" {
+			e.send(p, replyCtx, msg)
+		}
 	}
 
 	slog.Info("session spawned", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "is_resume", start.isResume, "elapsed", start.elapsed)

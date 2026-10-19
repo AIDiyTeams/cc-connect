@@ -436,3 +436,184 @@ func TestResetDuringAgentStartup_DiscardsStartedAgent(t *testing.T) {
 		t.Fatal("next turn did not start a fresh agent")
 	}
 }
+
+// fastPath is how long an interactiveMu-only operation may take while another
+// conversation's agent is starting; the startup itself is held indefinitely.
+const fastPath = 100 * time.Millisecond
+
+// While conversation A's agent is starting, conversation B's card /stop must
+// return at once and cancel B's turn before its agent starts.
+func TestAgentStartupDoesNotBlockOtherConversationsStop(t *testing.T) {
+	first := newLaunchFakeSession("agent-a")
+	agent := &launchFakeAgent{
+		sessions:     []*launchFakeSession{first},
+		holdFirst:    make(chan struct{}),
+		startEntered: make(chan struct{}, 1),
+	}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+	keyA, keyB := "test:stop-a", "test:stop-b"
+
+	e.ReceiveMessage(p, launchTestMessage(keyA, "a1", "hello from a"))
+	select {
+	case <-agent.startEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("agent startup for A never began")
+	}
+	released := false
+	defer func() {
+		if !released {
+			close(agent.holdFirst)
+		}
+	}()
+
+	msgB := launchTestMessage(keyB, "b1", "hello from b")
+	sessionB := e.sessions.GetOrCreateActive(keyB)
+	start := time.Now()
+	launchB := e.tryLockSessionWithQueueState(sessionB, keyB, p, msgB.ReplyCtx, msgB.MessageID)
+	acceptElapsed := time.Since(start)
+	if launchB == nil {
+		t.Fatal("conversation B's session was reported busy")
+	}
+
+	stopped := make(chan struct{})
+	start = time.Now()
+	go func() {
+		e.executeCardAction("/stop", "", keyB)
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(fastPath):
+		t.Fatal("conversation B's card /stop waited for conversation A's agent startup")
+	}
+	stopElapsed := time.Since(start)
+	t.Logf("during A's startup: B accepted in %v, B's /stop returned in %v", acceptElapsed, stopElapsed)
+	if acceptElapsed > fastPath {
+		t.Fatalf("conversation B's message took %v during A's startup", acceptElapsed)
+	}
+	if !e.turnLaunchCancelled(launchB) {
+		t.Fatal("B's /stop did not cancel B's starting turn")
+	}
+
+	turnB := make(chan struct{})
+	go func() {
+		e.processInteractiveTurn(p, msgB, sessionB, agent, e.sessions, keyB, "", keyB, launchB)
+		close(turnB)
+	}()
+	select {
+	case <-turnB:
+	case <-time.After(3 * time.Second):
+		t.Fatal("B's stopped turn did not unwind")
+	}
+
+	close(agent.holdFirst)
+	released = true
+	expectSend(t, first, "hello from a")
+	if n := agent.startCount(); n != 1 {
+		t.Fatalf("stopped turn B started an agent: %d starts", n)
+	}
+	first.events <- Event{Type: EventResult, Content: "done", Done: true}
+	waitSessionUnlocked(t, e.sessions.GetOrCreateActive(keyA))
+	waitSessionUnlocked(t, sessionB)
+}
+
+// Startups racing for one conversation must spawn a single agent process.
+func TestConcurrentStartupSameKey_SpawnsOneAgent(t *testing.T) {
+	first := newLaunchFakeSession("agent-1")
+	second := newLaunchFakeSession("agent-2")
+	agent := &launchFakeAgent{
+		sessions:     []*launchFakeSession{first, second},
+		holdFirst:    make(chan struct{}),
+		startEntered: make(chan struct{}, 1),
+	}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+	key := "test:same-key"
+	session := e.sessions.GetOrCreateActive(key)
+
+	const callers = 4
+	got := make(chan *interactiveState, callers)
+	for i := 0; i < callers; i++ {
+		go func() { got <- e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "") }()
+	}
+	select {
+	case <-agent.startEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("agent startup never began")
+	}
+	// Let the other callers reach the startup lock before releasing.
+	time.Sleep(50 * time.Millisecond)
+	close(agent.holdFirst)
+
+	var states []*interactiveState
+	for i := 0; i < callers; i++ {
+		select {
+		case s := <-got:
+			states = append(states, s)
+		case <-time.After(3 * time.Second):
+			t.Fatal("a concurrent startup did not return")
+		}
+	}
+	if n := agent.startCount(); n != 1 {
+		t.Fatalf("concurrent startups spawned %d agents", n)
+	}
+	for _, s := range states {
+		if s != states[0] || s.agentSession != AgentSession(first) {
+			t.Fatal("concurrent startups returned different states")
+		}
+	}
+}
+
+// recycleFakeAgent records whether the previous agent was already closed when
+// the replacement started.
+type recycleFakeAgent struct {
+	launchFakeAgent
+	old           *launchFakeSession
+	oldAliveAtNew atomic.Bool
+}
+
+func (a *recycleFakeAgent) StartSession(ctx context.Context, id string) (AgentSession, error) {
+	a.oldAliveAtNew.Store(a.old.Alive())
+	return a.launchFakeAgent.StartSession(ctx, id)
+}
+
+// A live agent bound to another agent session is closed before its
+// replacement starts, and the replacement is published.
+func TestRecycleClosesStaleAgentBeforeStart(t *testing.T) {
+	old := newLaunchFakeSession("stale-id")
+	fresh := newLaunchFakeSession("fresh-id")
+	agent := &recycleFakeAgent{launchFakeAgent: launchFakeAgent{sessions: []*launchFakeSession{fresh}}, old: old}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+	key := "test:recycle"
+	session := e.sessions.GetOrCreateActive(key)
+	stale := &interactiveState{agentSession: old, platform: p, replyCtx: "ctx", agent: agent}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = stale
+	e.interactiveMu.Unlock()
+
+	// /new cleared the binding, so the live process must not be reused.
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	if state == stale || state.agentSession != AgentSession(fresh) {
+		t.Fatal("stale agent was reused instead of recycled")
+	}
+	if old.Alive() || !stale.isStopped() {
+		t.Fatal("stale agent was left running")
+	}
+	if agent.oldAliveAtNew.Load() {
+		t.Fatal("replacement started while the stale agent was still running")
+	}
+	e.interactiveMu.Lock()
+	published := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if published != state {
+		t.Fatal("replacement agent was not published")
+	}
+	if got := session.GetAgentSessionID(); got != "fresh-id" {
+		t.Fatalf("session bound to %q, want fresh-id", got)
+	}
+}
