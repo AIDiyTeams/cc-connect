@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"sort"
@@ -301,6 +302,13 @@ type Engine struct {
 	// their prompt to the agent yet. See turnLaunch.
 	launchMu     sync.Mutex
 	turnLaunches map[string]map[*turnLaunch]struct{}
+	// agentStartupLocks serialise agent startups per Agent instance, outside
+	// interactiveMu. See getOrCreateInteractiveStateWithRuntime.
+	startupMuGuard    sync.Mutex
+	agentStartupLocks map[any]*agentStartupLock
+	// interactiveStartups holds the agent startups in flight, by session key.
+	// Protected by interactiveMu.
+	interactiveStartups map[*interactiveStartup]string
 
 	// Turns currently streaming, so a shutdown can wait for them and report
 	// the ones it has to cut. See shutdown_drain.go.
@@ -571,8 +579,8 @@ func (s *interactiveState) markStopped() {
 // send the cancelled prompt anyway. A stop cancels the launch instead, and the
 // owner checks it before starting the agent and again right before Send.
 //
-// Launches live under launchMu rather than interactiveMu because agent startup
-// holds interactiveMu for its whole duration; a stop during a slow resume must
+// Launches live under launchMu rather than interactiveMu so a stop can cancel
+// the turn without touching the state map; a stop during a slow resume must
 // still cancel the turn before startup returns.
 type turnLaunch struct {
 	messageID string
@@ -2559,8 +2567,8 @@ func (e *Engine) handleMessageRecall(p Platform, msg *Message) {
 		return
 	}
 
-	// A starting turn is found through its launch alone: agent startup holds
-	// interactiveMu, which the running-turn lookup below waits on.
+	// A starting turn is found through its launch alone: it has no running
+	// agent state for the lookup below to find yet.
 	if sessionKey, ok := e.cancelTurnLaunchByMessageID(messageID); ok {
 		slog.Info("starting message recalled; turn cancelled before reaching the agent",
 			"platform", p.Name(),
@@ -4421,42 +4429,29 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	if len(startupRuntime) > 0 {
 		runtime = startupRuntime[0]
 	}
-	e.interactiveMu.Lock()
-	defer e.interactiveMu.Unlock()
+	return e.getOrCreateInteractiveStateWithRuntime(sessionKey, p, replyCtx, session, sessions, agentOverride, ccSessionKey, runtime)
+}
 
-	state, ok := e.interactiveStates[sessionKey]
-	if ok && state.agentSession != nil && state.agentSession.Alive() {
-		// Verify the running agent session matches the current active session.
-		// After /new or /switch the active session changes, but the old agent
-		// process may still be alive. Reusing it would send messages to the
-		// wrong conversation context.
-		wantID := session.GetAgentSessionID()
-		currentID := state.agentSession.CurrentSessionID()
-		// Reuse only when the live process matches what the Session expects:
-		// - IDs match (same Claude session), or
-		// - the process has not reported an ID yet (startup; empty want is OK).
-		// If wantID is empty (/new, cleared session) but the process already has
-		// a concrete ID, reusing would keep --resume context — recycle (#238).
-		needRecycle := currentID != "" && (wantID == "" || wantID != currentID)
-		if compatible, ok := state.agentSession.(SessionRuntimeCompatibility); ok && !compatible.SupportsSessionRuntime(runtime) {
-			needRecycle = true
-		}
-		if !needRecycle {
-			return state
-		}
-		// Tear down the stale agent so we start one that matches the Session below.
-		slog.Info("interactive session mismatch, recycling",
-			"session_key", sessionKey,
-			"want_agent_session", wantID,
-			"have_agent_session", currentID,
-		)
-		e.stopUnsolicitedReader(state)
-		state.markStopped()
-		// Close synchronously to prevent race condition where old agent
-		// continues outputting while new agent starts (issue #327).
-		e.closeAgentSessionWithTimeout(sessionKey, state.agentSession)
-		delete(e.interactiveStates, sessionKey)
-		ok = false // prevent reading stale settings below
+// getOrCreateInteractiveStateWithRuntime returns the conversation's live agent
+// state, starting an agent when there is none.
+//
+// Agent startup (a process spawn, seconds on resume) runs outside
+// interactiveMu: that lock guards the state map every conversation's incoming
+// messages, stops and interaction responses go through, and a platform read
+// loop must not wait for another conversation's startup. Startup is
+// serialised per agent instance by its startup mutex instead, because the
+// per-session env and platform prompt are injected into the shared Agent and
+// read back by StartSession; it is held until the new state is published, so
+// concurrent startups of one conversation spawn a single agent.
+// interactiveMu is held only to read the existing state and to publish the
+// new one.
+//
+// A stop or reset of the conversation while its agent is starting has already
+// cleared the conversation's state, so the started agent is not published; it
+// is closed and returned as a stopped state for the caller to unwind.
+func (e *Engine) getOrCreateInteractiveStateWithRuntime(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string, runtime SessionRuntime) *interactiveState {
+	if state := e.reusableInteractiveState(sessionKey, session, runtime); state != nil {
+		return state
 	}
 
 	// Select the agent to use for this session
@@ -4465,6 +4460,245 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		agent = agentOverride
 	}
 
+	unlockStartup := e.lockAgentStartup(agent)
+	// Another caller may have started this conversation's agent while we
+	// waited for the startup mutex.
+	if state := e.reusableInteractiveState(sessionKey, session, runtime); state != nil {
+		unlockStartup()
+		return state
+	}
+	startup := e.beginInteractiveStartup(sessionKey)
+	start := e.startInteractiveAgent(sessionKey, p, session, sessions, agent, ccSessionKey, runtime)
+
+	if start.canceled {
+		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true}
+		state := e.publishInteractiveState(sessionKey, newState, startup)
+		unlockStartup()
+		return state
+	}
+	if start.err != nil {
+		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true}
+		state := e.publishInteractiveState(sessionKey, newState, startup)
+		unlockStartup()
+		slog.Error("failed to start interactive session", "error", start.err, "elapsed", start.elapsed)
+		e.hooks.Emit(HookEvent{
+			Event:      HookEventError,
+			SessionKey: sessionKey,
+			Platform:   p.Name(),
+			Error:      fmt.Sprintf("failed to start session: %v", start.err),
+		})
+		return state
+	}
+	agentSession := start.session
+
+	// The startup lock is held until the state is published, so a caller
+	// waiting for it finds this agent instead of starting a second one.
+	if newID := agentSession.CurrentSessionID(); newID != "" {
+		// Track the latest session ID Claude reports. Each --resume forks a new
+		// session_id, so the stored ID must follow the live process or a later
+		// resume (after /stop or /model) would target a stale node and lose
+		// context. Session naming binds only on first assignment to avoid
+		// polluting sessionNames with every forked ID.
+		wasEmpty := session.GetAgentSessionID() == ""
+		if session.GetAgentSessionID() != newID {
+			session.SetAgentSessionID(newID, agent.Name())
+			if wasEmpty {
+				pendingName := session.GetName()
+				if pendingName != "" && pendingName != "session" && pendingName != "default" {
+					sessions.SetSessionName(newID, pendingName)
+				}
+			}
+			sessions.Save()
+		}
+	}
+
+	newState := &interactiveState{
+		agentSession:     agentSession,
+		platform:         p,
+		replyCtx:         replyCtx,
+		agent:            agent,
+		eventsNeedResync: true,
+	}
+	state := e.publishInteractiveState(sessionKey, newState, startup)
+	unlockStartup()
+
+	if start.elapsed >= slowAgentStart {
+		slog.Warn("slow agent session start", "elapsed", start.elapsed, "agent", agent.Name(), "session_id", start.sessionID)
+	}
+	if state.isStopped() {
+		slog.Info("agent started for a stopped turn or during shutdown; closing it",
+			"session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "elapsed", start.elapsed)
+		e.closeAgentSessionAsync(sessionKey, agentSession)
+		return state
+	}
+	// Surface any startup warning (e.g. permission mode downgrade under root) to the IM user.
+	if warner, ok := agentSession.(StartupWarner); ok {
+		if msg := warner.StartupWarning(); msg != "" {
+			e.send(p, replyCtx, msg)
+		}
+	}
+
+	slog.Info("session spawned", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "is_resume", start.isResume, "elapsed", start.elapsed)
+
+	e.hooks.Emit(HookEvent{
+		Event:      HookEventSessionStarted,
+		SessionKey: sessionKey,
+		Platform:   p.Name(),
+		Extra: map[string]any{
+			"agent_session_id": session.GetAgentSessionID(),
+			"is_resume":        start.isResume,
+		},
+	})
+
+	return state
+}
+
+// reusableInteractiveState returns the conversation's live agent state when it
+// matches the Session and runtime. A live agent that does not match is
+// recycled: it is removed from the map and closed before this returns, so the
+// replacement never runs alongside it (issue #327). Returns nil when a new
+// agent must be started.
+func (e *Engine) reusableInteractiveState(sessionKey string, session *Session, runtime SessionRuntime) *interactiveState {
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[sessionKey]
+	if !ok || state.agentSession == nil || !state.agentSession.Alive() {
+		e.interactiveMu.Unlock()
+		return nil
+	}
+	// Verify the running agent session matches the current active session.
+	// After /new or /switch the active session changes, but the old agent
+	// process may still be alive. Reusing it would send messages to the
+	// wrong conversation context.
+	wantID := session.GetAgentSessionID()
+	currentID := state.agentSession.CurrentSessionID()
+	// Reuse only when the live process matches what the Session expects:
+	// - IDs match (same Claude session), or
+	// - the process has not reported an ID yet (startup; empty want is OK).
+	// If wantID is empty (/new, cleared session) but the process already has
+	// a concrete ID, reusing would keep --resume context — recycle (#238).
+	needRecycle := currentID != "" && (wantID == "" || wantID != currentID)
+	if compatible, ok := state.agentSession.(SessionRuntimeCompatibility); ok && !compatible.SupportsSessionRuntime(runtime) {
+		needRecycle = true
+	}
+	if !needRecycle {
+		e.interactiveMu.Unlock()
+		return state
+	}
+	// Tear down the stale agent so we start one that matches the Session.
+	slog.Info("interactive session mismatch, recycling",
+		"session_key", sessionKey,
+		"want_agent_session", wantID,
+		"have_agent_session", currentID,
+	)
+	e.stopUnsolicitedReader(state)
+	state.markStopped()
+	stale := state.agentSession
+	delete(e.interactiveStates, sessionKey)
+	e.interactiveMu.Unlock()
+	// Close synchronously to prevent race condition where old agent
+	// continues outputting while new agent starts (issue #327). The close
+	// can take minutes, so it runs outside interactiveMu.
+	e.closeAgentSessionWithTimeout(sessionKey, stale)
+	return nil
+}
+
+// lockAgentStartup serialises startups on agent and returns the unlock. An
+// entry lives only while a startup holds or waits for it, so agents of reaped
+// workspaces leave nothing behind.
+func (e *Engine) lockAgentStartup(agent Agent) func() {
+	// An Agent whose dynamic type cannot be a map key shares one lock.
+	var key any = agent
+	if agent == nil || !reflect.TypeOf(agent).Comparable() {
+		key = nil
+	}
+	e.startupMuGuard.Lock()
+	if e.agentStartupLocks == nil {
+		e.agentStartupLocks = make(map[any]*agentStartupLock)
+	}
+	l := e.agentStartupLocks[key]
+	if l == nil {
+		l = &agentStartupLock{}
+		e.agentStartupLocks[key] = l
+	}
+	l.refs++
+	e.startupMuGuard.Unlock()
+
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		e.startupMuGuard.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(e.agentStartupLocks, key)
+		}
+		e.startupMuGuard.Unlock()
+	}
+}
+
+type agentStartupLock struct {
+	mu   sync.Mutex
+	refs int // protected by Engine.startupMuGuard
+}
+
+// interactiveStartup is an agent startup in flight. reset is set when the
+// conversation is stopped or reset meanwhile (protected by interactiveMu).
+type interactiveStartup struct {
+	reset bool
+}
+
+func (e *Engine) beginInteractiveStartup(sessionKey string) *interactiveStartup {
+	startup := &interactiveStartup{}
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	if e.interactiveStartups == nil {
+		e.interactiveStartups = make(map[*interactiveStartup]string)
+	}
+	e.interactiveStartups[startup] = sessionKey
+	return startup
+}
+
+// resetInteractiveStartupsLocked marks the conversation's startups in flight
+// as superseded by a stop or reset. Caller holds interactiveMu.
+func (e *Engine) resetInteractiveStartupsLocked(sessionKey string) {
+	for startup, key := range e.interactiveStartups {
+		if key == sessionKey {
+			startup.reset = true
+		}
+	}
+}
+
+// publishInteractiveState ends startup and stores newState as the
+// conversation's state, taking over messages queued on a startup placeholder.
+// When the conversation was stopped or reset during startup, that already
+// cleared its state, so newState is marked stopped and the map is left
+// untouched. So is a started agent once the engine is shutting down:
+// Engine.Stop cancels e.ctx before it collects the states to close, so an
+// agent published after that would be leaked.
+func (e *Engine) publishInteractiveState(sessionKey string, newState *interactiveState, startup *interactiveStartup) *interactiveState {
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	delete(e.interactiveStartups, startup)
+	if startup.reset || (newState.agentSession != nil && e.ctx.Err() != nil) {
+		newState.markStopped()
+		return newState
+	}
+	adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
+	e.interactiveStates[sessionKey] = newState
+	return newState
+}
+
+type interactiveAgentStart struct {
+	session   AgentSession
+	sessionID string // the session ID startup tried to resume
+	isResume  bool
+	elapsed   time.Duration
+	err       error
+	canceled  bool // engine shutting down; nothing was started
+}
+
+// startInteractiveAgent injects the conversation's settings into agent and
+// starts its session. The caller holds agent's startup mutex.
+func (e *Engine) startInteractiveAgent(sessionKey string, p Platform, session *Session, sessions *SessionManager, agent Agent, ccSessionKey string, runtime SessionRuntime) interactiveAgentStart {
 	ccKey := sessionKey
 	if ccSessionKey != "" {
 		ccKey = ccSessionKey
@@ -4504,11 +4738,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// Check if context is already canceled (e.g. during shutdown/restart)
 	if e.ctx.Err() != nil {
 		slog.Debug("skipping session start: context canceled", "session_key", sessionKey)
-		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true}
-		adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
-		state = newState
-		e.interactiveStates[sessionKey] = state
-		return state
+		return interactiveAgentStart{canceled: true}
 	}
 
 	// Restore the agent's active provider from the session before starting a
@@ -4542,92 +4772,30 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	startAt := time.Now()
 	agentSession, err := startSessionWithRuntime(e.ctx, agent, startSessionID, runtime)
 	startElapsed := time.Since(startAt)
-	if err != nil {
+	if err != nil && startSessionID != "" {
 		// If resume/continue failed, try a fresh session as fallback.
-		if startSessionID != "" {
-			slog.Error("session resume failed, falling back to fresh session",
-				"session_key", sessionKey, "failed_session_id", startSessionID,
-				"error", err, "elapsed", startElapsed)
-			// Clear the stale session ID so CompareAndSetAgentSessionID can
-			// write the new ID, matching the relay fallback at line 12640.
-			session.SetAgentSessionID("", agent.Name())
-			sessions.Save()
-			startAt = time.Now()
-			agentSession, err = startSessionWithRuntime(e.ctx, agent, "", runtime)
-			startElapsed = time.Since(startAt)
-			if err == nil {
-				slog.Info("fresh session started after resume failure",
-					"session_key", sessionKey, "elapsed", startElapsed)
-			}
-		}
-		if err != nil {
-			slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
-			e.hooks.Emit(HookEvent{
-				Event:      HookEventError,
-				SessionKey: sessionKey,
-				Platform:   p.Name(),
-				Error:      fmt.Sprintf("failed to start session: %v", err),
-			})
-			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true}
-			adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
-			state = newState
-			e.interactiveStates[sessionKey] = state
-			return state
+		slog.Error("session resume failed, falling back to fresh session",
+			"session_key", sessionKey, "failed_session_id", startSessionID,
+			"error", err, "elapsed", startElapsed)
+		// Clear the stale session ID so CompareAndSetAgentSessionID can
+		// write the new ID, matching the relay fallback at line 12640.
+		session.SetAgentSessionID("", agent.Name())
+		sessions.Save()
+		startAt = time.Now()
+		agentSession, err = startSessionWithRuntime(e.ctx, agent, "", runtime)
+		startElapsed = time.Since(startAt)
+		if err == nil {
+			slog.Info("fresh session started after resume failure",
+				"session_key", sessionKey, "elapsed", startElapsed)
 		}
 	}
-	if startElapsed >= slowAgentStart {
-		slog.Warn("slow agent session start", "elapsed", startElapsed, "agent", agent.Name(), "session_id", startSessionID)
+	return interactiveAgentStart{
+		session:   agentSession,
+		sessionID: startSessionID,
+		isResume:  isResume,
+		elapsed:   startElapsed,
+		err:       err,
 	}
-	// Surface any startup warning (e.g. permission mode downgrade under root) to the IM user.
-	if warner, ok := agentSession.(StartupWarner); ok {
-		if msg := warner.StartupWarning(); msg != "" {
-			e.send(p, replyCtx, msg)
-		}
-	}
-
-	if newID := agentSession.CurrentSessionID(); newID != "" {
-		// Track the latest session ID Claude reports. Each --resume forks a new
-		// session_id, so the stored ID must follow the live process or a later
-		// resume (after /stop or /model) would target a stale node and lose
-		// context. Session naming binds only on first assignment to avoid
-		// polluting sessionNames with every forked ID.
-		wasEmpty := session.GetAgentSessionID() == ""
-		if session.GetAgentSessionID() != newID {
-			session.SetAgentSessionID(newID, agent.Name())
-			if wasEmpty {
-				pendingName := session.GetName()
-				if pendingName != "" && pendingName != "session" && pendingName != "default" {
-					sessions.SetSessionName(newID, pendingName)
-				}
-			}
-			sessions.Save()
-		}
-	}
-
-	newState := &interactiveState{
-		agentSession:     agentSession,
-		platform:         p,
-		replyCtx:         replyCtx,
-		agent:            agent,
-		eventsNeedResync: true,
-	}
-	adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
-	state = newState
-	e.interactiveStates[sessionKey] = state
-
-	slog.Info("session spawned", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "is_resume", isResume, "elapsed", startElapsed)
-
-	e.hooks.Emit(HookEvent{
-		Event:      HookEventSessionStarted,
-		SessionKey: sessionKey,
-		Platform:   p.Name(),
-		Extra: map[string]any{
-			"agent_session_id": session.GetAgentSessionID(),
-			"is_resume":        isResume,
-		},
-	})
-
-	return state
 }
 
 // cleanupInteractiveState removes the interactive state for the given session key
@@ -4647,6 +4815,9 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 		e.interactiveMu.Unlock()
 		return
 	}
+	// An agent still starting for this conversation was configured before
+	// this reset; its owner closes it instead of publishing it.
+	e.resetInteractiveStartupsLocked(sessionKey)
 	// Capture the agent session and nil it out atomically to prevent a
 	// concurrent cleanup (without expected) from closing the same session.
 	var agentSession AgentSession
@@ -10651,12 +10822,14 @@ func (e *Engine) stopInteractiveSessionSilently(sessionKey string) bool {
 
 func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueued bool) bool {
 	// A turn still starting has not reached the agent; marking its state
-	// stopped would not reach it, so cancel the launch itself. This must not
-	// wait for interactiveMu, which agent startup holds.
+	// stopped would not reach it, so cancel the launch itself.
 	cancelled := e.cancelTurnLaunches(sessionKey)
 	defer settleTurnLaunches(cancelled)
 
 	e.interactiveMu.Lock()
+	// An agent still starting for this conversation is closed by its owner
+	// instead of published.
+	e.resetInteractiveStartupsLocked(sessionKey)
 	state, ok := e.interactiveStates[sessionKey]
 	if !ok || state == nil {
 		e.interactiveMu.Unlock()
