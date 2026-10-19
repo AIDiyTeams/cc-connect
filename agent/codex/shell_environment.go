@@ -44,6 +44,13 @@ func codexProcessEnv(extra []string) []string {
 	return env
 }
 
+// agentNodeOptions is NODE_OPTIONS for every Agent command. Codex's network proxy
+// sets NODE_USE_ENV_PROXY=1, and Node 22 then prints an "EnvHttpProxyAgent is
+// experimental" warning to stderr on every start: two lines of noise in each tool
+// result the model reads. Only that warning code is disabled; a command that sets
+// its own NODE_OPTIONS still overrides this.
+const agentNodeOptions = "--disable-warning=UNDICI-EHPA"
+
 // The supervisor can gain new secrets without silently exposing them to every
 // shell snapshot. Add only documented non-secret runtime settings here.
 var brokerShellEnvKeys = map[string]bool{

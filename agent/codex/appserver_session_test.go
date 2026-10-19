@@ -499,7 +499,8 @@ func TestAppServerSession_FencedThreadParamsOverrideUnsafeGlobalMode(t *testing.
 		"persistExtendedHistory": false,
 		"cwd":                    "/srv/tomako/workspaces/brand-42",
 		"config": map[string]any{
-			"features.default_mode_request_user_input": true,
+			"features.default_mode_request_user_input":  true,
+			"shell_environment_policy.set.NODE_OPTIONS": agentNodeOptions,
 		},
 		"permissions":    "tomako-brand-fence",
 		"approvalPolicy": "never",
