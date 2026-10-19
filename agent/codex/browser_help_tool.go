@@ -38,7 +38,7 @@ func browserHelpDynamicTool() map[string]any {
 				"kind":    map[string]any{"type": "string", "enum": []string{"sign_in", "connect_local_chrome", "take_over"}},
 				"site":    text(120, "The website or service, e.g. its domain."),
 				"browser": map[string]any{"type": "string", "enum": []string{"local-chrome", "cloud"}, "description": "Where the user does the step: local-chrome whenever status shows it available, otherwise the conversation's cloud browser."},
-				"message": text(300, "One or two sentences to the user, in the user's language: what to do, where, and what it unlocks in their request."),
+				"message": text(300, "One or two sentences to the user, in the user's language, describing things as they are: what you have already opened or prepared and where it is (a tab in their own Chrome for local-chrome, the live browser panel beside the conversation for cloud), then the one step left for them and what it unlocks in their request."),
 			}},
 	}
 }
