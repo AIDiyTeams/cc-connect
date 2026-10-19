@@ -9352,11 +9352,11 @@ func TestStartupSessionLockPublishesQueue(t *testing.T) {
 	defer e.Stop()
 	key := "test:startup-publication"
 	session := e.sessions.GetOrCreateActive(key)
-	if !e.tryLockSessionWithQueueState(session, key, p, "first") {
+	if e.tryLockSessionWithQueueState(session, key, p, "first", "m1") == nil {
 		t.Fatal("first message failed to acquire session")
 	}
 	defer session.Unlock()
-	if e.tryLockSessionWithQueueState(session, key, p, "second") {
+	if e.tryLockSessionWithQueueState(session, key, p, "second", "m2") != nil {
 		t.Fatal("busy session acquired twice")
 	}
 	if !e.queueMessageForBusySession(p, &Message{SessionKey: key, Content: "second", ReplyCtx: "second"}, key) {
