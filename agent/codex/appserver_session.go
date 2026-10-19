@@ -220,6 +220,9 @@ type appServerSession struct {
 	lastCommentary        recentCommentary
 	turnCommentaryCount   int
 	reasoningSlice        *reasoningSlice
+	// finalReplyRequested marks that this reply already asked the model once
+	// for the final answer it ended without; see requestFinalReply.
+	finalReplyRequested bool
 
 	runtimeMu             sync.RWMutex
 	usage                 *core.UsageReport
@@ -798,6 +801,36 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 		})
 	}
 
+	turnStartedAt := time.Now()
+	var resp turnStartResponse
+	if err := s.request("turn/start", s.turnStartParams(threadID, input), &resp); err != nil {
+		return fmt.Errorf("codex app-server turn/start: %w", err)
+	}
+	if resp.Turn.ID == "" {
+		return fmt.Errorf("codex app-server turn/start returned empty turn id")
+	}
+	s.emitLifecycle("agent_turn_started", time.Since(turnStartedAt))
+
+	s.stateMu.Lock()
+	s.currentTurn = resp.Turn.ID
+	s.finalReplyRequested = false
+	s.pendingMsgs = s.pendingMsgs[:0]
+	s.commentaryItems = nil
+	s.commentaryStreams = nil
+	s.finalItems = nil
+	s.completedMessageItems = nil
+	s.lastFinalItem = ""
+	s.lastCommentary = recentCommentary{}
+	s.turnCommentaryCount = 0
+	s.reasoningSlice = nil
+	s.stateMu.Unlock()
+
+	return nil
+}
+
+// turnStartParams carries the session's per-turn model, policy and output
+// contract, so a follow-up turn in the same reply runs under the same terms.
+func (s *appServerSession) turnStartParams(threadID string, input []map[string]any) map[string]any {
 	params := map[string]any{
 		"threadId": threadID,
 		"input":    input,
@@ -824,31 +857,7 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	} else if approval, _ := appServerModeSettings(s.mode); approval != "" {
 		params["approvalPolicy"] = approval
 	}
-
-	turnStartedAt := time.Now()
-	var resp turnStartResponse
-	if err := s.request("turn/start", params, &resp); err != nil {
-		return fmt.Errorf("codex app-server turn/start: %w", err)
-	}
-	if resp.Turn.ID == "" {
-		return fmt.Errorf("codex app-server turn/start returned empty turn id")
-	}
-	s.emitLifecycle("agent_turn_started", time.Since(turnStartedAt))
-
-	s.stateMu.Lock()
-	s.currentTurn = resp.Turn.ID
-	s.pendingMsgs = s.pendingMsgs[:0]
-	s.commentaryItems = nil
-	s.commentaryStreams = nil
-	s.finalItems = nil
-	s.completedMessageItems = nil
-	s.lastFinalItem = ""
-	s.lastCommentary = recentCommentary{}
-	s.turnCommentaryCount = 0
-	s.reasoningSlice = nil
-	s.stateMu.Unlock()
-
-	return nil
+	return params
 }
 
 // SetSessionRuntime applies a control-plane snapshot to this app-server
@@ -3155,6 +3164,8 @@ func (s *appServerSession) completeTurn(turnID string, turnErr error) {
 	if turnErr == nil && s.brandCoreAwaitingPublication() {
 		turnErr = fmt.Errorf("brand analysis ended before the core profile was accepted for persistence")
 	}
+	// Runtimes that deliver their result through a tool are not chat replies.
+	chatReply := !s.isUserVoiceJudgmentRuntime() && !s.isBrandAnalysisRuntime()
 	s.stateMu.Lock()
 	if s.currentTurn == "" || (turnID != "" && turnID != s.currentTurn) {
 		s.stateMu.Unlock()
@@ -3164,16 +3175,99 @@ func (s *appServerSession) completeTurn(turnID string, turnErr error) {
 	if turnErr != nil {
 		s.pendingMsgs = s.pendingMsgs[:0]
 	}
+	askForFinalReply := turnErr == nil && chatReply && s.endedWithoutAnswerLocked()
+	if askForFinalReply {
+		s.finalReplyRequested = true
+		s.currentTurn = finalReplyPendingTurn
+	}
 	s.stateMu.Unlock()
 	if turnErr != nil {
 		s.emitError(turnErr)
 		return
 	}
+	if askForFinalReply {
+		// turn/start waits for its response on this read loop, so it runs aside.
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.requestFinalReply(turnID)
+		}()
+		return
+	}
+	s.finishTurn(voiceResult)
+}
+
+func (s *appServerSession) finishTurn(voiceResult string) {
 	s.flushPendingAsText()
 	if voiceResult != "" {
 		s.emit(core.Event{Type: core.EventText, Content: voiceResult})
 	}
 	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+}
+
+// finalReplyPendingTurn holds the reply open between a turn that ended
+// without an answer and the follow-up turn that asks for one.
+const finalReplyPendingTurn = "final-reply-pending"
+
+// finalReplyPrompt is the follow-up a model receives after it ended a turn
+// with nothing for the user (only reasoning, progress or tool calls).
+const finalReplyPrompt = "Your previous turn ended without a final answer, so the user has not received a reply. " +
+	"Based on what you have already done in this conversation, write your final reply to the user now, in the language of the conversation. " +
+	"Do not repeat work that is already complete."
+
+// endedWithoutAnswerLocked reports whether a turn that completed normally left
+// the user nothing: no final_answer item and no unclassified message prose.
+// The caller holds stateMu.
+func (s *appServerSession) endedWithoutAnswerLocked() bool {
+	if s.finalReplyRequested || !s.alive.Load() || s.ctx == nil || s.ctx.Err() != nil {
+		return false
+	}
+	if s.lastFinalItem != "" {
+		return false
+	}
+	for _, text := range s.pendingMsgs {
+		if strings.TrimSpace(text) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// requestFinalReply continues the same thread once so the model writes the
+// answer it skipped. The engine is still waiting on this reply, so whatever
+// the follow-up turn says reaches the user under the same response; if it
+// cannot start, the reply completes as it would have without it.
+func (s *appServerSession) requestFinalReply(endedTurn string) {
+	threadID := s.CurrentSessionID()
+	slog.Info("codex app-server: turn ended without a final answer; asking the model for it once",
+		"thread_id", threadID, "turn_id", endedTurn)
+	input := []map[string]any{{"type": "text", "text": finalReplyPrompt, "text_elements": []any{}}}
+	var resp turnStartResponse
+	err := s.request("turn/start", s.turnStartParams(threadID, input), &resp)
+	if err == nil && resp.Turn.ID == "" {
+		err = fmt.Errorf("empty turn id")
+	}
+	if s.ctx.Err() != nil {
+		return // the session is closing; nobody is waiting on this reply
+	}
+	s.stateMu.Lock()
+	superseded := s.currentTurn != finalReplyPendingTurn && (err != nil || s.currentTurn != resp.Turn.ID)
+	if !superseded {
+		if err != nil {
+			s.currentTurn = ""
+		} else {
+			s.currentTurn = resp.Turn.ID
+		}
+	}
+	s.stateMu.Unlock()
+	if superseded {
+		// A message sent meanwhile started its own turn, which ends this reply.
+		return
+	}
+	if err != nil {
+		slog.Warn("codex app-server: final-answer follow-up did not start", "thread_id", threadID, "error", err)
+		s.finishTurn("")
+	}
 }
 
 // handleAgentMessageDelta relays live assistant prose to the user as it is
