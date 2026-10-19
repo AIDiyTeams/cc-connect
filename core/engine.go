@@ -248,6 +248,7 @@ type Engine struct {
 	eventIdleTimeout  time.Duration
 	pausedTurnRelease time.Duration // how long a structured question keeps its turn alive (0 = forever)
 	maxTurnTime       time.Duration // absolute wall-clock cap per turn (0 = disabled)
+	turnStopGrace     time.Duration // how long a turn cut by its time limit may finish before its agent is closed
 	maxQueuedMessages int
 	dirHistory        *DirHistory
 	baseWorkDir       string
@@ -355,6 +356,9 @@ type queuedMessage struct {
 	channelKey        string // platform-provided channel identifier (preferred over sessionKey extraction)
 	userMessageTimeMs int64  // Feishu create_time ms (optional); see Message.UserMessageTimeMs
 	runtime           SessionRuntime
+	// message is the message as received, so one that never reached the Agent
+	// can run again from the start after its conversation was reset.
+	message *Message
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
@@ -743,6 +747,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
 		pausedTurnRelease:     defaultPausedTurnRelease,
+		turnStopGrace:         defaultTurnStopGrace,
 		maxQueuedMessages:     defaultMaxQueuedMessages,
 		showContextIndicator:  true,
 		showWorkdirIndicator:  true,
@@ -3269,6 +3274,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		channelKey:        msg.ChannelKey,
 		userMessageTimeMs: msg.UserMessageTimeMs,
 		runtime:           msg.Runtime,
+		message:           msg,
 	})
 	queueDepth := len(state.pendingMessages)
 	state.mu.Unlock()
@@ -4922,6 +4928,14 @@ const defaultPausedTurnRelease = time.Hour
 // waited on a structured question. The question itself stays answerable.
 const TurnPausedTurnReleased = "AGENT_PAUSED_TURN_RELEASED"
 
+// TurnQueuedMessageDropped is the typed failure code for a queued message that
+// never reached the Agent because its conversation was stopped or reset.
+const TurnQueuedMessageDropped = "QUEUED_MESSAGE_DROPPED"
+
+// defaultTurnStopGrace is how long a turn cut by its time limit may still end
+// on its own before its agent is closed.
+const defaultTurnStopGrace = 10 * time.Second
+
 // ErrInteractionNotPending reports that an interaction no longer has a paused
 // turn to resume, so the control plane must continue the task another way.
 var ErrInteractionNotPending = errors.New("interaction is not pending")
@@ -5413,7 +5427,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 			e.failTurn(p, replyCtx, "AGENT_IDLE_TIMEOUT",
 				fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
-			e.cleanupInteractiveState(sessionKey, state)
+			e.resetKeepingQueuedMessages(sessionKey, state)
 			return
 		case <-turnDeadlineCh:
 			elapsed := time.Since(turnStart)
@@ -5431,7 +5445,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// write its final state before dying (preserves --resume ability).
 			// If it doesn't exit within a short grace window, force-kill.
 			state.markStopped()
-			gracePeriod := 10 * time.Second
+			gracePeriod := e.turnStopGrace
 			graceTimer := time.NewTimer(gracePeriod)
 		graceLoop:
 			for {
@@ -5455,13 +5469,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					state.mu.Lock()
 					state.eventsNeedResync = true
 					state.mu.Unlock()
-					e.cleanupInteractiveState(sessionKey, state)
+					e.resetKeepingQueuedMessages(sessionKey, state)
 					return
 				}
 			}
-			// Graceful exit path: cleanupInteractiveState closes the session,
+			// Graceful exit path: the reset closes the session,
 			// but eventsNeedResync=false so the next --resume works correctly.
-			e.cleanupInteractiveState(sessionKey, state)
+			e.resetKeepingQueuedMessages(sessionKey, state)
 			return
 		case <-e.ctx.Done():
 			state.mu.Lock()
@@ -6127,7 +6141,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				p := state.platform
 				state.mu.Unlock()
 				e.failTurn(p, replyCtx, TurnPausedTurnReleased, e.i18n.T(MsgPausedTurnReleased))
-				e.cleanupInteractiveState(sessionKey, state)
+				e.resetKeepingQueuedMessages(sessionKey, state)
 				return
 			}
 			slog.Info("permission resolved", "request_id", event.RequestID)
@@ -6751,8 +6765,7 @@ channelClosed:
 	state.mu.Lock()
 	state.eventsNeedResync = true
 	state.mu.Unlock()
-	e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited"))
-	e.cleanupInteractiveState(sessionKey, state)
+	e.resetKeepingQueuedMessages(sessionKey, state)
 
 	if len(textParts) > 0 {
 		state.mu.Lock()
@@ -6861,14 +6874,54 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 // sends an error notification to each queued message's sender. Called when
 // the event loop exits abnormally (EventError, channel closed) and queued
 // messages can no longer be delivered to the agent.
+//
+// The notice is a typed failure where the platform takes one: a machine
+// channel would otherwise record the error text as the Agent's answer to a
+// message the Agent never saw.
 func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason error) {
-	state.mu.Lock()
-	remaining := state.pendingMessages
-	state.pendingMessages = nil
-	state.mu.Unlock()
-	for _, q := range remaining {
-		e.send(q.platform, q.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), reason))
+	for _, q := range takeQueuedMessages(state) {
+		e.failQueuedMessage(q, reason)
 	}
+}
+
+func (e *Engine) failQueuedMessage(q queuedMessage, reason error) {
+	e.failTurn(q.platform, q.replyCtx, TurnQueuedMessageDropped, fmt.Sprintf(e.i18n.T(MsgError), reason))
+}
+
+func takeQueuedMessages(state *interactiveState) []queuedMessage {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	queued := state.pendingMessages
+	state.pendingMessages = nil
+	return queued
+}
+
+// resetKeepingQueuedMessages tears down a conversation whose turn the engine
+// ended (time limit, silence, a released question, a dead agent process). The
+// messages queued behind that turn never reached the Agent and are not part of
+// what failed, so they start again on the next Agent instead of being dropped.
+func (e *Engine) resetKeepingQueuedMessages(sessionKey string, state *interactiveState) {
+	carried := takeQueuedMessages(state)
+	e.cleanupInteractiveState(sessionKey, state)
+	// The state stays reachable until its agent has closed; keep what was
+	// queued meanwhile too.
+	carried = append(carried, takeQueuedMessages(state)...)
+	if len(carried) == 0 {
+		return
+	}
+	// The ended turn still holds the Session lock until its owner unwinds;
+	// with the state gone, handleMessage waits for that like after a /stop.
+	go func() {
+		for _, q := range carried {
+			if q.message == nil || e.ctx.Err() != nil {
+				e.failQueuedMessage(q, fmt.Errorf("session reset"))
+				continue
+			}
+			slog.Info("starting a message queued behind an ended turn",
+				"session_key", sessionKey, "msg_id", q.messageID)
+			e.handleMessage(q.platform, q.message)
+		}
+	}()
 }
 
 // drainPendingMessages processes all queued messages in the state's pendingMessages
@@ -6914,7 +6967,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
 		if state.agentSession == nil || !state.agentSession.Alive() {
-			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
+			e.failQueuedMessage(queued, fmt.Errorf("agent session ended"))
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
 			return false
 		}
