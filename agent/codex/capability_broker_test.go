@@ -670,3 +670,17 @@ func TestCapabilityBrokerRealFileHelperMultipartReceipt(t *testing.T) {
 		t.Fatal("invalid public file receipt")
 	}
 }
+
+// 10-18/19 on Test the Agent read every rejection as the same "unavailable" and guessed: a restart as expired
+// authorization, a missing permission as a control hand-back. Each kind now says what happened and what helps.
+func TestBrokerRejectionSaysWhatKindOfFailureItWas(t *testing.T) {
+	cases := map[int]string{502: "发布重启", 503: "发布重启", 504: "发布重启", 500: "内部出错", 403: "没有调用这项能力的权限", 400: "没有执行任何操作"}
+	for status, want := range cases {
+		w := httptest.NewRecorder()
+		brokerReject(w, status)
+		var body map[string]string
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || w.Code != status || body["code"] != "CAPABILITY_UNAVAILABLE" || !strings.Contains(body["message"], want) {
+			t.Fatalf("status %d: code=%d body=%s", status, w.Code, w.Body.String())
+		}
+	}
+}

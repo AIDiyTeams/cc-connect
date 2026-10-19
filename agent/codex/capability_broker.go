@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -141,7 +142,25 @@ func brokerToken(runtime core.SessionRuntime, kind string) string {
 func brokerReject(w http.ResponseWriter, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_, _ = io.WriteString(w, `{"code":"CAPABILITY_UNAVAILABLE","message":"This operation is unavailable in the current task; no successful receipt was received."}`)
+	body, _ := json.Marshal(map[string]string{"code": "CAPABILITY_UNAVAILABLE", "message": brokerRejectMessage(status)})
+	_, _ = w.Write(body)
+}
+
+// The Agent picks its next step from this text alone. Each status says what kind of failure it was, so a restart is
+// waited out and a missing permission is reported, without any Portal internals crossing the boundary.
+func brokerRejectMessage(status int) string {
+	switch {
+	case status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout:
+		return "Tomako 服务暂时不可用（HTTP " + strconv.Itoa(status) + "，可能正在发布重启，通常几分钟内恢复）。这次请求没有得到结果：读操作稍后重试即可；写操作稍后先查询状态，再决定是否用原 requestId 重试。"
+	case status >= 500:
+		return "Tomako 服务内部出错（HTTP " + strconv.Itoa(status) + "），没有返回原因。这不是页面或参数的问题，原样重试大概率仍会失败；请如实告诉用户这一步没有完成。"
+	case status == http.StatusForbidden:
+		return "当前任务没有调用这项能力的权限（HTTP 403）。这是平台的授权配置，重试或请用户在页面上操作都不能解决；请如实告诉用户。"
+	case status == http.StatusNotFound:
+		return "这项能力的入口不存在（HTTP 404），请求没有发出。"
+	default:
+		return "请求没有被接受（HTTP " + strconv.Itoa(status) + "），没有执行任何操作。"
+	}
 }
 
 func (b *capabilityBroker) serve(w http.ResponseWriter, r *http.Request) {
