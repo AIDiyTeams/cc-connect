@@ -134,13 +134,13 @@ func TestFormToolJoinsConversationToolsWithoutReplacingThem(t *testing.T) {
 	for _, tool := range tools {
 		names = append(names, tool["name"].(string))
 	}
-	if strings.Join(names, ",") != "tomako_generate_image,tomako_image_status,tomako_request_form" {
+	if strings.Join(names, ",") != "tomako_generate_image,tomako_image_status,tomako_request_form,tomako_request_browser_help" {
 		t.Fatalf("tools=%v", names)
 	}
 	s.runtime.ChatSessionID = ""
 	for _, tool := range s.threadRequestParams()["dynamicTools"].([]map[string]any) {
-		if tool["name"] == formToolName {
-			t.Fatal("a task without a conversation received the form tool")
+		if tool["name"] == formToolName || tool["name"] == browserHelpToolName {
+			t.Fatalf("a task without a conversation received %v", tool["name"])
 		}
 	}
 	s.runtime.ChatSessionID = "csess-a"

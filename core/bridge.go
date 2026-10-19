@@ -1151,6 +1151,9 @@ func (bp *BridgePlatform) SendInteraction(ctx context.Context, replyCtx any, req
 	if request.Form != nil {
 		message["form"] = request.Form
 	}
+	if request.UserAction != nil {
+		message["userAction"] = request.UserAction
+	}
 	return bp.server.sendToAdapter(rc.Platform, message)
 }
 
