@@ -50,16 +50,27 @@ var (
 // must be absent or empty for that operation.
 var teamCoordinationOperationFields = map[string]map[string]bool{
 	"context": {},
-	"handoff": {"sourceMessageId": true, "contextMessageIds": true, "employeeId": true, "executionKind": true, "title": true, "brief": true},
+	"handoff": {"sourceMessageId": true, "contextMessageIds": true, "employeeId": true, "executionKind": true, "title": true,
+		"brief": true, "deliverables": true},
 	"status":  {"planId": true},
 	"message": {"planId": true, "sourceMessageId": true, "note": true},
 	"outcome": {"planId": true, "outcomeId": true},
+	"review":  {"planId": true, "verdict": true, "delivered": true, "note": true},
+	"report":  {"sourceMessageId": true, "asks": true, "closing": true},
 }
 
 var teamCoordinationSchemaFields = map[string]bool{
 	"employeeId": true, "planId": true, "executionKind": true, "title": true, "brief": true,
 	"sourceMessageId": true, "contextMessageIds": true, "note": true, "outcomeId": true,
+	"deliverables": true, "verdict": true, "delivered": true, "asks": true, "closing": true,
 }
+
+// Portal's bounds for what the team card shows; the same numbers as CmoHandoff,
+// TeamReview and TeamRequestReport.
+const (
+	teamCoordinationMaxDeliverables = 8
+	teamCoordinationMaxAsks         = 3
+)
 
 // A thread keeps the dynamic tools it started with: Codex restores them from the
 // thread's session metadata on resume and ignores new ones. A conversation that
@@ -69,9 +80,10 @@ const teamCoordinationHelperFallback = "Team coordination fallback: if " + teamC
 	" is not among your tools in this conversation (a conversation keeps the tools it started with), " +
 	"perform the same CMO operations with the Skills-OL helper instead: " +
 	"CMO_API='<trusted [CMO_API=...] value of this turn>' node \"${SKILLS_OL_DIR:?}/cmo-handoff.mjs\" " +
-	"context|handoff|status <planId>|message <planId>|outcome <planId> <outcomeId>. The helper attaches current authority: never read, print " +
-	"or pass tokens or nonces, or hand-write HTTP. handoff takes {sourceMessageId,contextMessageIds,employeeId," +
-	"executionKind,title,brief} and message takes {note,sourceMessageId} (either or both) as one JSON object on stdin, built with a " +
+	"context|handoff|status <planId>|message <planId>|outcome <planId> <outcomeId>|review <planId>|report. The helper attaches " +
+	"current authority: never read, print or pass tokens or nonces, or hand-write HTTP. handoff takes {sourceMessageId," +
+	"contextMessageIds,employeeId,executionKind,title,brief,deliverables}, message takes {note,sourceMessageId} (either or both), " +
+	"review takes {verdict,delivered,note} and report takes {sourceMessageId,asks,closing}, each as one JSON object on stdin, built with a " +
 	"JSON library or quoted heredoc; never shell-interpolate user text. Exit 0 prints the receipt; otherwise " +
 	"stderr gives the HTTP status, code and reason."
 
@@ -88,19 +100,39 @@ func teamCoordinationDynamicTool() map[string]any {
 			"operation=message sends that handoff's employee the coordinator's own words (note), a later user message (sourceMessageId), or both. " +
 			"operation=outcome reads one outcome that handoff's employee saved (outcomeId as listed for that work) with its readable text, " +
 			"so a delivery is judged by what was delivered. " +
+			"operation=review records your check of a handoff's delivery, shown to the user: verdict, how many deliverables are usable " +
+			"(delivered) and note (required when returned). operation=report puts, for the user request the work serves (sourceMessageId), " +
+			"the decisions only the user can make (asks) and the closing sentence on the team card. " +
 			"Credentials and request signing are handled by the platform.",
 		"inputSchema": map[string]any{
 			"type": "object", "additionalProperties": false, "required": []string{"operation"},
 			"properties": map[string]any{
-				"operation":       map[string]any{"type": "string", "enum": []string{"context", "handoff", "status", "message", "outcome"}},
+				"operation": map[string]any{"type": "string",
+					"enum": []string{"context", "handoff", "status", "message", "outcome", "review", "report"}},
 				"employeeId":      text("handoff: the employee id from operation=context."),
-				"planId":          text("status, message and outcome: the wp-<uuid> planId from a receipt."),
+				"planId":          text("status, message, outcome and review: the wp-<uuid> planId from a receipt."),
 				"outcomeId":       text("outcome: the id of an outcome listed for that work in TEAM IN THIS CONVERSATION."),
 				"executionKind":   map[string]any{"type": "string", "enum": []string{"conversation", "content", "kol_discovery"}},
 				"title":           text("handoff: short task title."),
 				"brief":           text("Complete task brief in the conversation language"),
-				"sourceMessageId": text("handoff and message: the user source message id."),
-				"note":            text("message: your own words to the employee about this work, up to 4000 characters."),
+				"sourceMessageId": text("handoff and message: the user source message id. report: the user request the work serves."),
+				"note": text("message: your own words to the employee about this work, up to 4000 characters. " +
+					"review: why it was returned or what the user should know, up to 500 characters in the user's language."),
+				"deliverables": map[string]any{"type": "array", "maxItems": teamCoordinationMaxDeliverables,
+					"items":       map[string]any{"type": "string"},
+					"description": "handoff: up to 8 things the work hands back, each a short phrase in the user's language."},
+				"verdict": map[string]any{"type": "string", "enum": []string{"accepted", "returned"}},
+				"delivered": map[string]any{"type": "integer", "minimum": 0, "maximum": teamCoordinationMaxDeliverables,
+					"description": "review: how many of the deliverables named at handoff are usable."},
+				"asks": map[string]any{"type": "array", "maxItems": teamCoordinationMaxAsks,
+					"description": "report: decisions only the user can make, each asked once.",
+					"items": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"question", "options"},
+						"properties": map[string]any{
+							"question": text("Up to 300 characters."),
+							"options": map[string]any{"type": "array", "minItems": 2, "maxItems": 4,
+								"items": map[string]any{"type": "string"}, "description": "2 to 4 short choices, up to 80 characters each."},
+						}}},
+				"closing": text("report: one closing sentence once every work for the request is settled and checked, up to 300 characters."),
 				"contextMessageIds": map[string]any{"type": "array", "maxItems": 30,
 					"items": map[string]any{"type": "string"}, "description": "handoff: other relevant user source message ids."},
 			},
@@ -202,6 +234,7 @@ type teamCoordinationHandoff struct {
 	ExecutionKind     string   `json:"executionKind"`
 	Title             string   `json:"title"`
 	Brief             string   `json:"brief"`
+	Deliverables      []string `json:"deliverables,omitempty"`
 }
 
 // teamCoordinationRequest maps validated arguments onto the helper's command
@@ -210,7 +243,7 @@ func teamCoordinationRequest(arguments map[string]any) (operation string, args [
 	operation, _ = arguments["operation"].(string)
 	fields, known := teamCoordinationOperationFields[operation]
 	if !known {
-		return "", nil, nil, fmt.Errorf("operation must be context, handoff, status, message or outcome")
+		return "", nil, nil, fmt.Errorf("operation must be context, handoff, status, message, outcome, review or report")
 	}
 	for key, value := range arguments {
 		if key == "operation" {
@@ -264,6 +297,16 @@ func teamCoordinationRequest(arguments map[string]any) (operation string, args [
 		}
 		stdin, _ = json.Marshal(body)
 		return operation, []string{plan}, stdin, nil
+	case "review":
+		plan, err := teamCoordinationPlanID(arguments["planId"])
+		if err != nil {
+			return "", nil, nil, err
+		}
+		stdin, err = teamCoordinationReview(arguments)
+		return operation, []string{plan}, stdin, err
+	case "report":
+		stdin, err = teamCoordinationReport(arguments)
+		return operation, nil, stdin, err
 	}
 	var handoff teamCoordinationHandoff
 	if handoff.SourceMessageID, err = teamCoordinationID(arguments["sourceMessageId"], "sourceMessageId"); err != nil {
@@ -296,8 +339,109 @@ func teamCoordinationRequest(arguments map[string]any) (operation string, args [
 			handoff.ContextMessageIDs = append(handoff.ContextMessageIDs, id)
 		}
 	}
+	if handoff.Deliverables, err = teamCoordinationTexts(arguments["deliverables"], "deliverables", teamCoordinationMaxDeliverables, 0, 120); err != nil {
+		return "", nil, nil, err
+	}
 	stdin, _ = json.Marshal(handoff)
 	return operation, nil, stdin, nil
+}
+
+func teamCoordinationReview(arguments map[string]any) ([]byte, error) {
+	body := map[string]any{}
+	verdict, _ := arguments["verdict"].(string)
+	if verdict != "accepted" && verdict != "returned" {
+		return nil, fmt.Errorf("verdict must be accepted or returned")
+	}
+	body["verdict"] = verdict
+	if value := arguments["delivered"]; value != nil {
+		count, ok := value.(float64)
+		if !ok || count != float64(int(count)) || count < 0 || count > teamCoordinationMaxDeliverables {
+			return nil, fmt.Errorf("delivered must count the deliverables named at handoff (0 to %d)", teamCoordinationMaxDeliverables)
+		}
+		body["delivered"] = int(count)
+	}
+	if !emptyToolArgument(arguments["note"]) {
+		note, err := teamCoordinationText(arguments["note"], "note", 500)
+		if err != nil {
+			return nil, err
+		}
+		body["note"] = note
+	} else if verdict == "returned" {
+		return nil, fmt.Errorf("a returned delivery needs the reason in note")
+	}
+	stdin, _ := json.Marshal(body)
+	return stdin, nil
+}
+
+type teamCoordinationAsk struct {
+	Question string   `json:"question"`
+	Options  []string `json:"options"`
+}
+
+func teamCoordinationReport(arguments map[string]any) ([]byte, error) {
+	var report struct {
+		SourceMessageID string                `json:"sourceMessageId"`
+		Asks            []teamCoordinationAsk `json:"asks"`
+		Closing         string                `json:"closing,omitempty"`
+	}
+	var err error
+	if report.SourceMessageID, err = teamCoordinationID(arguments["sourceMessageId"], "sourceMessageId"); err != nil {
+		return nil, err
+	}
+	report.Asks = []teamCoordinationAsk{}
+	if value := arguments["asks"]; value != nil {
+		asks, ok := value.([]any)
+		if !ok || len(asks) > teamCoordinationMaxAsks {
+			return nil, fmt.Errorf("asks must be an array of at most %d decisions", teamCoordinationMaxAsks)
+		}
+		for _, raw := range asks {
+			ask, ok := raw.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("each ask is {question, options}")
+			}
+			for key := range ask {
+				if key != "question" && key != "options" {
+					return nil, fmt.Errorf("unsupported ask field: %s", key)
+				}
+			}
+			question, err := teamCoordinationText(ask["question"], "asks[].question", 300)
+			if err != nil {
+				return nil, err
+			}
+			options, err := teamCoordinationTexts(ask["options"], "asks[].options", 4, 2, 80)
+			if err != nil {
+				return nil, err
+			}
+			report.Asks = append(report.Asks, teamCoordinationAsk{Question: question, Options: options})
+		}
+	}
+	if !emptyToolArgument(arguments["closing"]) {
+		if report.Closing, err = teamCoordinationText(arguments["closing"], "closing", 300); err != nil {
+			return nil, err
+		}
+	}
+	stdin, _ := json.Marshal(report)
+	return stdin, nil
+}
+
+// teamCoordinationTexts reads an optional list of short texts; nil when absent and min is 0.
+func teamCoordinationTexts(value any, field string, max, min, chars int) ([]string, error) {
+	if value == nil && min == 0 {
+		return nil, nil
+	}
+	items, ok := value.([]any)
+	if !ok || len(items) > max || len(items) < min {
+		return nil, fmt.Errorf("%s must be an array of %d to %d texts", field, min, max)
+	}
+	var result []string
+	for _, raw := range items {
+		text, err := teamCoordinationText(raw, field+"[]", chars)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, strings.TrimSpace(text))
+	}
+	return result, nil
 }
 
 func emptyToolArgument(value any) bool {

@@ -209,6 +209,7 @@ func TestCapabilityBrokerCmoCoordination_AdmitsHandoffLifecycle(t *testing.T) {
 		{"GET", "/cmo/context", ""},
 		{"POST", "/cmo/handoffs", `{"sourceMessageId":"cmsg-user","employeeId":"emp-a","executionKind":"conversation"}`},
 		{"GET", plan, ""}, {"POST", plan + "/messages", `{"sourceMessageId":"cmsg-user"}`},
+		{"POST", plan + "/review", `{"verdict":"accepted"}`}, {"POST", "/cmo/reports", `{"sourceMessageId":"cmsg-user","asks":[]}`},
 	}
 	for _, kind := range []string{"image", "machine"} {
 		for _, c := range cases {
