@@ -297,6 +297,10 @@ type Engine struct {
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
+	// turnLaunches holds turns that own the Session lock but have not handed
+	// their prompt to the agent yet. See turnLaunch.
+	launchMu     sync.Mutex
+	turnLaunches map[string]map[*turnLaunch]struct{}
 
 	// Turns currently streaming, so a shutdown can wait for them and report
 	// the ones it has to cut. See shutdown_drain.go.
@@ -558,6 +562,145 @@ func (s *interactiveState) markStopped() {
 		s.stopCh = make(chan struct{})
 	}
 	close(s.stopCh)
+}
+
+// turnLaunch is the stop handle of a turn between taking the Session lock and
+// sending its prompt. In that window the interactive state may be only a
+// startup placeholder, or an agent that has not received the turn, so marking
+// the state stopped cannot reach the turn: the owner would start the agent and
+// send the cancelled prompt anyway. A stop cancels the launch instead, and the
+// owner checks it before starting the agent and again right before Send.
+//
+// Launches live under launchMu rather than interactiveMu because agent startup
+// holds interactiveMu for its whole duration; a stop during a slow resume must
+// still cancel the turn before startup returns.
+type turnLaunch struct {
+	messageID string
+	cancelled bool // protected by Engine.launchMu
+	// settled is closed once the cancelling stop has also torn down the
+	// interactive state it found, so the owner knows which agent the stop
+	// already handled. Nil until cancelled.
+	settled chan struct{}
+}
+
+// registerTurnLaunch publishes a turn's stop handle. Callers may hold
+// interactiveMu; launchMu is always taken after it.
+func (e *Engine) registerTurnLaunch(key, messageID string) *turnLaunch {
+	launch := &turnLaunch{messageID: messageID}
+	e.launchMu.Lock()
+	defer e.launchMu.Unlock()
+	if e.turnLaunches == nil {
+		e.turnLaunches = make(map[string]map[*turnLaunch]struct{})
+	}
+	set := e.turnLaunches[key]
+	if set == nil {
+		set = make(map[*turnLaunch]struct{})
+		e.turnLaunches[key] = set
+	}
+	set[launch] = struct{}{}
+	return launch
+}
+
+// Caller holds launchMu.
+func (e *Engine) releaseTurnLaunchLocked(key string, launch *turnLaunch) {
+	set := e.turnLaunches[key]
+	if set == nil {
+		return
+	}
+	delete(set, launch)
+	if len(set) == 0 {
+		delete(e.turnLaunches, key)
+	}
+}
+
+func (e *Engine) releaseTurnLaunch(key string, launch *turnLaunch) {
+	if launch == nil {
+		return
+	}
+	e.launchMu.Lock()
+	defer e.launchMu.Unlock()
+	e.releaseTurnLaunchLocked(key, launch)
+}
+
+// cancelTurnLaunches cancels every turn of key that has not reached the agent
+// yet. The caller must close each returned launch's settled channel once it
+// has finished with the interactive state.
+func (e *Engine) cancelTurnLaunches(key string) []*turnLaunch {
+	e.launchMu.Lock()
+	defer e.launchMu.Unlock()
+	set := e.turnLaunches[key]
+	cancelled := make([]*turnLaunch, 0, len(set))
+	for launch := range set {
+		launch.cancelled = true
+		launch.settled = make(chan struct{})
+		cancelled = append(cancelled, launch)
+	}
+	delete(e.turnLaunches, key)
+	return cancelled
+}
+
+func settleTurnLaunches(launches []*turnLaunch) {
+	for _, launch := range launches {
+		close(launch.settled)
+	}
+}
+
+// cancelTurnLaunchByMessageID cancels the launching turn of a recalled message.
+// A recall leaves the interactive state alone, so it settles immediately.
+func (e *Engine) cancelTurnLaunchByMessageID(messageID string) (string, bool) {
+	e.launchMu.Lock()
+	defer e.launchMu.Unlock()
+	for key, set := range e.turnLaunches {
+		for launch := range set {
+			if launch.messageID == messageID {
+				launch.cancelled = true
+				launch.settled = make(chan struct{})
+				close(launch.settled)
+				e.releaseTurnLaunchLocked(key, launch)
+				return key, true
+			}
+		}
+	}
+	return "", false
+}
+
+// waitTurnLaunchSettled waits until the stop that cancelled launch has
+// finished with the interactive state. Reports false on engine shutdown.
+func (e *Engine) waitTurnLaunchSettled(launch *turnLaunch) bool {
+	e.launchMu.Lock()
+	settled := launch.settled
+	e.launchMu.Unlock()
+	select {
+	case <-settled:
+		return true
+	case <-e.ctx.Done():
+		return false
+	}
+}
+
+func (e *Engine) turnLaunchCancelled(launch *turnLaunch) bool {
+	if launch == nil {
+		return false
+	}
+	e.launchMu.Lock()
+	defer e.launchMu.Unlock()
+	return launch.cancelled
+}
+
+// commitTurnLaunch closes the launch window right before Send. It reports
+// false when a stop already cancelled the turn; afterwards stops reach the
+// turn through its interactive state's stop signal.
+func (e *Engine) commitTurnLaunch(key string, launch *turnLaunch) bool {
+	if launch == nil {
+		return true
+	}
+	e.launchMu.Lock()
+	defer e.launchMu.Unlock()
+	if launch.cancelled {
+		return false
+	}
+	e.releaseTurnLaunchLocked(key, launch)
+	return true
 }
 
 // resolve safely closes the Resolved channel exactly once.
@@ -2416,6 +2559,17 @@ func (e *Engine) handleMessageRecall(p Platform, msg *Message) {
 		return
 	}
 
+	// A starting turn is found through its launch alone: agent startup holds
+	// interactiveMu, which the running-turn lookup below waits on.
+	if sessionKey, ok := e.cancelTurnLaunchByMessageID(messageID); ok {
+		slog.Info("starting message recalled; turn cancelled before reaching the agent",
+			"platform", p.Name(),
+			"msg_id", messageID,
+			"session", sessionKey,
+		)
+		return
+	}
+
 	if sessionKey, ok := e.findCurrentMessageSession(messageID); ok {
 		if e.stopInteractiveSessionSilently(sessionKey) {
 			slog.Info("active message recalled; session stopped",
@@ -2918,7 +3072,8 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
-	if !e.tryLockSessionWithQueueState(session, interactiveKey, p, msg.ReplyCtx) {
+	launch := e.tryLockSessionWithQueueState(session, interactiveKey, p, msg.ReplyCtx, msg.MessageID)
+	if launch == nil {
 		// /stop removes the interactive state immediately so stale Agent events
 		// cannot reach the user, while the old processing goroutine releases the
 		// Session lock during its short asynchronous unwind. A follow-up arriving
@@ -2964,7 +3119,7 @@ sessionLocked:
 	// Ensure an interactiveState entry exists before launching the async
 	// processor so messages arriving during session startup can be queued
 	// instead of dropped (issue #565).
-	e.ensureInteractiveStateForQueueing(interactiveKey, p, msg.ReplyCtx)
+	launch = e.ensureTurnLaunch(interactiveKey, p, msg.ReplyCtx, msg.MessageID, launch)
 	e.noteUserMessageAccepted(interactiveKey, msg.UserMessageTimeMs)
 	slog.Debug("user message accepted for processing",
 		"platform", msg.Platform,
@@ -2980,7 +3135,7 @@ sessionLocked:
 		"session", session.ID,
 	)
 
-	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
+	go e.processInteractiveTurn(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey, launch)
 }
 
 func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session) *Session {
@@ -3146,16 +3301,35 @@ func (e *Engine) ensureInteractiveStateForQueueing(key string, p Platform, reply
 	e.ensureQueueStateLocked(key, p, replyCtx)
 }
 
-// Publish the startup queue atomically with taking the session lock. Otherwise
-// another message can observe a busy session before its queue exists and be lost.
-func (e *Engine) tryLockSessionWithQueueState(session *Session, key string, p Platform, replyCtx any) bool {
+// Publish the startup queue and the turn's stop handle atomically with taking
+// the session lock. Otherwise another message can observe a busy session before
+// its queue exists and be lost, or a stop can land before the turn is visible.
+// Returns nil when the session is busy.
+func (e *Engine) tryLockSessionWithQueueState(session *Session, key string, p Platform, replyCtx any, messageID string) *turnLaunch {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 	if !session.TryLock() {
-		return false
+		return nil
 	}
 	e.ensureQueueStateLocked(key, p, replyCtx)
-	return true
+	return e.registerTurnLaunch(key, messageID)
+}
+
+// ensureTurnLaunch prepares a turn that already owns the Session lock: it
+// publishes the startup queue and registers a stop handle when the lock was
+// taken without one. A launch already cancelled by a stop gets no new queue,
+// because its owner unwinds without draining one.
+func (e *Engine) ensureTurnLaunch(key string, p Platform, replyCtx any, messageID string, launch *turnLaunch) *turnLaunch {
+	if launch != nil && e.turnLaunchCancelled(launch) {
+		return launch
+	}
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	e.ensureQueueStateLocked(key, p, replyCtx)
+	if launch == nil {
+		launch = e.registerTurnLaunch(key, messageID)
+	}
+	return launch
 }
 
 // Caller holds interactiveMu.
@@ -3861,6 +4035,13 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 // and workspaceDir so that multi-workspace mode can route to per-workspace agents.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY in the agent env; otherwise interactiveKey is used.
 func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session *Session, agent Agent, sessions *SessionManager, interactiveKey string, workspaceDir string, ccSessionKey string) {
+	launch := e.registerTurnLaunch(interactiveKey, msg.MessageID)
+	e.processInteractiveTurn(p, msg, session, agent, sessions, interactiveKey, workspaceDir, ccSessionKey, launch)
+}
+
+// processInteractiveTurn runs a turn whose stop handle was registered when it
+// took the Session lock.
+func (e *Engine) processInteractiveTurn(p Platform, msg *Message, session *Session, agent Agent, sessions *SessionManager, interactiveKey string, workspaceDir string, ccSessionKey string, launch *turnLaunch) {
 	// session.Unlock() is NOT deferred here — it is called explicitly in
 	// the drain loop below while holding state.mu to close the race window
 	// between "queue is empty" and "session unlocked". A deferred fallback
@@ -3871,8 +4052,16 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			session.Unlock()
 		}
 	}()
+	defer e.releaseTurnLaunch(interactiveKey, launch)
 
 	if e.ctx.Err() != nil {
+		return
+	}
+	if e.turnLaunchCancelled(launch) {
+		e.logTurnStoppedBeforeAgent(interactiveKey, msg.MessageID, "before_agent_start")
+		// Keep the lock until the stop has cleared this turn's placeholder,
+		// so the next message does not inherit it.
+		e.waitTurnLaunchSettled(launch)
 		return
 	}
 
@@ -3910,6 +4099,12 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.mu.Unlock()
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
 	defer stopRecallMonitor()
+
+	if e.turnLaunchCancelled(launch) {
+		e.logTurnStoppedBeforeAgent(interactiveKey, msg.MessageID, "after_agent_start")
+		unlocked = e.finishStoppedLaunch(launch, state, session, sessions, interactiveKey, workspaceDir)
+		return
+	}
 
 	if state.agentSession == nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
@@ -3982,6 +4177,12 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}
 	e.beginMediaHarvest(state, harvestDir)
 
+	if !e.commitTurnLaunch(interactiveKey, launch) {
+		e.logTurnStoppedBeforeAgent(interactiveKey, msg.MessageID, "before_send")
+		unlocked = e.finishStoppedLaunch(launch, state, session, sessions, interactiveKey, workspaceDir)
+		return
+	}
+
 	// Run Send concurrently with processInteractiveEvents. Some agents block inside
 	// Send until the prompt turn finishes (e.g. ACP session/prompt); they may emit
 	// EventPermissionRequest while blocked — the event loop must run in parallel.
@@ -4013,6 +4214,44 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if alive {
 		e.startUnsolicitedReader(state, session, sessions, interactiveKey, workspaceDir)
 	}
+}
+
+func (e *Engine) logTurnStoppedBeforeAgent(key, messageID, phase string) {
+	slog.Info("turn stopped before reaching the agent",
+		"interactive_key", key,
+		"msg_id", messageID,
+		"phase", phase,
+	)
+}
+
+// finishStoppedLaunch unwinds a turn cancelled before its prompt reached the
+// agent. The stop drops the messages queued before it and tears down the state
+// it finds; wait for that so the outcome does not depend on whether the stop
+// reached the state before or after this turn's agent startup. An agent this
+// turn started after the stop never saw the cancelled prompt, so it stays for
+// reuse and serves messages queued after the stop instead of leaving them
+// behind a released lock. Returns true when the Session lock was released here.
+func (e *Engine) finishStoppedLaunch(launch *turnLaunch, state *interactiveState, session *Session, sessions *SessionManager, key string, workspaceDir string) bool {
+	if !e.waitTurnLaunchSettled(launch) {
+		return false
+	}
+	if state == nil || state.isStopped() || state.agentSession == nil || !state.agentSession.Alive() {
+		return false
+	}
+	// A recall cancels only its launch, so the state may still run an
+	// unsolicited reader; draining must own the event channel alone.
+	e.stopUnsolicitedReader(state)
+	state.mu.Lock()
+	state.currentMessageID = ""
+	state.mu.Unlock()
+	unlocked := e.drainPendingMessages(state, session, sessions, key)
+	state.mu.Lock()
+	alive := state.agentSession != nil && state.agentSession.Alive() && !state.stopped && !state.eventsNeedResync
+	state.mu.Unlock()
+	if alive {
+		e.startUnsolicitedReader(state, session, sessions, key, workspaceDir)
+	}
+	return unlocked
 }
 
 // getOrCreateWorkspaceAgent returns (or creates) a scoped agent and session manager.
@@ -10411,11 +10650,17 @@ func (e *Engine) stopInteractiveSessionSilently(sessionKey string) bool {
 }
 
 func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueued bool) bool {
+	// A turn still starting has not reached the agent; marking its state
+	// stopped would not reach it, so cancel the launch itself. This must not
+	// wait for interactiveMu, which agent startup holds.
+	cancelled := e.cancelTurnLaunches(sessionKey)
+	defer settleTurnLaunches(cancelled)
+
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[sessionKey]
 	if !ok || state == nil {
 		e.interactiveMu.Unlock()
-		return false
+		return len(cancelled) > 0
 	}
 
 	// Stop unsolicited reader before touching state to avoid races.
@@ -16459,7 +16704,26 @@ func (e *Engine) interactiveKeyForSessionKeyLocked(sessionKey string) string {
 func (e *Engine) findInteractiveKeyForSession(sessionKey string) string {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
-	return findInteractiveKeyInStatesLocked(e.interactiveStates, sessionKey)
+	if key := findInteractiveKeyInStatesLocked(e.interactiveStates, sessionKey); key != "" {
+		return key
+	}
+	// A turn locked without a startup placeholder (cron, skills, custom
+	// commands) is only visible through its launch until the agent starts.
+	if sessionKey == "" {
+		return ""
+	}
+	e.launchMu.Lock()
+	defer e.launchMu.Unlock()
+	if _, ok := e.turnLaunches[sessionKey]; ok {
+		return sessionKey
+	}
+	suffix := ":" + sessionKey
+	for k := range e.turnLaunches {
+		if strings.HasSuffix(k, suffix) {
+			return k
+		}
+	}
+	return ""
 }
 
 // findInteractiveKeyInStatesLocked is the lock-free body of the scan; it
