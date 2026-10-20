@@ -32,6 +32,15 @@ func TestBrowserCallsCannotOutliveOrMoveBetweenTurns(t *testing.T) {
 	}
 }
 
+func TestBrowserCurrentPageBindingReachesTheScopedHelper(t *testing.T) {
+	for _, current := range []bool{true, false} {
+		operation, input, err := browserToolRequest(map[string]any{"operation": "open", "currentPage": current})
+		if err != nil || operation != "open" || input["currentPage"] != current || input["tab"] != nil {
+			t.Fatalf("message-page binding changed: %s %#v %v", operation, input, err)
+		}
+	}
+}
+
 func browserSession(t *testing.T, helper string) *appServerSession {
 	t.Helper()
 	s := teamToolSession(t, "")
