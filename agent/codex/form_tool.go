@@ -52,14 +52,14 @@ func formDynamicTool() map[string]any {
 		}}
 	return map[string]any{"type": "function", "name": formToolName, "deferLoading": false,
 		"description": "Show the user a small form in the conversation and wait for their answers. Use it when a task needs several specific facts only the user can provide (for example figures for a business plan or missing ordinary profile fields on a website). Ask only for missing facts, not values already available in the conversation or page. For browser work, inspect the page first, include browser with its current path and site, and gather ordinary text, numbers, dates or fixed choices together. The form offers the existing browser takeover entry. These answers are saved in the conversation and returned to you: never request passwords, verification codes, payment details or other secrets, or describe this as private/hidden from the Agent. Use tomako_request_browser_help for those steps and for uploads, CAPTCHA, signing, or complex interactive controls. Mark as required only what blocks the work. The result lists each submitted value and which fields were skipped; never invent a value for a skipped field. Do not use it for a single yes/no or choice question.",
-		"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"title", "fields"},
+		"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"title", "fields", "browser"},
 			"properties": map[string]any{
 				"title":       text(80),
 				"description": map[string]any{"type": "string", "maxLength": 500},
 				"submitLabel": map[string]any{"type": "string", "maxLength": 20},
 				"fields":      map[string]any{"type": "array", "minItems": 1, "maxItems": formMaxFields, "items": field},
-				"browser": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"site", "path"},
-					"description": "Optional browser handoff context, from the current page/status. This is display context, not a browser session binding or permission to submit the website.",
+				"browser": map[string]any{"type": []string{"object", "null"}, "additionalProperties": false, "required": []string{"site", "path"},
+					"description": "For filling a website, supply its site and current path so the user can take over from the form. Use null only for a form unrelated to filling a website, e.g. planning a budget. This is display context, not a browser session binding or permission to submit the website.",
 					"properties": map[string]any{
 						"site": text(120),
 						"path": map[string]any{"type": "string", "enum": []string{"local-chrome", "cloud"}},
@@ -197,7 +197,9 @@ func formToolResult(questions []core.UserQuestion, result core.PermissionResult)
 // conversation scope. A form never grants control or submits the target page.
 func formBrowserAction(arguments map[string]any) (*core.InteractionUserAction, error) {
 	raw, present := arguments["browser"]
-	if !present {
+	// Existing threads retain the old schema, so omission still means a general
+	// form. New threads must explicitly choose browser context or null.
+	if !present || raw == nil {
 		return nil, nil
 	}
 	browser, ok := raw.(map[string]any)

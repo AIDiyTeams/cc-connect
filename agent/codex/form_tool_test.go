@@ -231,7 +231,7 @@ func TestBrowserFormPreservesTakeoverAndReturnsAnswersWithoutExecutionReceipt(t 
 }
 
 func TestBrowserFormRejectsInvalidHandoffBeforeOpeningInteraction(t *testing.T) {
-	for _, value := range []any{nil, "cloud", map[string]any{"site": "example.com"},
+	for _, value := range []any{"cloud", map[string]any{"site": "example.com"},
 		map[string]any{"site": "", "path": "cloud"}, map[string]any{"site": "example.com", "path": "other"}} {
 		stdin := &lockedWriteCloser{}
 		s := &appServerSession{stdin: stdin, events: make(chan core.Event, 1), pendingApprovals: map[string]chan core.PermissionResult{}}
@@ -247,6 +247,30 @@ func TestBrowserFormRejectsInvalidHandoffBeforeOpeningInteraction(t *testing.T) 
 		}
 		if response["result"].(map[string]any)["success"] != false {
 			t.Fatalf("invalid context accepted: %#v", value)
+		}
+	}
+}
+
+func TestNewFormsExplicitlyChooseBrowserContextWhileLegacyAndGeneralFormsStillWork(t *testing.T) {
+	// In the real browser CUJ an optional browser property was omitted, so a
+	// working form lost its takeover entry. Make the routing choice explicit in
+	// the schema, while keeping already-running threads' old calls compatible.
+	schema := formDynamicTool()["inputSchema"].(map[string]any)
+	found := false
+	for _, field := range schema["required"].([]string) {
+		found = found || field == "browser"
+	}
+	if !found {
+		t.Fatal("new browser forms can silently omit the takeover context")
+	}
+	general := formArguments()
+	for _, explicit := range []bool{false, true} {
+		if explicit {
+			general["browser"] = nil
+		}
+		action, err := formBrowserAction(general)
+		if err != nil || action != nil {
+			t.Fatalf("general/legacy form acquired a browser action: %#v %v", action, err)
 		}
 	}
 }
