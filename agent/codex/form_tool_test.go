@@ -26,6 +26,26 @@ func formArguments() map[string]any {
 	}
 }
 
+func TestFormToolReturnsFilesByFieldWithoutInventingTypedValues(t *testing.T) {
+	file := `<user_attachments>[{"url":"https://files.example.com/chart.png","fileName":"chart.png","mimeType":"image/png"}]</user_attachments>`
+	questions := []core.UserQuestion{{ID: "budget", InputType: "number"}, {ID: "actual", InputType: "number"}, {ID: "notes", InputType: "text"}}
+	result, ok := formToolResult(questions, core.PermissionResult{Behavior: "allow", UpdatedInput: map[string]any{"answers": map[string]any{"budget": []string{file}, "actual": []string{"42\n" + file}, "notes": []string{"__tomako_skipped__"}}}})
+	if !ok {
+		t.Fatal(result)
+	}
+	var payload struct {
+		Values      map[string]any                          `json:"values"`
+		Attachments map[string][]core.InteractionAttachment `json:"attachments"`
+		Skipped     []string                                `json:"skipped"`
+	}
+	if err := json.Unmarshal([]byte(result), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, invented := payload.Values["budget"]; invented || payload.Values["actual"] != float64(42) || len(payload.Attachments["budget"]) != 1 || len(payload.Attachments["actual"]) != 1 || len(payload.Skipped) != 1 || payload.Skipped[0] != "notes" {
+		t.Fatal(result)
+	}
+}
+
 func TestFormRequestBecomesTypedQuestions(t *testing.T) {
 	form, questions, err := parseFormRequest(formArguments())
 	if err != nil {
