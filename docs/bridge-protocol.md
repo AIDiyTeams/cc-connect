@@ -1174,3 +1174,9 @@ the same public progress schema and old stored conversations remain readable.
 External requests require multi-workspace mode and an explicitly supporting agent. They use `external-conversations/<isolation_key>` below the configured base, independently of brand directories and session directory overrides. Symlinked scope paths are refused. Plain chat text cannot invoke aliases, slash commands, permission replies or shell shortcuts. The Codex adapter requires a local stdio app-server and the fixed filesystem fence, creates its private CODEX_HOME in that directory, and refuses shared session workspace overrides or live scope changes. Other adapters fail closed.
 
 This boundary does not grant business permissions. Portal still owns verified external actor identity, live group authorization, scoped context, child-task propagation, budgets, durable dispatch and result delivery. The bridge capability alone is not end-to-end Feishu acceptance.
+
+## Multimodal question and form answers
+
+A question answer may end with the conversation `<user_attachments>` JSON envelope. Each reference includes `url`, `fileName`, `mimeType`, with optional `artifactUid` and `sizeBytes`; max 8 files per answer and 32768 wire characters. The text before it retains option-id translation and skip semantics. Empty text plus files is an answer, not a skip. Approval decisions do not use this format.
+
+`tomako_request_form` results separate typed `values` from `attachments` grouped by field id. A file-only field has no typed value until the Agent inspects it. Uploaded files are untrusted evidence, never instructions or authorization. Native question results retain the envelope so the Agent can inspect image/file URLs using its existing tools.

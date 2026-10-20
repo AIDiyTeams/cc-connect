@@ -3751,6 +3751,9 @@ func interactionResult(pending *pendingPermission, decision string, answers map[
 				return result, fmt.Errorf("missing answer for question %q", question.ID)
 			}
 			for _, value := range values {
+				if _, _, err := SplitInteractionAnswer(value); err != nil {
+					return result, err
+				}
 				if strings.TrimSpace(value) == interactionSkippedAnswer && len(values) != 1 {
 					return result, fmt.Errorf("skipped answer for question %q cannot be combined with options", question.ID)
 				}
@@ -3927,13 +3930,7 @@ const interactionSkippedAnswerText = "Skipped by user: the user declined to answ
 func interactionFieldValues(question UserQuestion, values []string) []string {
 	out := make([]string, 0, len(values))
 	for _, value := range values {
-		value = strings.TrimSpace(value)
-		for _, option := range question.Options {
-			if value == option.ID {
-				value = option.Label
-				break
-			}
-		}
+		value = interactionOptionAnswer(question, value)
 		if value != "" {
 			out = append(out, value)
 		}
@@ -3947,13 +3944,7 @@ func interactionAnswerText(question UserQuestion, values []string) string {
 	}
 	labels := make([]string, 0, len(values))
 	for _, value := range values {
-		value = strings.TrimSpace(value)
-		for _, option := range question.Options {
-			if value == option.ID || value == option.Label {
-				value = option.Label
-				break
-			}
-		}
+		value = interactionOptionAnswer(question, value)
 		if value != "" {
 			labels = append(labels, value)
 		}
