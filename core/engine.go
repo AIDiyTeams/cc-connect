@@ -376,6 +376,7 @@ type interactiveState struct {
 	stopped                bool
 	turnInterrupt          chan struct{} // protected by mu; open while /stop can end the foreground turn in place
 	pending                *pendingPermission
+	detached               map[string]*pendingPermission // interactions shown without pausing the turn, by interaction id
 	pendingMessages        []queuedMessage // messages queued while session was busy
 	approveAll             bool            // when true, auto-approve all permission requests for this session
 	fromVoice              bool            // true if current turn originated from voice transcription
@@ -3693,9 +3694,37 @@ func (e *Engine) RespondInteractionWithAuthority(sessionKey, interactionID, deci
 	answers map[string][]string, authority *SessionRuntime) error {
 	state, pending := e.lookupPendingInteraction(sessionKey, interactionID)
 	if state == nil || pending == nil {
-		return fmt.Errorf("%w: session %q", ErrInteractionNotPending, sessionKey)
+		return e.respondDetachedInteraction(sessionKey, interactionID, decision, answers)
 	}
+	result, err := interactionResult(pending, decision, answers)
+	if err != nil {
+		return err
+	}
+	if !pending.claim() {
+		return fmt.Errorf("%w: %q was released", ErrInteractionNotPending, interactionID)
+	}
+	if authority != nil {
+		if refresher, ok := state.agentSession.(CapabilityAuthorityRefresher); ok {
+			// The answer still resumes the turn: a tool that cannot use the old
+			// credentials reports its own failure, which beats losing the answer.
+			if err := refresher.RefreshCapabilityAuthority(*authority); err != nil {
+				slog.Warn("interaction authority refresh failed", "interaction_id", interactionID, "error", err)
+			}
+		}
+	}
+	if err := state.agentSession.RespondPermission(pending.RequestID, result); err != nil {
+		pending.claimed.Store(false)
+		return err
+	}
+	state.mu.Lock()
+	state.pending = nil
+	state.mu.Unlock()
+	pending.resolve()
+	return nil
+}
 
+// interactionResult turns the user's answers into the result the waiting tool reads.
+func interactionResult(pending *pendingPermission, decision string, answers map[string][]string) (PermissionResult, error) {
 	result := PermissionResult{Behavior: "allow", UpdatedInput: pending.ToolInput}
 	if len(pending.Questions) > 0 {
 		collected := make(map[int]string, len(pending.Questions))
@@ -3719,11 +3748,11 @@ func (e *Engine) RespondInteractionWithAuthority(sessionKey, interactionID, deci
 				values = answers[question.Question]
 			}
 			if len(values) == 0 {
-				return fmt.Errorf("missing answer for question %q", question.ID)
+				return result, fmt.Errorf("missing answer for question %q", question.ID)
 			}
 			for _, value := range values {
 				if strings.TrimSpace(value) == interactionSkippedAnswer && len(values) != 1 {
-					return fmt.Errorf("skipped answer for question %q cannot be combined with options", question.ID)
+					return result, fmt.Errorf("skipped answer for question %q cannot be combined with options", question.ID)
 				}
 			}
 			if question.InputType != "" {
@@ -3731,7 +3760,7 @@ func (e *Engine) RespondInteractionWithAuthority(sessionKey, interactionID, deci
 				// labels) so the requesting tool can read numbers and lists back.
 				skipped := len(values) == 1 && strings.TrimSpace(values[0]) == interactionSkippedAnswer
 				if skipped && question.Required && !skippedForm {
-					return fmt.Errorf("question %q is required", question.ID)
+					return result, fmt.Errorf("question %q is required", question.ID)
 				}
 				fields[question.ID] = interactionFieldValues(question, values)
 				continue
@@ -3754,30 +3783,96 @@ func (e *Engine) RespondInteractionWithAuthority(sessionKey, interactionID, deci
 			result.Behavior = "deny"
 			result.Message = "User denied this tool use."
 		default:
-			return fmt.Errorf("unsupported interaction decision %q", decision)
+			return result, fmt.Errorf("unsupported interaction decision %q", decision)
 		}
 	}
-	if !pending.claim() {
-		return fmt.Errorf("%w: %q was released", ErrInteractionNotPending, interactionID)
+	return result, nil
+}
+
+// showDetachedInteraction shows a question that does not pause the turn: the Agent keeps
+// working, and the answer is taken into the running turn by the agent's DetachedAnswerer.
+func (e *Engine) showDetachedInteraction(p Platform, replyCtx any, state *interactiveState, event Event) {
+	pending := &pendingPermission{
+		RequestID:       event.RequestID,
+		InteractionID:   newInteractionID(),
+		InteractionKind: InteractionKindQuestion,
+		ToolName:        event.ToolName,
+		ToolInput:       event.ToolInputRaw,
+		InputPreview:    event.ToolInput,
+		Questions:       event.Questions,
+		Resolved:        make(chan struct{}),
 	}
-	if authority != nil {
-		if refresher, ok := state.agentSession.(CapabilityAuthorityRefresher); ok {
-			// The answer still resumes the turn: a tool that cannot use the old
-			// credentials reports its own failure, which beats losing the answer.
-			if err := refresher.RefreshCapabilityAuthority(*authority); err != nil {
-				slog.Warn("interaction authority refresh failed", "interaction_id", interactionID, "error", err)
-			}
+	state.mu.Lock()
+	if state.detached == nil {
+		state.detached = map[string]*pendingPermission{}
+	}
+	state.detached[pending.InteractionID] = pending
+	state.mu.Unlock()
+	slog.Info("non-blocking interaction shown", "request_id", event.RequestID, "interaction_id", pending.InteractionID)
+	blocking := false
+	if sender, ok := p.(InteractionSender); ok {
+		if sender.SendInteraction(e.ctx, replyCtx, InteractionRequest{
+			InteractionID: pending.InteractionID,
+			Kind:          pending.InteractionKind,
+			ToolName:      event.ToolName,
+			InputPreview:  event.ToolInput,
+			Questions:     event.Questions,
+			UserAction:    event.UserAction,
+			Blocking:      &blocking,
+		}) == nil {
+			return
 		}
 	}
-	if err := state.agentSession.RespondPermission(pending.RequestID, result); err != nil {
-		pending.claimed.Store(false)
+	e.sendAskQuestionPrompt(p, replyCtx, event.Questions, 0)
+}
+
+// respondDetachedInteraction takes the answer to a question that did not pause the turn into
+// the turn still running. Without one it reports the question as not pending, and the control
+// plane continues from the answer in a new turn.
+func (e *Engine) respondDetachedInteraction(sessionKey, interactionID, decision string, answers map[string][]string) error {
+	state, pending := e.lookupDetachedInteraction(sessionKey, interactionID)
+	if state == nil || pending == nil {
+		return fmt.Errorf("%w: session %q", ErrInteractionNotPending, sessionKey)
+	}
+	result, err := interactionResult(pending, decision, answers)
+	if err != nil {
 		return err
 	}
 	state.mu.Lock()
-	state.pending = nil
+	delete(state.detached, interactionID)
+	agentSession := state.agentSession
 	state.mu.Unlock()
+	answerer, ok := agentSession.(DetachedAnswerer)
+	if !ok || agentSession == nil || !agentSession.Alive() {
+		return fmt.Errorf("%w: no running turn takes %q", ErrInteractionNotPending, interactionID)
+	}
+	if err := answerer.AnswerDetached(pending.RequestID, result); err != nil {
+		return fmt.Errorf("%w: %v", ErrInteractionNotPending, err)
+	}
 	pending.resolve()
 	return nil
+}
+
+func (e *Engine) lookupDetachedInteraction(sessionKey, interactionID string) (*interactiveState, *pendingPermission) {
+	iKey := e.interactiveKeyForSessionKey(sessionKey)
+	suffix := ":" + sessionKey
+	e.interactiveMu.Lock()
+	candidates := make([]*interactiveState, 0, 2)
+	for key, state := range e.interactiveStates {
+		if key == iKey || key == sessionKey || strings.HasSuffix(key, suffix) {
+			candidates = append(candidates, state)
+		}
+	}
+	e.interactiveMu.Unlock()
+	for _, state := range candidates {
+		state.mu.Lock()
+		pending := state.detached[interactionID]
+		state.mu.Unlock()
+		if pending != nil {
+			return state, pending
+		}
+	}
+	return nil, nil
 }
 
 // lookupPendingInteraction finds the exact interaction even when a stale raw
@@ -6131,6 +6226,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					Behavior:     "allow",
 					UpdatedInput: event.ToolInputRaw,
 				})
+				continue
+			}
+			if event.NonBlocking && isAskQuestion {
+				e.showDetachedInteraction(p, replyCtx, state, event)
 				continue
 			}
 

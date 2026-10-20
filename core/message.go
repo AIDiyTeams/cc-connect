@@ -314,8 +314,9 @@ type UserQuestion struct {
 // offer the matching one-click action beside the question.
 type InteractionUserAction struct {
 	Kind    string `json:"kind"`    // sign_in, connect_local_chrome or take_over
-	Site    string `json:"site"`    // the website or service the step is for
-	Browser string `json:"browser"` // local-chrome or cloud
+	Site    string   `json:"site"`            // the first website or service the step is for
+	Sites   []string `json:"sites,omitempty"` // every site the step is for, when there are several
+	Browser string   `json:"browser"`         // local-chrome or cloud
 }
 
 // InteractionForm frames a set of questions answered together on one card.
@@ -357,6 +358,7 @@ type Event struct {
 	Questions                []UserQuestion         // populated when ToolName == "AskUserQuestion"
 	Form                     *InteractionForm       // set when the questions are the fields of one form
 	UserAction               *InteractionUserAction // set when the question asks for a browser step only the user can do
+	NonBlocking              bool                   // EventPermissionRequest shown without pausing the turn; a DetachedAnswerer takes its answer
 	ProgressTasks            []ProgressTask         // populated for EventPlanUpdate; safe user-facing steps only
 	Done                     bool
 	Error                    error

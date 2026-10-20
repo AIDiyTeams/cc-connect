@@ -186,6 +186,7 @@ type appServerSession struct {
 
 	approvalsMu      sync.Mutex
 	pendingApprovals map[string]chan core.PermissionResult
+	detachedHelp     map[string]browserHelpShown // browser help cards shown without pausing the turn, by request id
 
 	threadID atomic.Value
 	alive    atomic.Bool
