@@ -76,8 +76,6 @@ func TestPublicConversationBaseReplacesOnlyTheCodingAssistantCommunicationGuidan
 		"application that renders Markdown",
 		"Lead with the answer",
 		"Match the size to the request",
-		"default to one short sentence confirming the outcome",
-		"including changes in a browser or an external service",
 		"Keep requested article bodies, analysis and other substantive content complete",
 		"One block per point, never two views of the same numbers",
 		"An explicit output contract always wins",

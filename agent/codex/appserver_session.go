@@ -1018,9 +1018,6 @@ func (s *appServerSession) turnDeveloperInstructions() map[string]any {
 	}
 	var instructions any
 	policy := s.runtime.DeveloperInstructions
-	if s.runtime.ChatSessionID != "" {
-		policy = publicCompletionRules + "\n\n" + policy
-	}
 	if imageRuntimeAuthorized(s.runtime) {
 		policy = imageFramingInstructions + "\n\n" + imageSchedulingInstructions + "\n\n" + policy
 	}

@@ -60,11 +60,6 @@ Shape of a good first message (do not copy the wording; match the user's languag
 - Do not add tool calls, model calls or stages just to have something to report. Keep the final answer complete and self-contained; progress messages never replace any part of it.
 `
 
-// Shared with per-turn instructions because resumed threads retain their old base prompt.
-const publicCompletionRules = `- For a completed action, including changes in a browser or an external service, default to one short sentence confirming the outcome. Identify the target only as much as needed to distinguish it. Once a reliable receipt or page observation confirms the requested outcome, stop: do not add another read, screenshot or status check solely to restate the same evidence. Do not append the action history, obvious consequences, generic undo instructions, or unsolicited next steps. If the outcome is uncertain, incomplete or materially differs from the request, state that instead of claiming success.
-- Distinguish the requested deliverable from a completion note. For an image, video, file or saved document, the artifact is the result: deliver it with at most one brief confirmation by default. Do not add a visual inventory, transcribe text from the image, list specifications, explain routine design choices or append an invitation to make changes. Include only explanations the user requested and actual deviations, limitations or failures that affect use. Keep requested article bodies, analysis and other substantive content complete. Optional next tasks belong only in the application's declared interaction format, never repeated in the prose.
-`
-
 // publicFinalAnswerSection replaces Codex's "Presenting your work and final message".
 // That section formats for a terminal: at most ten lines, "plain text that will later be
 // styled by the CLI", Title Case headers, no nested lists and file-path conventions. In an
@@ -77,7 +72,8 @@ The final answer is read by a business user in an application that renders Markd
 
 - Lead with the answer. The first sentence gives the conclusion, recommendation or result. Add reasoning and detail only when the request needs them. Write “卡在排名，不是收录：240 个页面里 128 个已收录，但只有 9 个进了前 20。”, not “根据你的需求，我做了分析，结果如下：”.
 - Match the size to the request. A quick question gets a few direct sentences; an analysis, plan or report gets the room it needs. Never pad with a restatement of the request, a summary of your process or a generic offer of more help. Close with a next step or decision only when the user has one to take.
-` + publicCompletionRules + `- Let the content choose its form:
+- Distinguish the requested deliverable from a completion note. For an image, video, file or saved document, the artifact is the result: deliver it with at most one brief confirmation by default. Do not add a visual inventory, transcribe text from the image, list specifications, explain routine design choices or append an invitation to make changes. Include only explanations the user requested and actual deviations, limitations or failures that affect use. Keep requested article bodies, analysis and other substantive content complete. Optional next tasks belong only in the application's declared interaction format, never repeated in the prose.
+- Let the content choose its form:
   - Sentences carry reasoning, causes, trade-offs and recommendations when the reader needs them. A requested list, chart, calculator or saved artifact can be the main result; prose need not dominate or repeat what it already shows.
   - Lists carry parallel items or ordered steps; each item makes sense on its own.
   - Tables carry exact values the reader compares across items or attributes.
