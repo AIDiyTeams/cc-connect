@@ -1694,6 +1694,9 @@ func brandEvidenceForModel(result map[string]any) map[string]any {
 	if pages := compactBrandEvidencePages(result["evidencePages"]); len(pages) > 0 {
 		compact["evidencePages"] = pages
 	}
+	if contacts := normalizeBrandContactPurposes(result["contacts"]); len(contacts) > 0 {
+		compact["contacts"] = contacts
+	}
 	return compact
 }
 
@@ -1936,7 +1939,7 @@ func validateBrandAnalysisStage(arguments map[string]any) (string, map[string]an
 
 func normalizeCoreBrandAnalysis(result map[string]any) (map[string]any, error) {
 	clean := make(map[string]any, 11)
-	for _, key := range []string{"productName", "brandName", "oneLiner", "description", "audience"} {
+	for _, key := range []string{"productName", "brandName", "oneLiner", "description", "audience", "positioning", "businessModel", "pricing"} {
 		if value := boundedText(result[key], 1200); value != "" {
 			clean[key] = value
 		}
@@ -1978,6 +1981,9 @@ func normalizeCoreBrandAnalysis(result map[string]any) (map[string]any, error) {
 	if len(segments) > 0 {
 		clean["audienceSegments"] = segments
 	}
+	if contacts := normalizeBrandContactPurposes(result["contactPurposes"]); len(contacts) > 0 {
+		clean["contactPurposes"] = contacts
+	}
 	if _, hasAudience := clean["audience"]; !hasAudience && len(segments) == 0 {
 		return nil, fmt.Errorf("core audience evidence is required")
 	}
@@ -2002,11 +2008,52 @@ func normalizeAudienceSegments(raw any) []any {
 			continue
 		}
 		seen[key] = struct{}{}
-		clean = append(clean, map[string]any{
-			"name":        name,
-			"description": boundedText(segment["description"], 400),
-		})
+		facts := map[string]any{"name": name}
+		for _, field := range []string{"description", "role", "task", "value", "trigger", "alternative", "concern"} {
+			if value := boundedText(segment[field], 2000); value != "" {
+				facts[field] = value
+			}
+		}
+		for _, field := range []string{"painPoints", "channels", "signals", "evidence"} {
+			if values := normalizedStringList(segment[field], 50, 2000); len(values) > 0 {
+				facts[field] = stringsToAny(values)
+			}
+		}
+		if details, ok := segment["channelDetails"].(map[string]any); ok {
+			bounded := map[string]any{}
+			for channel, raw := range details {
+				if len(channel) <= 200 {
+					if value := boundedText(raw, 2000); value != "" {
+						bounded[channel] = value
+					}
+				}
+			}
+			if len(bounded) > 0 {
+				facts["channelDetails"] = bounded
+			}
+		}
+		clean = append(clean, facts)
 		if len(clean) == 4 {
+			break
+		}
+	}
+	return clean
+}
+
+func normalizeBrandContactPurposes(raw any) []any {
+	items, _ := raw.([]any)
+	clean := make([]any, 0)
+	for _, item := range items {
+		contact, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		kind, value := boundedText(contact["type"], 32), boundedText(contact["value"], 2048)
+		if kind == "" || value == "" {
+			continue
+		}
+		clean = append(clean, map[string]any{"type": kind, "value": value, "purpose": boundedText(contact["purpose"], 500)})
+		if len(clean) >= 50 {
 			break
 		}
 	}
