@@ -224,6 +224,11 @@ type appServerSession struct {
 	// finalReplyRequested marks that this reply already asked the model once
 	// for the final answer it ended without; see requestFinalReply.
 	finalReplyRequested bool
+	// writtenToolCall marks that this turn's answer was a tool call written as text;
+	// see splitWrittenToolCall.
+	writtenToolCall bool
+	// replyShownFinal survives turn/started so a follow-up answer starts its own paragraph.
+	replyShownFinal bool
 	// interruptedTurn is the turn the engine asked to end through Interrupt.
 	interruptedTurn string
 
@@ -822,6 +827,8 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	s.stateMu.Lock()
 	s.currentTurn = resp.Turn.ID
 	s.finalReplyRequested = false
+	s.writtenToolCall = false
+	s.replyShownFinal = false
 	s.interruptedTurn = ""
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.commentaryItems = nil
@@ -2840,12 +2847,23 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		s.stateMu.Unlock()
 		if item["phase"] == "final_answer" || knownFinal {
 			s.flushPendingAsThinking()
+			prose, written := splitWrittenToolCall(text)
 			s.stateMu.Lock()
+			if written {
+				s.writtenToolCall = true
+				text = prose
+			}
+			if strings.TrimSpace(text) == "" {
+				delete(s.finalItems, itemID)
+				s.stateMu.Unlock()
+				return
+			}
 			prefix := ""
-			if s.lastFinalItem != "" && s.lastFinalItem != itemID {
+			if s.lastFinalItem != "" && s.lastFinalItem != itemID || s.lastFinalItem == "" && s.replyShownFinal {
 				prefix = "\n\n"
 			}
 			s.lastFinalItem = itemID
+			s.replyShownFinal = true
 			delete(s.finalItems, itemID)
 			delete(s.commentaryItems, itemID)
 			delete(s.commentaryStreams, itemID)
@@ -2853,8 +2871,14 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 			s.emit(core.Event{Type: core.EventText, TraceID: itemID, Content: prefix + text, ResponseSource: "native_final"})
 			return
 		}
+		prose, written := splitWrittenToolCall(text)
 		s.stateMu.Lock()
-		s.pendingMsgs = append(s.pendingMsgs, text)
+		if written {
+			s.writtenToolCall = true
+		}
+		if strings.TrimSpace(prose) != "" {
+			s.pendingMsgs = append(s.pendingMsgs, prose)
+		}
 		s.stateMu.Unlock()
 
 	case "commandExecution":
@@ -3348,6 +3372,9 @@ func (s *appServerSession) endedWithoutAnswerLocked() bool {
 	if s.finalReplyRequested || !s.alive.Load() || s.ctx == nil || s.ctx.Err() != nil {
 		return false
 	}
+	if s.writtenToolCall {
+		return true
+	}
 	if s.lastFinalItem != "" {
 		return false
 	}
@@ -3365,9 +3392,15 @@ func (s *appServerSession) endedWithoutAnswerLocked() bool {
 // cannot start, the reply completes as it would have without it.
 func (s *appServerSession) requestFinalReply(endedTurn string) {
 	threadID := s.CurrentSessionID()
+	s.stateMu.Lock()
+	prompt := finalReplyPrompt
+	if s.writtenToolCall {
+		prompt = writtenToolCallPrompt
+	}
+	s.stateMu.Unlock()
 	slog.Info("codex app-server: turn ended without a final answer; asking the model for it once",
-		"thread_id", threadID, "turn_id", endedTurn)
-	input := []map[string]any{{"type": "text", "text": finalReplyPrompt, "text_elements": []any{}}}
+		"thread_id", threadID, "turn_id", endedTurn, "written_tool_call", prompt == writtenToolCallPrompt)
+	input := []map[string]any{{"type": "text", "text": prompt, "text_elements": []any{}}}
 	var resp turnStartResponse
 	err := s.request("turn/start", s.turnStartParams(threadID, input), &resp)
 	if err == nil && resp.Turn.ID == "" {
