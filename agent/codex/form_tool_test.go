@@ -182,3 +182,92 @@ func TestFormToolWaitsForTheUserAndAnswersTheCall(t *testing.T) {
 		t.Fatalf("items=%#v", items)
 	}
 }
+
+func TestBrowserFormPreservesTakeoverAndReturnsAnswersWithoutExecutionReceipt(t *testing.T) {
+	for _, path := range []string{"cloud", "local-chrome"} {
+		t.Run(path, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			stdin := &lockedWriteCloser{}
+			s := &appServerSession{ctx: ctx, cancel: cancel, stdin: stdin, events: make(chan core.Event, 4),
+				pendingApprovals: map[string]chan core.PermissionResult{}, runtime: core.SessionRuntime{ChatSessionID: "csess-a"}}
+			s.alive.Store(true)
+			args := formArguments()
+			args["browser"] = map[string]any{"site": "example.com", "path": path}
+			s.handleFormToolCall(json.RawMessage(`8`), "browser-form-1", args)
+			event := <-s.events
+			if event.NonBlocking || event.Form == nil || event.UserAction == nil ||
+				event.UserAction.Kind != "take_over" || event.UserAction.Browser != path || event.UserAction.Site != "example.com" {
+				t.Fatalf("form must wait with the existing scoped takeover action: %#v", event)
+			}
+			raw := event.ToolInputRaw
+			if raw["userAction"] != event.UserAction {
+				t.Fatal("persisted interaction lost the browser action")
+			}
+			if err := s.RespondPermission(event.RequestID, core.PermissionResult{Behavior: "allow", UpdatedInput: map[string]any{
+				"answers": map[string]any{"round_size": []string{"42"}, "website": []string{"__tomako_skipped__"}},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			var response map[string]any
+			if err := json.Unmarshal([]byte(waitForWrittenJSONLine(t, stdin)), &response); err != nil {
+				t.Fatal(err)
+			}
+			result := response["result"].(map[string]any)
+			text := result["contentItems"].([]any)[0].(map[string]any)["text"].(string)
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(text), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["status"] != "submitted" || payload["values"].(map[string]any)["round_size"] != float64(42) ||
+				payload["browser"].(map[string]any)["path"] != path || !strings.Contains(payload["next"].(string), "HUMAN_CONTROL") {
+				t.Fatalf("answer should retain context and require verification: %s", text)
+			}
+			if _, ok := payload["values"].(map[string]any)["website"]; ok {
+				t.Fatal("skipped value must not be filled")
+			}
+		})
+	}
+}
+
+func TestBrowserFormRejectsInvalidHandoffBeforeOpeningInteraction(t *testing.T) {
+	for _, value := range []any{nil, "cloud", map[string]any{"site": "example.com"},
+		map[string]any{"site": "", "path": "cloud"}, map[string]any{"site": "example.com", "path": "other"}} {
+		stdin := &lockedWriteCloser{}
+		s := &appServerSession{stdin: stdin, events: make(chan core.Event, 1), pendingApprovals: map[string]chan core.PermissionResult{}}
+		args := formArguments()
+		args["browser"] = value
+		s.handleFormToolCall(json.RawMessage(`9`), "bad-form", args)
+		if len(s.events) != 0 || len(s.pendingApprovals) != 0 {
+			t.Fatalf("invalid context created a pending form: %#v", value)
+		}
+		var response map[string]any
+		if err := json.Unmarshal([]byte(waitForWrittenJSONLine(t, stdin)), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response["result"].(map[string]any)["success"] != false {
+			t.Fatalf("invalid context accepted: %#v", value)
+		}
+	}
+}
+
+func TestBrowserFormCancellationAndSkipDoNotReportWebsiteCompletion(t *testing.T) {
+	_, questions, _ := parseFormRequest(formArguments())
+	action := &core.InteractionUserAction{Kind: "take_over", Site: "example.com", Browser: "cloud"}
+	for _, behavior := range []string{"allow", "deny"} {
+		text, success := browserFormToolResult(questions, core.PermissionResult{Behavior: behavior}, action)
+		var result map[string]any
+		if err := json.Unmarshal([]byte(text), &result); err != nil {
+			t.Fatal(err)
+		}
+		if success != (behavior == "allow") || !strings.Contains(result["next"].(string), "do not reopen this form automatically") {
+			t.Fatalf("lost cancellation/skip semantics: %s", text)
+		}
+		if behavior == "allow" && (len(result["values"].(map[string]any)) != 0 || len(result["skipped"].([]any)) != len(questions)) {
+			t.Fatalf("skipped form invented values: %s", text)
+		}
+		if behavior == "deny" && result["status"] != "cancelled" {
+			t.Fatalf("cancelled form reported success: %s", text)
+		}
+	}
+}
