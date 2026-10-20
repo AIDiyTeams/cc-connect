@@ -191,3 +191,15 @@ result:{valueUnverified:'element replaced; read to verify'},pageText:'[full-ref]
 		t.Fatalf("compact page or execution warning lost: %#v", items)
 	}
 }
+
+func TestBrowserControlAndTabOperationsKeepStructuredIntent(t *testing.T) {
+	for _, args := range []map[string]any{
+		{"operation": "control", "sessionId": "lease", "human": false},
+		{"operation": "tab", "sessionId": "lease", "action": "select", "targetId": "oauth"},
+	} {
+		op, input, err := browserToolRequest(args)
+		if err != nil || op != args["operation"] || input["requestId"] == nil || input["sessionId"] != "lease" {
+			t.Fatalf("handoff contract lost: %s %#v %v", op, input, err)
+		}
+	}
+}
