@@ -650,6 +650,11 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 		tools, _ := params["dynamicTools"].([]map[string]any)
 		params["dynamicTools"] = append(tools, teamCoordinationDynamicTool())
 	}
+	// Conversations use a browser one typed step at a time; see browser_tool.go.
+	if s.browserToolAvailable() {
+		tools, _ := params["dynamicTools"].([]map[string]any)
+		params["dynamicTools"] = append(tools, browserDynamicTool())
+	}
 	// Conversations read public pages through the platform reader; see web_read_tool.go.
 	if s.webReadToolAvailable() {
 		tools, _ := params["dynamicTools"].([]map[string]any)
@@ -1408,6 +1413,10 @@ func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRa
 			}
 			s.writeDynamicToolResponse(rawID, true, result)
 		}()
+		return
+	}
+	if params.Tool == browserToolName {
+		s.handleBrowserToolCall(rawID, params.Arguments)
 		return
 	}
 	if params.Tool == teamCoordinationToolName {
