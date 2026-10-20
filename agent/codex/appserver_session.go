@@ -1032,12 +1032,18 @@ func (s *appServerSession) turnDeveloperInstructions() map[string]any {
 		// Describe only the directory prepared for this fenced workspace. A
 		// resumed thread may report another cwd; never advertise its old path.
 		if tmpDir := envValue(s.extraEnv, "TMPDIR"); strings.TrimSpace(s.permissionsProfile) != "" &&
-			filepath.IsAbs(s.workDir) && tmpDir == filepath.Join(s.workDir, ".tmp") {
+			filepath.IsAbs(s.workDir) && (tmpDir == filepath.Join(s.workDir, ".tmp") ||
+			tmpDir == s.sandboxScratchDir && conversationScratchReady(tmpDir)) {
 			scratch := conversationScratchPath(s.workDir, s.permissionsProfile, s.runtime.ChatSessionID)
+			if s.sandboxScratchDir != "" {
+				// Startup has already fixed the sandbox mount and command TMPDIR.
+				// Advertise that same directory, including background-task scratch.
+				scratch = s.sandboxScratchDir
+			}
 			if conversationScratchReady(scratch) {
-				prefix += fmt.Sprintf("Current execution environment: for scratch files, use unique files or subdirectories under %q, this conversation's own temporary directory. Other conversations do not see it, and it is removed after 30 days without use; durable product knowledge belongs in memory or saved documents. Keep user deliverables in their intended locations; existing filesystem permissions remain in force.\n\n", scratch)
+				prefix += fmt.Sprintf("Scratch files: use unique paths under %q (TMPDIR), this conversation's own temporary directory shared by shell and view_image. /tmp is command-local and disappears. Keep deliverables in their intended locations.\n\n", scratch)
 			} else {
-				prefix += fmt.Sprintf("Current execution environment: for scratch files, use unique files or subdirectories under %q, the prepared workspace temporary directory. Keep user deliverables in their intended locations; existing filesystem permissions remain in force.\n\n", tmpDir)
+				prefix += fmt.Sprintf("Scratch files: use unique paths under %q (TMPDIR), the prepared workspace temporary directory shared by shell and view_image. /tmp is command-local and disappears. Keep deliverables in their intended locations.\n\n", tmpDir)
 			}
 		}
 		instructions = prefix + policy

@@ -62,6 +62,30 @@ func TestEachConversationGetsItsOwnScratchDirectoryAsTMPDIR(t *testing.T) {
 	}
 }
 
+// Production startup replaces the shared TMPDIR before building turn context.
+// The old guard only accepted the pre-startup value, silently dropping guidance.
+func TestStartedConversationAdvertisesTheScratchUsedByCommandsAndImageReads(t *testing.T) {
+	s, _ := conversationScratchTestSession(t, "csess-started")
+	scratch := s.prepareConversationScratch(time.Now())
+	s.extraEnv = core.MergeEnv(s.extraEnv, []string{"TMPDIR=" + scratch})
+	s.sandboxScratchDir = scratch
+	if got, ok := threadTMPDIR(s); !ok || got != scratch {
+		t.Fatalf("command TMPDIR = %q", got)
+	}
+	text := turnInstructions(s)
+	if !strings.Contains(text, scratch) || !strings.Contains(text, "view_image") || !strings.Contains(text, "/tmp") {
+		t.Fatalf("started session lost shared temporary-file guidance: %s", text)
+	}
+	path := filepath.Join(scratch, "selected-image.png")
+	if err := os.WriteFile(path, []byte("same-file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	data, err := readFencedWorkspaceImage(s.workDir, path, scratch)
+	if err != nil || string(data) != "same-file" {
+		t.Fatalf("native image reader cannot see command output: %q, %v", data, err)
+	}
+}
+
 func TestTasksWithoutAConversationAndUnfencedSessionsKeepTheirTemporaryDirectory(t *testing.T) {
 	s, workDir := conversationScratchTestSession(t, "")
 	if got, ok := threadTMPDIR(s); ok {
