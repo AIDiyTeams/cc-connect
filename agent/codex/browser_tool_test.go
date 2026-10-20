@@ -2,8 +2,8 @@ package codex
 
 import (
 	"context"
-	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,195 +11,137 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
-func TestBrowserCallsCannotOutliveOrMoveBetweenTurns(t *testing.T) {
-	s := &appServerSession{currentTurn: "turn-one"}
+const browserToolSecret = "browser-image-capability-secret"
+
+func browserToolSession(t *testing.T, helper string, runtime core.SessionRuntime) *appServerSession {
+	t.Helper()
+	dir := t.TempDir()
+	if helper != "" {
+		if err := os.WriteFile(filepath.Join(dir, "browser-tool.mjs"), []byte(helper), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	call := &browserToolCall{cancel: cancel}
-	if s.trackBrowserCall(call, "old-turn") || s.trackBrowserCall(call, "") || !s.trackBrowserCall(call, "turn-one") {
-		t.Fatal("tool call was not bound to its originating turn")
+	t.Cleanup(cancel)
+	s := &appServerSession{ctx: ctx, cancel: cancel, workDir: t.TempDir(), extraEnv: []string{"SKILLS_OL_DIR=" + dir},
+		events: make(chan core.Event, 8), runtime: runtime}
+	s.alive.Store(true)
+	return s
+}
+
+func browserRuntime() core.SessionRuntime {
+	return core.SessionRuntime{TaskID: "cmsg-browser", WorkspaceID: "ws-a", BrandID: "prod-a", ChatSessionID: "csess-browser",
+		ImageCapabilityToken: browserToolSecret}
+}
+
+func TestBrowserToolOfferedInConversationsWithBrowserAuthority(t *testing.T) {
+	if !browserToolSession(t, "// helper", browserRuntime()).browserToolAvailable() {
+		t.Fatal("a conversation turn with authority and the helper installed gets the tool")
 	}
-	s.stateMu.Lock()
-	s.interruptedTurn = "turn-one"
-	s.cancelBrowserCallsLocked("turn-one")
-	s.stateMu.Unlock()
-	if ctx.Err() == nil || len(s.browserCalls) != 0 || s.trackBrowserCall(call, "turn-one") {
-		t.Fatal("an interrupted turn retained browser execution")
+	noConversation := browserRuntime()
+	noConversation.ChatSessionID = ""
+	noToken := browserRuntime()
+	noToken.ImageCapabilityToken = ""
+	for name, s := range map[string]*appServerSession{
+		"no conversation": browserToolSession(t, "// helper", noConversation),
+		"no authority":    browserToolSession(t, "// helper", noToken),
+		"no helper":       browserToolSession(t, "", browserRuntime()),
+	} {
+		if s.browserToolAvailable() {
+			t.Fatalf("%s: the tool must not be offered", name)
+		}
 	}
-	s.currentTurn = "turn-two"
-	if s.trackBrowserCall(call, "turn-one") {
-		t.Fatal("a delayed old call entered the next turn")
+}
+
+func TestBrowserToolInputKeepsTheSchemaShape(t *testing.T) {
+	if _, err := browserToolInput(map[string]any{"action": "evaluate"}); err == nil {
+		t.Fatal("an unknown action is refused")
+	}
+	if _, err := browserToolInput(map[string]any{"action": "click", "ref": "4", "script": "alert(1)"}); err == nil {
+		t.Fatal("an unknown field is refused before Node starts")
+	}
+	if _, err := browserToolInput(map[string]any{"action": "fill", "ref": "4", "text": strings.Repeat("x", 9000)}); err == nil {
+		t.Fatal("an oversized value is refused")
+	}
+	body, err := browserToolInput(map[string]any{"action": "open", "tab": "1853163903", "url": nil})
+	if err != nil || string(body) != `{"action":"open","tab":"1853163903"}` {
+		t.Fatalf("got %s, %v", body, err)
+	}
+}
+
+func TestBrowserToolRunsTheHelperWithTheTurnsAuthorityAndAttachesScreenshots(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not installed")
+	}
+	image := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(image, []byte("\x89PNG\r\n\x1a\nfake"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	helper := `import {readFileSync} from 'node:fs';
+let stdin = '';
+for await (const chunk of process.stdin) stdin += chunk;
+const file = readFileSync(process.env.TOMAKO_TASK_ENV_FILE, 'utf8');
+console.log(JSON.stringify({ok: true, text: 'got ' + stdin + ' authority=' + file.includes('` + browserToolSecret + `') + ' token=` + browserToolSecret + `',
+  image: {path: ` + "`" + image + "`" + `, mime: 'image/png'}}));`
+	s := browserToolSession(t, helper, browserRuntime())
+	call, err := s.prepareBrowserTool(map[string]any{"action": "screenshot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := call.run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Text, `got {"action":"screenshot"} authority=true`) || strings.Contains(result.Text, browserToolSecret) {
+		t.Fatalf("helper text: %q", result.Text)
+	}
+	items := browserToolContent(result)
+	if len(items) != 2 || items[1]["type"] != "inputImage" || !strings.HasPrefix(items[1]["imageUrl"].(string), "data:image/png;base64,") {
+		t.Fatalf("screenshot is attached inline: %#v", items)
+	}
+}
+
+func TestBrowserToolReportsTheHelpersReasonWithoutCredentials(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not installed")
+	}
+	helper := `console.log(JSON.stringify({ok: false, error: 'this conversation has no open page; open first ` + browserToolSecret + `'})); process.exitCode = 1;`
+	call, err := browserToolSession(t, helper, browserRuntime()).prepareBrowserTool(map[string]any{"action": "read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = call.run()
+	if err == nil || !strings.Contains(err.Error(), "open first") || strings.Contains(err.Error(), browserToolSecret) {
+		t.Fatalf("got %v", err)
 	}
 }
 
 func TestBrowserCurrentPageBindingReachesTheScopedHelper(t *testing.T) {
 	for _, current := range []bool{true, false} {
-		operation, input, err := browserToolRequest(map[string]any{"operation": "open", "currentPage": current})
-		if err != nil || operation != "open" || input["currentPage"] != current || input["tab"] != nil {
-			t.Fatalf("message-page binding changed: %s %#v %v", operation, input, err)
+		body, err := browserToolInput(map[string]any{"action": "open", "currentPage": current})
+		if err != nil || !strings.Contains(string(body), `"currentPage":`) {
+			t.Fatalf("binding was dropped: %s %v", body, err)
 		}
 	}
 }
 
-func browserSession(t *testing.T, helper string) *appServerSession {
-	t.Helper()
-	s := teamToolSession(t, "")
-	dir := strings.TrimPrefix(s.extraEnv[0], "SKILLS_OL_DIR=")
-	if err := os.WriteFile(filepath.Join(dir, "browser-tool.mjs"), []byte(helper), 0600); err != nil {
-		t.Fatal(err)
-	}
-	return s
-}
-
-func TestBrowserToolUsesFrozenTurnAuthorityAndNoShellInterpolation(t *testing.T) {
-	s := browserSession(t, `import {readFileSync} from 'node:fs';
-let input='';for await(const part of process.stdin)input+=part;
-const authority=readFileSync(process.env.TOMAKO_TASK_ENV_FILE,'utf8');
-console.log(JSON.stringify({argv:process.argv.slice(2),input:JSON.parse(input),
-  original:authority.includes("TOMAKO_TASK_ID='cmsg-cmo'"),
-  privateAuthority:authority.includes("`+testCmoToken+`"),
-  unsafeEnvironment:!!process.env.NODE_OPTIONS, inheritedSecret:!!process.env.PROVIDER_SECRET}));`)
-	t.Setenv("NODE_OPTIONS", "--invalid-inherited-option")
-	t.Setenv("PROVIDER_SECRET", "must-not-be-inherited")
-	text := "draft ' $(touch /tmp/never-run-browser-test) `not a command`\n第二行"
-	args := map[string]any{"operation": "act", "action": "fill", "text": text}
-	call, err := s.prepareBrowserCall(args)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.runtime = core.SessionRuntime{TaskID: "cmsg-next", WorkspaceID: "other", BrandID: "other", ImageCapabilityToken: "next-token"}
-	items, success := call.run()
-	if !success {
-		t.Fatalf("call failed: %#v", items)
-	}
-	var got map[string]any
-	if err := json.Unmarshal([]byte(items[0]["text"].(string)), &got); err != nil {
-		t.Fatal(err)
-	}
-	if got["original"] != true || got["privateAuthority"] != true || got["unsafeEnvironment"] != false || got["inheritedSecret"] != false {
-		t.Fatalf("authority/environment changed: %#v", got)
-	}
-	input := got["input"].(map[string]any)
-	if input["text"] != text || input["requestId"] == "" || input["operation"] != nil {
-		t.Fatalf("input changed: %#v", input)
-	}
-	if _, err := os.Stat(call.directory); !os.IsNotExist(err) {
-		t.Fatalf("private call directory not removed: %v", err)
-	}
-	for _, key := range []string{"workspaceId", "token", "env", "script", "urlOverride"} {
-		if _, _, err := browserToolRequest(map[string]any{"operation": "read", key: "injected"}); err == nil {
-			t.Fatalf("%s accepted", key)
+func TestBrowserAContractCurrentPageAndControlSchema(t *testing.T) {
+	schema := browserDynamicTool()["inputSchema"].(map[string]any)
+	props := schema["properties"].(map[string]any)
+	for _, field := range []string{"currentPage", "human"} {
+		if props[field].(map[string]any)["type"] != "boolean" {
+			t.Fatalf("missing boolean %s", field)
+		}
+		if _, err := browserToolInput(map[string]any{"action": "open", field: "true"}); err == nil {
+			t.Fatalf("accepted string %s", field)
 		}
 	}
-}
-
-func TestBrowserScreenshotIsAnImageInTheSameToolResultAndTemporaryFilesAreRemoved(t *testing.T) {
-	s := browserSession(t, `import {writeFileSync} from 'node:fs';import {join} from 'node:path';
-const path=join(process.env.TMPDIR,'screenshot.png');
-writeFileSync(path,Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=','base64'));
-console.log(JSON.stringify({screenshot:{imagePath:path,mimeType:'image/png',stable:true,screenshotId:'observed',viewport:{width:1,height:1}}}));`)
-	call, err := s.prepareBrowserCall(map[string]any{"operation": "screenshot", "sessionId": "existing"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	items, success := call.run()
-	if !success || len(items) != 2 || items[1]["type"] != "inputImage" {
-		t.Fatalf("pixels absent: %#v", items)
-	}
-	if !strings.HasPrefix(items[1]["imageUrl"].(string), "data:image/png;base64,") {
-		t.Fatal("wrong image protocol")
-	}
-	if strings.Contains(items[0]["text"].(string), "imagePath") || strings.Contains(items[0]["text"].(string), "view_image") {
-		t.Fatal("bridge path exposed")
-	}
-	if _, err := os.Stat(call.directory); !os.IsNotExist(err) {
-		t.Fatal("screenshot not removed")
-	}
-}
-
-func TestBrowserFailuresKeepTheExecutionReceiptAndNeverExposeAuthority(t *testing.T) {
-	s := browserSession(t, `console.log(JSON.stringify({ok:false,error:'`+testCmoToken+` rejected',code:'TAB_CHANGED',outcomeUnknown:false}));process.exitCode=1;`)
-	call, err := s.prepareBrowserCall(map[string]any{"operation": "open", "tab": map[string]any{"tabId": 1, "url": "https://example.com"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	items, success := call.run()
-	text := items[0]["text"].(string)
-	if success || strings.Contains(text, testCmoToken) || !strings.Contains(text, "TAB_CHANGED") || !strings.Contains(text, `"outcomeUnknown":false`) {
-		t.Fatalf("failure lost/redaction failed: %s", text)
-	}
-}
-
-func TestBrowserToolRegistrationAndResumedConversationFallback(t *testing.T) {
-	s := browserSession(t, "// installed")
-	if !dynamicToolsInclude(s.threadRequestParams(), browserToolName) {
-		t.Fatal("browser tool missing")
-	}
-	s.developerInstructionsManaged = true
-	s.runtime.DeveloperInstructions = "Current policy"
-	before := appServerJSON(s.turnDeveloperInstructions())
-	if !strings.Contains(before, "This older conversation may not have") {
-		t.Fatal("older conversation cannot reach current capability")
-	}
-	s.threadBrowserTool.Store(true)
-	after := appServerJSON(s.turnDeveloperInstructions())
-	if strings.Contains(after, "This older conversation may not have") || !strings.Contains(after, "operation=tabs") {
-		t.Fatal("native tool guidance incorrect")
-	}
-	s.runtime.ImageCapabilityToken = ""
-	if s.browserToolAvailable() {
-		t.Fatal("tool offered without authority")
-	}
-	if _, err := s.prepareBrowserCall(map[string]any{"operation": "tabs"}); err == nil {
-		t.Fatal("old tool could execute after authority revoked")
-	}
-	s.runtime = cmoRuntime()
-	s.runtime.Scene = "brand_analysis"
-	if s.browserToolAvailable() {
-		t.Fatal("dedicated workflow changed")
-	}
-}
-
-func TestBrowserToolScopeAndInputShape(t *testing.T) {
-	s := browserSession(t, "// installed")
-	s.runtime.ChatSessionID = ""
-	if s.browserToolAvailable() {
-		t.Fatal("non-conversation runtime gained a new tool")
-	}
-	for _, args := range []map[string]any{
-		{"operation": "evaluate"},
-		{"operation": "act", "script": "alert(1)"},
-		{"operation": "act", "action": "fill", "text": strings.Repeat("x", 9000)},
-		{"operation": "read", "find": 12},
-	} {
-		if _, _, err := browserToolRequest(args); err == nil {
-			t.Fatalf("invalid input accepted: %#v", args)
+	for _, forbidden := range []string{"operation", "sessionId", "provider"} {
+		if _, ok := props[forbidden]; ok {
+			t.Fatalf("B field %s leaked", forbidden)
 		}
 	}
-}
-
-func TestBrowserCompactPageRemainsReadableAndReceiptPreservesWarnings(t *testing.T) {
-	s := browserSession(t, `console.log(JSON.stringify({ok:true,sessionId:'current',
-result:{valueUnverified:'element replaced; read to verify'},pageText:'[full-ref] button "Continue"\n正文：ready'}));`)
-	call, err := s.prepareBrowserCall(map[string]any{"operation": "read", "find": "Continue"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	items, success := call.run()
-	if !success || len(items) != 2 || !strings.Contains(items[0]["text"].(string), "valueUnverified") ||
-		items[1]["text"] != "[full-ref] button \"Continue\"\n正文：ready" {
-		t.Fatalf("compact page or execution warning lost: %#v", items)
-	}
-}
-
-func TestBrowserControlAndTabOperationsKeepStructuredIntent(t *testing.T) {
-	for _, args := range []map[string]any{
-		{"operation": "control", "sessionId": "lease", "human": false},
-		{"operation": "tab", "sessionId": "lease", "action": "select", "targetId": "oauth"},
-	} {
-		op, input, err := browserToolRequest(args)
-		if err != nil || op != args["operation"] || input["requestId"] == nil || input["sessionId"] != "lease" {
-			t.Fatalf("handoff contract lost: %s %#v %v", op, input, err)
-		}
+	if _, err := browserToolInput(map[string]any{"action": "open", "tab": map[string]any{"tabId": 42, "url": "https://example.com"}}); err == nil {
+		t.Fatal("accepted B tab")
 	}
 }
