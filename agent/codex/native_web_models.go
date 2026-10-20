@@ -196,11 +196,13 @@ func (s *appServerSession) SupportsSessionRuntime(runtime core.SessionRuntime) b
 	return s.isolationKey == runtime.IsolationKey && s.modelCatalogKind == kind && s.startupToolOutputTokens == toolOutputTokensFor(model, kind)
 }
 
-// Ordinary namespaced GPT has no Codex descriptor and otherwise gets a 10KB
-// tool-output fallback. Bound output to 8k tokens without replacing its model
-// metadata. Existing catalogs retain their own output policies.
+// Codex has no descriptor for any gateway slug, so a model without a catalog runs on
+// the generic fallback and every tool output is cut to 10 KB: a fact or skill file, or
+// a browser page, loses its middle (a 10-21 GPT-6 Luna turn read one browser note in
+// five pieces). Bound output to 8k tokens without replacing the model metadata.
+// Catalogs (DeepSeek, native search) keep their own output policies.
 func toolOutputTokensFor(model, catalog string) int {
-	if catalog == "" && strings.TrimSpace(model) == gpt61SolGatewaySlug {
+	if catalog == "" && strings.HasPrefix(strings.TrimSpace(model), "tomako/") {
 		return 8000
 	}
 	return 0

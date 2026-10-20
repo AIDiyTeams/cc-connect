@@ -129,7 +129,7 @@ func TestNativeWebResponsesLite_StartupCatalogScopeAndCleanup(t *testing.T) {
 	if !s.SupportsSessionRuntime(r) || s.SupportsSessionRuntime(core.SessionRuntime{}) {
 		t.Fatal("process must recycle when crossing catalog boundary")
 	}
-	ordinary := &appServerSession{model: s.model}
+	ordinary := &appServerSession{model: s.model, startupToolOutputTokens: toolOutputTokensFor(s.model, "")}
 	if ordinary.SupportsSessionRuntime(r) || !ordinary.SupportsSessionRuntime(core.SessionRuntime{}) || strings.Contains(strings.Join(ordinary.startupArgs(), " "), "model_catalog_json") {
 		t.Fatal("ordinary process catalog boundary incorrect")
 	}
@@ -255,7 +255,7 @@ func TestDeepSeekConversationCatalog_ProcessReuseFollowsCatalog(t *testing.T) {
 	if s.SupportsSessionRuntime(gpt) || s.SupportsSessionRuntime(core.SessionRuntime{GatewayModel: "tomako/deepseek-v4-flash"}) {
 		t.Fatal("a different model must restart with its own catalog")
 	}
-	plain := &appServerSession{}
+	plain := &appServerSession{startupToolOutputTokens: toolOutputTokensFor(gpt.GatewayModel, "")}
 	if plain.SupportsSessionRuntime(deepseek) || !plain.SupportsSessionRuntime(gpt) {
 		t.Fatal("a process without a catalog serves only runtimes that need none")
 	}
