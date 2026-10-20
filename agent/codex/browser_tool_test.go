@@ -124,3 +124,24 @@ func TestBrowserCurrentPageBindingReachesTheScopedHelper(t *testing.T) {
 		}
 	}
 }
+
+func TestBrowserAContractCurrentPageAndControlSchema(t *testing.T) {
+	schema := browserDynamicTool()["inputSchema"].(map[string]any)
+	props := schema["properties"].(map[string]any)
+	for _, field := range []string{"currentPage", "human"} {
+		if props[field].(map[string]any)["type"] != "boolean" {
+			t.Fatalf("missing boolean %s", field)
+		}
+		if _, err := browserToolInput(map[string]any{"action": "open", field: "true"}); err == nil {
+			t.Fatalf("accepted string %s", field)
+		}
+	}
+	for _, forbidden := range []string{"operation", "sessionId", "provider"} {
+		if _, ok := props[forbidden]; ok {
+			t.Fatalf("B field %s leaked", forbidden)
+		}
+	}
+	if _, err := browserToolInput(map[string]any{"action": "open", "tab": map[string]any{"tabId": 42, "url": "https://example.com"}}); err == nil {
+		t.Fatal("accepted B tab")
+	}
+}
