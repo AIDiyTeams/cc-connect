@@ -451,6 +451,14 @@ type InteractionRequest struct {
 	Options       []InteractionOption    `json:"options,omitempty"`
 	Form          *InteractionForm       `json:"form,omitempty"`
 	UserAction    *InteractionUserAction `json:"userAction,omitempty"`
+	Blocking      *bool                  `json:"blocking,omitempty"` // false: the turn keeps running while the card is open
+}
+
+// DetachedAnswerer takes the answer to an interaction that did not pause the turn
+// (Event.NonBlocking) into the turn still running. It fails when no turn is running,
+// so the control plane continues from the answer in a new turn.
+type DetachedAnswerer interface {
+	AnswerDetached(requestID string, result PermissionResult) error
 }
 
 type InteractionOption struct {

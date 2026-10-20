@@ -1154,6 +1154,9 @@ func (bp *BridgePlatform) SendInteraction(ctx context.Context, replyCtx any, req
 	if request.UserAction != nil {
 		message["userAction"] = request.UserAction
 	}
+	if request.Blocking != nil {
+		message["blocking"] = *request.Blocking
+	}
 	return bp.server.sendToAdapter(rc.Platform, message)
 }
 
