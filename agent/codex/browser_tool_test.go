@@ -36,7 +36,7 @@ func browserSession(t *testing.T, helper string) *appServerSession {
 	t.Helper()
 	s := teamToolSession(t, "")
 	dir := strings.TrimPrefix(s.extraEnv[0], "SKILLS_OL_DIR=")
-	if err := os.WriteFile(filepath.Join(dir, "tomako-browser.mjs"), []byte(helper), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "browser-tool.mjs"), []byte(helper), 0600); err != nil {
 		t.Fatal(err)
 	}
 	return s
@@ -148,5 +148,37 @@ func TestBrowserToolRegistrationAndResumedConversationFallback(t *testing.T) {
 	s.runtime.Scene = "brand_analysis"
 	if s.browserToolAvailable() {
 		t.Fatal("dedicated workflow changed")
+	}
+}
+
+func TestBrowserToolScopeAndInputShape(t *testing.T) {
+	s := browserSession(t, "// installed")
+	s.runtime.ChatSessionID = ""
+	if s.browserToolAvailable() {
+		t.Fatal("non-conversation runtime gained a new tool")
+	}
+	for _, args := range []map[string]any{
+		{"operation": "evaluate"},
+		{"operation": "act", "script": "alert(1)"},
+		{"operation": "act", "action": "fill", "text": strings.Repeat("x", 9000)},
+		{"operation": "read", "find": 12},
+	} {
+		if _, _, err := browserToolRequest(args); err == nil {
+			t.Fatalf("invalid input accepted: %#v", args)
+		}
+	}
+}
+
+func TestBrowserCompactPageRemainsReadableAndReceiptPreservesWarnings(t *testing.T) {
+	s := browserSession(t, `console.log(JSON.stringify({ok:true,sessionId:'current',
+result:{valueUnverified:'element replaced; read to verify'},pageText:'[full-ref] button "Continue"\n正文：ready'}));`)
+	call, err := s.prepareBrowserCall(map[string]any{"operation": "read", "find": "Continue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, success := call.run()
+	if !success || len(items) != 2 || !strings.Contains(items[0]["text"].(string), "valueUnverified") ||
+		items[1]["text"] != "[full-ref] button \"Continue\"\n正文：ready" {
+		t.Fatalf("compact page or execution warning lost: %#v", items)
 	}
 }

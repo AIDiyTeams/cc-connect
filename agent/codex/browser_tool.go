@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -44,6 +45,7 @@ func browserDynamicTool() map[string]any {
 		"read":                   map[string]any{"type": "boolean", "description": "open/navigate/点击默认附新页面；不需要可 false。fill/check 回执已确认值，不必重复读。"},
 		"action":                 enum("click", "fill", "select", "check", "press", "scroll", "click-coordinate", "drag", "media"),
 		"ref":                    text("act：当前页面返回的元素 ref，禁止猜测。click/fill/select/check 必填。"),
+		"find":                   text("read/tabs：只显示包含这段文字的控件、正文或标签页，最多 200 字。"),
 		"text":                   text("fill：普通字段文字，最多 4000 字。不填写密码、验证码或支付信息。"),
 		"option":                 text("select：页面给出的选项文字或 value。media：pause/seek/transcript。"),
 		"checked":                map[string]any{"type": "boolean"},
@@ -65,13 +67,13 @@ func browserDynamicTool() map[string]any {
 }
 
 func (s *appServerSession) browserToolAvailable() bool {
-	if s.isBrandAnalysisRuntime() || s.isUserVoiceArchiveRuntime() || s.isUserVoiceJudgmentRuntime() {
+	if s.isBrandAnalysisRuntime() || s.isUserVoiceArchiveRuntime() || s.isUserVoiceJudgmentRuntime() || s.unattended() {
 		return false
 	}
 	s.runtimeMu.RLock()
-	authorized := imageRuntimeAuthorized(s.runtime)
+	authorized := imageRuntimeAuthorized(s.runtime) && strings.TrimSpace(s.runtime.ChatSessionID) != ""
 	s.runtimeMu.RUnlock()
-	return authorized && s.webReaderScript("tomako-browser.mjs") != ""
+	return authorized && s.webReaderScript("browser-tool.mjs") != ""
 }
 
 type browserToolCall struct {
@@ -133,6 +135,14 @@ func browserToolRequest(arguments map[string]any) (string, map[string]any, error
 			input[key] = value
 		}
 	}
+	for key, limit := range map[string]int{"text": 4000, "find": 200} {
+		if value, exists := input[key]; exists {
+			str, ok := value.(string)
+			if !ok || utf8.RuneCountInString(str) > limit {
+				return "", nil, fmt.Errorf("invalid or oversized browser %s", key)
+			}
+		}
+	}
 	switch operation {
 	case "open", "navigate", "act", "close":
 		if input["requestId"] == nil {
@@ -158,7 +168,7 @@ func (s *appServerSession) prepareBrowserCall(arguments map[string]any) (*browse
 	if err != nil {
 		return nil, err
 	}
-	script := s.webReaderScript("tomako-browser.mjs")
+	script := s.webReaderScript("browser-tool.mjs")
 	s.runtimeMu.RLock()
 	runtime := s.runtime
 	s.runtimeMu.RUnlock()
@@ -245,8 +255,13 @@ func (c *browserToolCall) run() ([]map[string]any, bool) {
 			success = false
 		}
 	}
+	pageText, _ := result["pageText"].(string)
+	delete(result, "pageText")
 	encoded, _ := json.Marshal(result)
 	items := []map[string]any{{"type": "inputText", "text": c.redact(string(encoded))}}
+	if pageText != "" {
+		items = append(items, map[string]any{"type": "inputText", "text": c.redact(pageText)})
+	}
 	if image != nil {
 		items = append(items, image)
 	}
