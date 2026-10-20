@@ -50,6 +50,7 @@ func TestPublicConversationBaseReplacesOnlyTheCodingAssistantCommunicationGuidan
 		"You are a coding agent. Please keep going",
 		"consider using them to verify that your work is complete",
 		"iterate up to 3 times to get formatting right",
+		"Before each group of actions, send one short line",
 	} {
 		if strings.Contains(got, removed) {
 			t.Fatalf("coding-assistant communication guidance survived: %q", removed)
@@ -63,7 +64,7 @@ func TestPublicConversationBaseReplacesOnlyTheCodingAssistantCommunicationGuidan
 		"language of the user's latest message",
 		"Never mention the workspace, capabilities, skills, instructions, credentials",
 		"Exploring the environment is silent",
-		"names what this step achieves for the user",
+		"Do not narrate routine actions",
 		"publish a plan of three to five steps",
 		"Delivery mechanics are silent too",
 		"never drift",
@@ -75,6 +76,9 @@ func TestPublicConversationBaseReplacesOnlyTheCodingAssistantCommunicationGuidan
 		"application that renders Markdown",
 		"Lead with the answer",
 		"Match the size to the request",
+		"default to one short sentence confirming the outcome",
+		"including changes in a browser or an external service",
+		"Keep requested article bodies, analysis and other substantive content complete",
 		"One block per point, never two views of the same numbers",
 		"An explicit output contract always wins",
 		"# Tool Guidelines",

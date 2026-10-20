@@ -205,7 +205,8 @@ type appServerSession struct {
 	// threadTeamTool records whether the current thread carries the team
 	// coordination tool. Resume restores the tools a thread started with, so a
 	// conversation from before the tool cannot gain it; see team_coordination_tool.go.
-	threadTeamTool atomic.Bool
+	threadTeamTool    atomic.Bool
+	threadBrowserTool atomic.Bool
 
 	closeOnce sync.Once
 	wg        sync.WaitGroup
@@ -213,6 +214,7 @@ type appServerSession struct {
 	stateMu               sync.Mutex
 	pendingMsgs           []string
 	currentTurn           string
+	browserCalls          map[*browserToolCall]string // guarded by stateMu, bound to one turn
 	commentaryItems       map[string]bool
 	commentaryStreams     map[string]*commentaryStream
 	finalItems            map[string]bool
@@ -544,6 +546,11 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 		s.threadArchiveTools = s.isUserVoiceArchiveRuntime()
 		s.threadVoiceTools = s.isUserVoiceJudgmentRuntime()
 		s.threadTeamTool.Store(s.resumedThreadHasTeamTool(resp.Thread.ID, resp.Thread.Path))
+		browserRollout := resp.Thread.Path
+		if browserRollout == "" {
+			browserRollout = findSessionFile(resp.Thread.ID, s.codexHome)
+		}
+		s.threadBrowserTool.Store(rolloutHasDynamicTool(browserRollout, browserToolName))
 		slog.Info("codex app-server thread resumed", "thread_id", resp.Thread.ID)
 		s.emitLifecycle("agent_thread_ready", time.Since(startedAt))
 		return nil
@@ -563,6 +570,7 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 	s.threadArchiveTools = s.isUserVoiceArchiveRuntime()
 	s.threadVoiceTools = s.isUserVoiceJudgmentRuntime()
 	s.threadTeamTool.Store(dynamicToolsInclude(params, teamCoordinationToolName))
+	s.threadBrowserTool.Store(dynamicToolsInclude(params, browserToolName))
 	slog.Info("codex app-server thread started", "thread_id", resp.Thread.ID)
 	s.emitLifecycle("agent_thread_ready", time.Since(startedAt))
 	return nil
@@ -644,6 +652,10 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	if s.browserHelpToolAvailable() {
 		tools, _ := params["dynamicTools"].([]map[string]any)
 		params["dynamicTools"] = append(tools, browserHelpDynamicTool())
+	}
+	if s.browserToolAvailable() {
+		tools, _ := params["dynamicTools"].([]map[string]any)
+		params["dynamicTools"] = append(tools, browserDynamicTool())
 	}
 	// Turns that carry CMO authority coordinate the team; see team_coordination_tool.go.
 	if s.teamCoordinationToolAvailable() {
@@ -1006,8 +1018,17 @@ func (s *appServerSession) turnDeveloperInstructions() map[string]any {
 	}
 	var instructions any
 	policy := s.runtime.DeveloperInstructions
+	if s.runtime.ChatSessionID != "" {
+		policy = publicCompletionRules + "\n\n" + policy
+	}
 	if imageRuntimeAuthorized(s.runtime) {
 		policy = imageFramingInstructions + "\n\n" + imageSchedulingInstructions + "\n\n" + policy
+		if s.runtime.ChatSessionID != "" {
+			policy = browserToolInstructions + "\n\n" + policy
+			if !s.threadBrowserTool.Load() {
+				policy = browserToolFallback + "\n\n" + policy
+			}
+		}
 	}
 	if s.runtime.CmoAPI != "" && !s.threadTeamTool.Load() {
 		policy = teamCoordinationHelperFallback + "\n\n" + policy
@@ -1342,6 +1363,7 @@ func (s *appServerSession) handleRequestUserInput(rawID json.RawMessage, paramsR
 func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRaw json.RawMessage) {
 	var params struct {
 		CallID    string         `json:"callId"`
+		TurnID    string         `json:"turnId"`
 		Tool      string         `json:"tool"`
 		Arguments map[string]any `json:"arguments"`
 	}
@@ -1363,6 +1385,26 @@ func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRa
 			return
 		}
 		s.handleBrowserHelpToolCall(rawID, params.CallID, params.Arguments)
+		return
+	}
+	if params.Tool == browserToolName {
+		call, err := s.prepareBrowserCall(params.Arguments)
+		if err != nil {
+			s.writeDynamicToolResponse(rawID, false, err.Error())
+			return
+		}
+		if !s.trackBrowserCall(call, params.TurnID) {
+			call.cancel()
+			call.cleanup()
+			s.writeDynamicToolResponse(rawID, false, "browser turn has ended")
+			return
+		}
+		go func() {
+			defer s.untrackBrowserCall(call)
+			items, success := call.run()
+			_ = s.writeJSON(map[string]any{"jsonrpc": "2.0", "id": rawID,
+				"result": map[string]any{"success": success, "contentItems": items}})
+		}()
 		return
 	}
 	if params.Tool == webReadToolName {
@@ -1694,6 +1736,9 @@ func brandEvidenceForModel(result map[string]any) map[string]any {
 	if pages := compactBrandEvidencePages(result["evidencePages"]); len(pages) > 0 {
 		compact["evidencePages"] = pages
 	}
+	if contacts := normalizeBrandContactPurposes(result["contacts"]); len(contacts) > 0 {
+		compact["contacts"] = contacts
+	}
 	return compact
 }
 
@@ -1936,7 +1981,7 @@ func validateBrandAnalysisStage(arguments map[string]any) (string, map[string]an
 
 func normalizeCoreBrandAnalysis(result map[string]any) (map[string]any, error) {
 	clean := make(map[string]any, 11)
-	for _, key := range []string{"productName", "brandName", "oneLiner", "description", "audience"} {
+	for _, key := range []string{"productName", "brandName", "oneLiner", "description", "audience", "positioning", "businessModel", "pricing"} {
 		if value := boundedText(result[key], 1200); value != "" {
 			clean[key] = value
 		}
@@ -1978,6 +2023,9 @@ func normalizeCoreBrandAnalysis(result map[string]any) (map[string]any, error) {
 	if len(segments) > 0 {
 		clean["audienceSegments"] = segments
 	}
+	if contacts := normalizeBrandContactPurposes(result["contactPurposes"]); len(contacts) > 0 {
+		clean["contactPurposes"] = contacts
+	}
 	if _, hasAudience := clean["audience"]; !hasAudience && len(segments) == 0 {
 		return nil, fmt.Errorf("core audience evidence is required")
 	}
@@ -2002,11 +2050,52 @@ func normalizeAudienceSegments(raw any) []any {
 			continue
 		}
 		seen[key] = struct{}{}
-		clean = append(clean, map[string]any{
-			"name":        name,
-			"description": boundedText(segment["description"], 400),
-		})
+		facts := map[string]any{"name": name}
+		for _, field := range []string{"description", "role", "task", "value", "trigger", "alternative", "concern"} {
+			if value := boundedText(segment[field], 2000); value != "" {
+				facts[field] = value
+			}
+		}
+		for _, field := range []string{"painPoints", "channels", "signals", "evidence"} {
+			if values := normalizedStringList(segment[field], 50, 2000); len(values) > 0 {
+				facts[field] = stringsToAny(values)
+			}
+		}
+		if details, ok := segment["channelDetails"].(map[string]any); ok {
+			bounded := map[string]any{}
+			for channel, raw := range details {
+				if len(channel) <= 200 {
+					if value := boundedText(raw, 2000); value != "" {
+						bounded[channel] = value
+					}
+				}
+			}
+			if len(bounded) > 0 {
+				facts["channelDetails"] = bounded
+			}
+		}
+		clean = append(clean, facts)
 		if len(clean) == 4 {
+			break
+		}
+	}
+	return clean
+}
+
+func normalizeBrandContactPurposes(raw any) []any {
+	items, _ := raw.([]any)
+	clean := make([]any, 0)
+	for _, item := range items {
+		contact, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		kind, value := boundedText(contact["type"], 32), boundedText(contact["value"], 2048)
+		if kind == "" || value == "" {
+			continue
+		}
+		clean = append(clean, map[string]any{"type": kind, "value": value, "purpose": boundedText(contact["purpose"], 500)})
+		if len(clean) >= 50 {
 			break
 		}
 	}
@@ -2716,6 +2805,9 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 		tool, _ := item["tool"].(string)
 		event := core.Event{Type: core.EventToolUse, TraceID: itemID, ToolName: tool, ToolInput: appServerJSON(item["arguments"])}
 		switch tool {
+		case browserToolName:
+			args, _ := item["arguments"].(map[string]any)
+			event.ToolInput = stringArg(args["operation"])
 		case webReadToolName:
 			event.PublicActivity = webReadPublicActivity(item["arguments"], "running")
 		case webSearchToolName:
@@ -2861,6 +2953,9 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		}
 		if tool == browserHelpToolName {
 			publicResult = "browser help answered"
+		}
+		if tool == browserToolName {
+			publicResult = "browser receipt returned"
 		}
 		success := appServerToolSuccess(status, nil)
 		event := core.Event{
@@ -3177,6 +3272,7 @@ func (s *appServerSession) completeTurn(turnID string, turnErr error) {
 		s.stateMu.Unlock()
 		return
 	}
+	s.cancelBrowserCallsLocked(s.currentTurn)
 	s.currentTurn = ""
 	if turnErr != nil {
 		s.pendingMsgs = s.pendingMsgs[:0]
@@ -3223,6 +3319,7 @@ func (s *appServerSession) Interrupt(ctx context.Context) error {
 		return fmt.Errorf("codex app-server has no running turn to interrupt")
 	}
 	s.interruptedTurn = turnID
+	s.cancelBrowserCallsLocked(turnID)
 	s.stateMu.Unlock()
 
 	timeout := appServerRequestTimeout
