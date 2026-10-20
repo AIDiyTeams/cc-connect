@@ -52,10 +52,11 @@ func imageDynamicTools() []map[string]any {
 	}
 	return []map[string]any{
 		{"type": "function", "name": "tomako_generate_image", "deferLoading": false,
-			"description": "Preferred Tomako image generation/edit entry. Follow the shared image policy and edit-image skill; supply the brief and actual selected source references without inspecting scripts or assembling shell commands. One call submits one image. Put the edited source first; preserve the requested scope and framing. Discussion does not authorize generation. For compositing or other unsupported options use the existing shared image helper. This tool does not attach an image to a document. " + imageSchedulingInstructions + " " + imageFramingInstructions,
+			"description": "Preferred Tomako image generation/edit entry, including explicit model choices. Follow the shared image policy and edit-image skill. One call submits one image; put the edited source first. Discussion does not authorize generation. For unsupported options use the shared helper. Does not attach images to documents.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false,
 				"required": []string{"operation", "prompt", "deliveryRole"}, "properties": map[string]any{
 					"operation":          map[string]any{"type": "string", "enum": []string{"create", "edit", "variation"}},
+					"model":              map[string]any{"type": "string", "enum": []string{"tomako-image-fast", "tomako-image-standard", "tomako-image-precision"}, "description": "User-selected image capability: Nano Banana 2 Lite=fast, Nano Banana 2=standard, GPT Image=precision. Omit to retain the platform default."},
 					"prompt":             text,
 					"deliveryRole":       map[string]any{"type": "string", "enum": []string{"DELIVERABLE", "SUPPORTING"}, "description": "按用户最终目标声明用途：独立交付的图片用 DELIVERABLE；用于可编辑画布、PPT、文章、视频等最终作品的底图、配图或装饰用 SUPPORTING。中间素材即使先生成成功，也不单独成为成果；不要等最终作品保存后才区分。"},
 					"waitForResult":      map[string]any{"type": "boolean", "description": "Defaults to true. Set false when independent authorized work can proceed, even with a single supporting image; return the task id promptly, then wait via tomako_image_status before final composition or delivery. Keep true for an image-only deliverable or when the next step requires this result. Shared source references alone do not make images dependent."},
@@ -85,6 +86,14 @@ func (s *appServerSession) prepareImageTool(tool string, arguments map[string]an
 	if tool != "tomako_generate_image" && tool != "tomako_image_status" {
 		return nil, nil, nil, fmt.Errorf("unknown image tool")
 	}
+	var selectedModel string
+	if value, supplied := arguments["model"]; supplied {
+		selectedModel, _ = value.(string)
+		if tool != "tomako_generate_image" || (selectedModel != "tomako-image-fast" &&
+			selectedModel != "tomako-image-standard" && selectedModel != "tomako-image-precision") {
+			return nil, nil, nil, fmt.Errorf("select a supported public image model when generating; status only reads the existing task")
+		}
+	}
 	script := s.imageToolScript()
 	s.runtimeMu.RLock()
 	runtime := s.runtime
@@ -104,6 +113,9 @@ func (s *appServerSession) prepareImageTool(tool string, arguments map[string]an
 	var call map[string]any
 	_ = json.Unmarshal(encoded, &call)
 	if args, ok := call["arguments"].(map[string]any); ok {
+		// Existing Skills versions accept IMAGE_MODEL in their call environment.
+		// Keep the JSON contract compatible and never mutate session defaults.
+		delete(args, "model")
 		if err := snapshotImageReferences(s.workDir, filepath.Dir(path), args, s.sandboxScratchDir); err != nil {
 			removeTaskRuntimeEnv(path)
 			return nil, nil, nil, err
@@ -122,6 +134,9 @@ func (s *appServerSession) prepareImageTool(tool string, arguments map[string]an
 	cmd := exec.CommandContext(ctx, "node", script)
 	cmd.Dir = s.workDir
 	cmd.Env = core.MergeEnv(os.Environ(), append(append([]string(nil), s.extraEnv...), "TOMAKO_TASK_ENV_FILE="+path))
+	if selectedModel != "" {
+		cmd.Env = core.MergeEnv(cmd.Env, []string{"IMAGE_MODEL=" + selectedModel})
+	}
 	cmd.Stdin = bytes.NewReader(encoded)
 	return cmd, cancel, func() { removeTaskRuntimeEnv(path) }, nil
 }

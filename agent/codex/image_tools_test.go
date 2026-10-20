@@ -54,6 +54,52 @@ func TestImageToolDeliveryRoleRequiredAndForwarded(t *testing.T) {
 	}
 }
 
+func TestImageToolSelectedModelUsesExistingHelperWithoutLeakingToNextCall(t *testing.T) {
+	s := imageToolTestSession(t, "")
+	properties := imageDynamicTools()[0]["inputSchema"].(map[string]any)["properties"].(map[string]any)
+	if properties["model"] == nil {
+		t.Fatal("selected image models must not require shell submission and model-driven polling")
+	}
+	for _, model := range []string{"tomako-image-fast", "tomako-image-standard", "tomako-image-precision", ""} {
+		args := map[string]any{"operation": "edit", "prompt": "add a title", "deliveryRole": "DELIVERABLE"}
+		if model != "" {
+			args["model"] = model
+		}
+		cmd, cancel, cleanup, err := s.prepareImageTool("tomako_generate_image", args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		input, _ := io.ReadAll(cmd.Stdin)
+		cancel()
+		cleanup()
+		var call map[string]any
+		if json.Unmarshal(input, &call) != nil {
+			t.Fatal("invalid helper input")
+		}
+		if _, exists := call["arguments"].(map[string]any)["model"]; exists {
+			t.Fatal("existing Skills helper does not accept model as a JSON argument")
+		}
+		if got := envValue(cmd.Env, "IMAGE_MODEL"); got != model {
+			t.Fatalf("model %q reached helper as %q", model, got)
+		}
+		if model != "" && args["model"] != model {
+			t.Fatal("mutated the caller's request")
+		}
+	}
+	for _, model := range []any{"gpt-image-unknown", "", 42, nil} {
+		if _, cancel, cleanup, err := s.prepareImageTool("tomako_generate_image", map[string]any{"model": model}); err == nil {
+			cancel()
+			cleanup()
+			t.Fatalf("invalid model accepted: %v", model)
+		}
+	}
+	if _, cancel, cleanup, err := s.prepareImageTool("tomako_image_status", map[string]any{"imageTaskId": "img-saved", "model": "tomako-image-fast"}); err == nil {
+		cancel()
+		cleanup()
+		t.Fatal("status must not accept a model switch")
+	}
+}
+
 func TestImageToolFramingDoesNotImplyCropping(t *testing.T) {
 	schema := imageDynamicTools()[0]["inputSchema"].(map[string]any)
 	properties := schema["properties"].(map[string]any)
