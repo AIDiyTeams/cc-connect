@@ -51,13 +51,19 @@ func formDynamicTool() map[string]any {
 			"maxLength":   map[string]any{"type": "integer", "minimum": 1, "maximum": 4000},
 		}}
 	return map[string]any{"type": "function", "name": formToolName, "deferLoading": false,
-		"description": "Show the user a small form in the conversation and wait for their answers. Use it when a task needs several specific facts only the user can provide (for example figures for a business plan) and asking one by one would be slow or easy to get wrong. Ask only for what the task truly needs, prefill nothing you would have to guess, and mark as required only what blocks the work. The result lists each submitted value and which fields were skipped; never invent a value for a skipped field. Do not use it for a single yes/no or choice question.",
+		"description": "Show the user a small form in the conversation and wait for their answers. Use it when a task needs several specific facts only the user can provide (for example figures for a business plan or missing ordinary profile fields on a website). Ask only for missing facts, not values already available in the conversation or page. For browser work, inspect the page first, include browser with its current path and site, and gather ordinary text, numbers, dates or fixed choices together. The form offers the existing browser takeover entry. These answers are saved in the conversation and returned to you: never request passwords, verification codes, payment details or other secrets, or describe this as private/hidden from the Agent. Use tomako_request_browser_help for those steps and for uploads, CAPTCHA, signing, or complex interactive controls. Mark as required only what blocks the work. The result lists each submitted value and which fields were skipped; never invent a value for a skipped field. Do not use it for a single yes/no or choice question.",
 		"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"title", "fields"},
 			"properties": map[string]any{
 				"title":       text(80),
 				"description": map[string]any{"type": "string", "maxLength": 500},
 				"submitLabel": map[string]any{"type": "string", "maxLength": 20},
 				"fields":      map[string]any{"type": "array", "minItems": 1, "maxItems": formMaxFields, "items": field},
+				"browser": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"site", "path"},
+					"description": "Optional browser handoff context, from the current page/status. This is display context, not a browser session binding or permission to submit the website.",
+					"properties": map[string]any{
+						"site": text(120),
+						"path": map[string]any{"type": "string", "enum": []string{"local-chrome", "cloud"}},
+					}},
 			}},
 	}
 }
@@ -187,10 +193,48 @@ func formToolResult(questions []core.UserQuestion, result core.PermissionResult)
 	return string(encoded), true
 }
 
+// Reuse the existing takeover action; Java still owns browser control and the
+// conversation scope. A form never grants control or submits the target page.
+func formBrowserAction(arguments map[string]any) (*core.InteractionUserAction, error) {
+	raw, present := arguments["browser"]
+	if !present {
+		return nil, nil
+	}
+	browser, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("browser must contain site and path")
+	}
+	action, _, err := browserHelpRequest(map[string]any{
+		"kind": "take_over", "site": browser["site"], "browser": browser["path"], "message": "Browser form",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("browser form: %w", err)
+	}
+	return &action, nil
+}
+
+func browserFormToolResult(questions []core.UserQuestion, result core.PermissionResult, action *core.InteractionUserAction) (string, bool) {
+	text, success := formToolResult(questions, result)
+	if action == nil {
+		return text, success
+	}
+	var payload map[string]any
+	_ = json.Unmarshal([]byte(text), &payload)
+	payload["browser"] = map[string]any{"site": action.Site, "path": action.Browser}
+	payload["next"] = "These are form answers, not a website execution receipt. Check browser status and read the same target page again before filling. If HUMAN_CONTROL, wait for explicit handback; answering or skipping this form does not release user control. If the user filled the page themselves, preserve their changes. If the page/site has changed, re-evaluate the task instead of using stale refs or navigating back silently. Fill only submitted missing values with fresh page refs; never invent skipped values. Submit the website only within the user's original authorization, and verify its actual result. If cancelled or all skipped, do not reopen this form automatically; continue from the current page or use browser help if a required complex step remains."
+	encoded, _ := json.Marshal(payload)
+	return string(encoded), success
+}
+
 // handleFormToolCall shows the form as a conversation interaction and answers
 // the tool call once the user submits, skips or the session stops.
 func (s *appServerSession) handleFormToolCall(rawID json.RawMessage, callID string, arguments map[string]any) {
 	form, questions, err := parseFormRequest(arguments)
+	if err != nil {
+		s.writeDynamicToolResponse(rawID, false, err.Error())
+		return
+	}
+	action, err := formBrowserAction(arguments)
 	if err != nil {
 		s.writeDynamicToolResponse(rawID, false, err.Error())
 		return
@@ -205,6 +249,9 @@ func (s *appServerSession) handleFormToolCall(rawID json.RawMessage, callID stri
 	s.approvalsMu.Unlock()
 
 	rawInput := map[string]any{"form": form, "questions": questions}
+	if action != nil {
+		rawInput["userAction"] = action
+	}
 	s.flushPendingAsThinking()
 	s.emit(core.Event{
 		Type:         core.EventPermissionRequest,
@@ -214,6 +261,7 @@ func (s *appServerSession) handleFormToolCall(rawID json.RawMessage, callID stri
 		ToolInputRaw: rawInput,
 		Questions:    questions,
 		Form:         &form,
+		UserAction:   action,
 	})
 
 	go func() {
@@ -226,7 +274,7 @@ func (s *appServerSession) handleFormToolCall(rawID json.RawMessage, callID stri
 		s.approvalsMu.Lock()
 		delete(s.pendingApprovals, requestID)
 		s.approvalsMu.Unlock()
-		text, success := formToolResult(questions, result)
+		text, success := browserFormToolResult(questions, result, action)
 		s.writeDynamicToolResponse(rawID, success, text)
 	}()
 }
