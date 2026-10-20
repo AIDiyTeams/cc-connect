@@ -115,3 +115,12 @@ func TestBrowserToolReportsTheHelpersReasonWithoutCredentials(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestBrowserCurrentPageBindingReachesTheScopedHelper(t *testing.T) {
+	for _, current := range []bool{true, false} {
+		body, err := browserToolInput(map[string]any{"action": "open", "currentPage": current})
+		if err != nil || !strings.Contains(string(body), `"currentPage":`) {
+			t.Fatalf("binding was dropped: %s %v", body, err)
+		}
+	}
+}

@@ -40,7 +40,7 @@ var browserToolActions = []string{"tabs", "open", "read", "click", "fill", "sele
 var browserToolFields = map[string]bool{
 	"action": true, "path": true, "tab": true, "url": true, "ref": true, "text": true, "option": true, "checked": true,
 	"key": true, "direction": true, "time": true, "x": true, "y": true, "toX": true, "toY": true, "screenshotId": true,
-	"find": true, "newTab": true, "closeTab": true, "taskName": true, "includeOffscreenFrames": true,
+	"currentPage": true, "find": true, "newTab": true, "closeTab": true, "taskName": true, "includeOffscreenFrames": true,
 }
 
 func browserDynamicTool() map[string]any {
@@ -51,7 +51,7 @@ func browserDynamicTool() map[string]any {
 		return map[string]any{"type": "number", "description": description}
 	}
 	return map[string]any{"type": "function", "name": browserToolName, "deferLoading": false,
-		"description": "Use a browser for the user, one step per call. path local-chrome is the user's own Chrome (their logins and the pages they " +
+		"description": "When this message has browserMessagePage, current page is its frozen sending tab: open with currentPage=true, omitting tab/url/newTab. Never infer it from recent tabs. If closed, changed or unavailable, stop and explain; never choose another page or browser. Set currentPage=false only when the user explicitly requests another page or a new tab. Use a browser for the user, one step per call. path local-chrome is the user's own Chrome (their logins and the pages they " +
 			"have open; they see every step), cloud is the product's cloud browser. tabs lists the pages open in the user's Chrome (title, address, " +
 			"which one they are looking at, when each was last used). open with tab takes over a page the user already has open exactly as it is: " +
 			"nothing reloads, so their login, scroll position and anything they already typed stay. open with url opens a new tab. Pages come back " +
@@ -63,6 +63,7 @@ func browserDynamicTool() map[string]any {
 		"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"action"},
 			"properties": map[string]any{
 				"action":                 map[string]any{"type": "string", "enum": browserToolActions},
+				"currentPage":            map[string]any{"type": "boolean", "description": "open: use the sending tab saved with this message. False only when the user explicitly requests another page."},
 				"path":                   map[string]any{"type": "string", "enum": []string{"local-chrome", "cloud"}, "description": "open only. Omit to continue on the conversation's current path."},
 				"tab":                    str("open only: a tab id from tabs to take over."),
 				"url":                    str("open (new tab) or navigate: an https address."),
