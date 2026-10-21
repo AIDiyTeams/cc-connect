@@ -238,8 +238,12 @@ type SessionRuntime struct {
 	ImageCapabilityToken           string `json:"image_capability_token,omitempty"`
 	DocumentCapabilityToken        string `json:"document_capability_token,omitempty"`
 	EmployeeCommandCapabilityToken string `json:"employee_command_capability_token,omitempty"`
-	ProductUpdateCapabilityToken   string `json:"product_update_capability_token,omitempty"`
-	TaskAuthorityEnvelopeB64       string `json:"task_authority_envelope_b64,omitempty"`
+	// Employee routing is supplied by the authenticated control plane per turn.
+	// An empty ID means that tools must explicitly select a target; it is not a grant.
+	EmployeeID                   string `json:"employee_id,omitempty"`
+	EmployeeCapabilityOrigin     string `json:"employee_capability_origin,omitempty"`
+	ProductUpdateCapabilityToken string `json:"product_update_capability_token,omitempty"`
+	TaskAuthorityEnvelopeB64     string `json:"task_authority_envelope_b64,omitempty"`
 	// CmoAPI is the product's CMO coordination API, set by Portal only where it
 	// issues the cmo.coordinate capability. It is the explicit signal that this
 	// turn may coordinate the product's AI employees; never inferred from text.
@@ -313,7 +317,7 @@ type UserQuestion struct {
 // InteractionUserAction names a browser step only the user can do, so the app can
 // offer the matching one-click action beside the question.
 type InteractionUserAction struct {
-	Kind    string `json:"kind"`    // sign_in, connect_local_chrome or take_over
+	Kind    string   `json:"kind"`            // sign_in, connect_local_chrome or take_over
 	Site    string   `json:"site"`            // the first website or service the step is for
 	Sites   []string `json:"sites,omitempty"` // every site the step is for, when there are several
 	Browser string   `json:"browser"`         // local-chrome or cloud

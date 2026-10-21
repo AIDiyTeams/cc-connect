@@ -1940,6 +1940,8 @@ func normalizeSessionRuntime(runtime SessionRuntime) SessionRuntime {
 	runtime.ImageCapabilityToken = boundedSecretValue(runtime.ImageCapabilityToken, 16*1024)
 	runtime.DocumentCapabilityToken = boundedSecretValue(runtime.DocumentCapabilityToken, 16*1024)
 	runtime.EmployeeCommandCapabilityToken = boundedSecretValue(runtime.EmployeeCommandCapabilityToken, 16*1024)
+	runtime.EmployeeID = boundedSecretValue(runtime.EmployeeID, 96)
+	runtime.EmployeeCapabilityOrigin = boundedSecretValue(runtime.EmployeeCapabilityOrigin, 512)
 	runtime.ProductUpdateCapabilityToken = boundedSecretValue(runtime.ProductUpdateCapabilityToken, 16*1024)
 	runtime.TaskAuthorityEnvelopeB64 = boundedSecretValue(runtime.TaskAuthorityEnvelopeB64, 192*1024)
 	// Not a secret, but a malformed API must be dropped whole, never truncated.
