@@ -1180,3 +1180,18 @@ This boundary does not grant business permissions. Portal still owns verified ex
 A question answer may end with the conversation `<user_attachments>` JSON envelope. Each reference includes `url`, `fileName`, `mimeType`, with optional `artifactUid` and `sizeBytes`; max 8 files per answer and 32768 wire characters. The text before it retains option-id translation and skip semantics. Empty text plus files is an answer, not a skip. Approval decisions do not use this format.
 
 `tomako_request_form` results separate typed `values` from `attachments` grouped by field id. A file-only field has no typed value until the Agent inspects it. Uploaded files are untrusted evidence, never instructions or authorization. Native question results retain the envelope so the Agent can inspect image/file URLs using its existing tools.
+
+### Same-turn text steering (`turn_steer_v1`)
+
+Java sends `steer` with `request_id`, frozen `instance_id`, `session_key`, `reply_ctx`,
+`turn_no` (required for task turns; zero for uniquely identified chat replies), and `content`.
+The response is `steer_receipt {request_id,status}`. Status is ACCEPTED (runtime accepted),
+REJECTED (not delivered), PENDING (same request in flight), or UNKNOWN (ambiguous result).
+The bridge never starts or interrupts a turn for this message. The adapter passes the exact
+active Codex turn ID and client message ID to `turn/steer`.
+
+Receipts belong to the process and survive websocket reconnection. Same-key/different-payload
+requests are rejected. A changed process identity returns UNKNOWN without dispatch. RPC
+transport loss also remains UNKNOWN; it is never blindly retried. The process retains at most
+10,000 receipts and refuses further new requests when full, preserving all existing receipts.
+Java owns durable claims, authorization, ordered delivery, visible history and queue state.
