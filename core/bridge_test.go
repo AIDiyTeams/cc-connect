@@ -146,10 +146,18 @@ func register(t *testing.T, conn *websocket.Conn, platform string, caps []string
 		t.Fatalf("register failed: %v", ack["error"])
 	}
 	capsOut, _ := ack["runtime_capabilities"].([]any)
-	if len(capsOut) != 5 || capsOut[0] != "output_schema_v1" || capsOut[1] != "turn_budget_v1" ||
-		capsOut[2] != "team_coordination_tool_v1" || capsOut[3] != "execution_profile_v1" || capsOut[4] != "external_isolation_v1" {
-		t.Fatalf("missing constrained output capability: %#v", ack)
+	for _, required := range []string{"output_schema_v1", "turn_budget_v1", "team_coordination_tool_v1", "execution_profile_v1", "external_isolation_v1", "turn_steer_v1"} {
+		found := false
+		for _, capability := range capsOut {
+			if capability == required {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("missing runtime capability %s: %#v", required, ack)
+		}
 	}
+
 }
 
 func registerWithMetadata(t *testing.T, conn *websocket.Conn, platform string, caps []string, metadata map[string]any) {
