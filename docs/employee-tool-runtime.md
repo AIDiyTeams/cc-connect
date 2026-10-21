@@ -11,4 +11,3 @@ New turns, resumed turns and `respond_interaction.runtime` refreshes replace
 these values with the current snapshot. A turn without an employee token does
 not export employee routing. The protected-file readers must understand these
 two keys before deploying this bridge version; unknown keys still fail closed.
-
