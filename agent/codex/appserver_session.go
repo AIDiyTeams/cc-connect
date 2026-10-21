@@ -975,6 +975,8 @@ func (s *appServerSession) RefreshCapabilityAuthority(fresh core.SessionRuntime)
 	runtime.ImageCapabilityToken = fresh.ImageCapabilityToken
 	runtime.DocumentCapabilityToken = fresh.DocumentCapabilityToken
 	runtime.EmployeeCommandCapabilityToken = fresh.EmployeeCommandCapabilityToken
+	runtime.EmployeeID = fresh.EmployeeID
+	runtime.EmployeeCapabilityOrigin = fresh.EmployeeCapabilityOrigin
 	runtime.ProductUpdateCapabilityToken = fresh.ProductUpdateCapabilityToken
 	runtime.TaskAuthorityEnvelopeB64 = fresh.TaskAuthorityEnvelopeB64
 	runtime.CmoAPI = fresh.CmoAPI

@@ -2,6 +2,7 @@ package codex
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -75,7 +76,20 @@ func taskRuntimeEnvContent(runtime core.SessionRuntime) (string, error) {
 		"",
 	}
 	if employeeToken != "" {
-		lines = append(lines, "export EMPLOYEE_COMMAND_CAPABILITY_TOKEN="+shellSingleQuote(employeeToken))
+		employeeID := strings.TrimSpace(runtime.EmployeeID)
+		origin := strings.TrimSpace(runtime.EmployeeCapabilityOrigin)
+		if employeeID != "" && !taskRuntimeIDPattern.MatchString(employeeID) {
+			return "", fmt.Errorf("invalid employee runtime scope")
+		}
+		if origin != "" {
+			u, err := url.Parse(origin)
+			if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" || u.String() != origin {
+				return "", fmt.Errorf("employee capability origin must be one HTTPS origin")
+			}
+		}
+		lines = append(lines, "export EMPLOYEE_COMMAND_CAPABILITY_TOKEN="+shellSingleQuote(employeeToken),
+			"export EMPLOYEE_ID="+shellSingleQuote(employeeID),
+			"export EMPLOYEE_CAPABILITY_ORIGIN="+shellSingleQuote(origin))
 	}
 	if documentToken != "" {
 		lines = append(lines, "export DOCUMENT_CAPABILITY_TOKEN="+shellSingleQuote(documentToken))
