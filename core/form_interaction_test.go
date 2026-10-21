@@ -50,16 +50,38 @@ func TestFormAnswersKeepTheirValuesForTheRequestingTool(t *testing.T) {
 	}
 }
 
-func TestARequiredFormFieldCannotBeSkipped(t *testing.T) {
+func TestARequiredFormFieldCanBeSkippedAlongsideSuppliedAnswers(t *testing.T) {
 	e, rec := formInteractionEngine(t, []UserQuestion{{ID: "round_size", Question: "Round size", InputType: "number", Required: true}, {ID: "notes", Question: "Notes", InputType: "text"}})
 	if err := e.RespondInteraction("test:chat:user1", "interaction-form", "", map[string][]string{
 		"round_size": {interactionSkippedAnswer},
 		"notes":      {"Some notes"},
-	}); err == nil {
-		t.Fatal("skipping a required field must be refused")
+	}); err != nil {
+		t.Fatalf("skipping a required field must resume the agent: %v", err)
 	}
-	if rec.lastID != "" {
-		t.Fatal("a refused answer must not reach the agent")
+	if rec.lastID != "form-call-1" {
+		t.Fatal("the partial answer must reach the waiting agent")
+	}
+	answers, _ := rec.lastResult.UpdatedInput["answers"].(map[string]any)
+	round, _ := answers["round_size"].([]string)
+	notes, _ := answers["notes"].([]string)
+	if len(round) != 1 || round[0] != interactionSkippedAnswer || len(notes) != 1 || notes[0] != "Some notes" {
+		t.Fatalf("must preserve both skipped and supplied fields: %#v", answers)
+	}
+}
+
+func TestAttachmentOnlyAnswerCanAccompanyASkippedRequiredField(t *testing.T) {
+	e, rec := formInteractionEngine(t, []UserQuestion{
+		{ID: "budget", Question: "Budget", InputType: "number", Required: true},
+		{ID: "brief", Question: "Brief", InputType: "textarea", Required: true},
+	})
+	if err := e.RespondInteraction("test:chat:user1", "interaction-form", "", map[string][]string{
+		"budget": {interactionSkippedAnswer}, "brief": {answerImage},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	answers := rec.lastResult.UpdatedInput["answers"].(map[string]any)
+	if answers["budget"].([]string)[0] != interactionSkippedAnswer || answers["brief"].([]string)[0] != answerImage {
+		t.Fatalf("must preserve the skipped field and file-only answer: %#v", answers)
 	}
 }
 

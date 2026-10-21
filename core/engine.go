@@ -3729,19 +3729,6 @@ func interactionResult(pending *pendingPermission, decision string, answers map[
 	if len(pending.Questions) > 0 {
 		collected := make(map[int]string, len(pending.Questions))
 		fields := map[string]any{}
-		// Match the control plane: explicit whole-form skip is distinct from
-		// confirming a partially completed form with missing required values.
-		skippedForm := true
-		for _, question := range pending.Questions {
-			values := answers[question.ID]
-			if len(values) == 0 {
-				values = answers[question.Question]
-			}
-			if question.InputType == "" || len(values) != 1 || strings.TrimSpace(values[0]) != interactionSkippedAnswer {
-				skippedForm = false
-				break
-			}
-		}
 		for idx, question := range pending.Questions {
 			values := answers[question.ID]
 			if len(values) == 0 {
@@ -3761,10 +3748,8 @@ func interactionResult(pending *pendingPermission, decision string, answers map[
 			if question.InputType != "" {
 				// A form field keeps its values as given (choices mapped to their
 				// labels) so the requesting tool can read numbers and lists back.
-				skipped := len(values) == 1 && strings.TrimSpace(values[0]) == interactionSkippedAnswer
-				if skipped && question.Required && !skippedForm {
-					return result, fmt.Errorf("question %q is required", question.ID)
-				}
+				// Missing facts are reported to the Agent even when it marked the
+				// field required; the user can always continue without answering.
 				fields[question.ID] = interactionFieldValues(question, values)
 				continue
 			}
