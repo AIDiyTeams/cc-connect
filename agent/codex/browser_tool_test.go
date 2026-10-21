@@ -69,6 +69,21 @@ func TestBrowserToolInputKeepsTheSchemaShape(t *testing.T) {
 	}
 }
 
+func TestBrowserToolRecoveryContractAcceptsReturnedRequestIdentity(t *testing.T) {
+	input, err := browserToolInput(map[string]any{"action": "click", "ref": "4", "requestId": "returned-request-1234"})
+	if err != nil || !strings.Contains(string(input), `"requestId":"returned-request-1234"`) {
+		t.Fatalf("the advertised recovery ID must reach the helper: %s, %v", input, err)
+	}
+	if _, err := browserToolInput(map[string]any{"action": "status"}); err != nil {
+		t.Fatal("the suggested read-only status action must be callable", err)
+	}
+	schema := browserDynamicTool()["inputSchema"].(map[string]any)
+	properties := schema["properties"].(map[string]any)
+	if properties["requestId"] == nil || !strings.Contains(properties["taskName"].(map[string]any)["description"].(string), "Required for every open") {
+		t.Fatal("schema must describe runtime requirements and recovery identity")
+	}
+}
+
 func TestBrowserToolRunsTheHelperWithTheTurnsAuthorityAndAttachesScreenshots(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not installed")
