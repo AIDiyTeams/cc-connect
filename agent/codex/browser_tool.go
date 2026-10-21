@@ -33,7 +33,7 @@ const (
 	browserToolImageLimit  = 6 * 1024 * 1024
 )
 
-var browserToolActions = []string{"tabs", "open", "read", "click", "fill", "select", "check", "press", "scroll", "media",
+var browserToolActions = []string{"tabs", "open", "status", "read", "click", "fill", "select", "check", "press", "scroll", "media",
 	"screenshot", "click-coordinate", "drag", "navigate", "close", "control", "tab"}
 
 // Fields the helper accepts; anything else is refused here before Node starts.
@@ -41,6 +41,7 @@ var browserToolFields = map[string]bool{
 	"action": true, "path": true, "tab": true, "url": true, "ref": true, "text": true, "option": true, "checked": true,
 	"key": true, "direction": true, "time": true, "x": true, "y": true, "toX": true, "toY": true, "screenshotId": true,
 	"human": true, "currentPage": true, "find": true, "newTab": true, "closeTab": true, "taskName": true, "includeOffscreenFrames": true,
+	"requestId": true,
 }
 
 func browserDynamicTool() map[string]any {
@@ -75,7 +76,8 @@ func browserDynamicTool() map[string]any {
 				"find":                   str("Show only controls and text lines containing this word."),
 				"newTab":                 map[string]any{"type": "boolean", "description": "open: a fresh tab even if the conversation has one."},
 				"closeTab":               map[string]any{"type": "boolean", "description": "close: also close the tab Tomako opened."},
-				"taskName":               str("open: a short name for the tab group of tabs Tomako opens."),
+				"taskName":               str("Required for every open, including claiming or resuming a tab: a short task name without emoji or private data."),
+				"requestId":              str("Optional stable ID for a write. Normally omitted and allocated by the tool. If a request got no reply, first status/read; retry the identical operation with the returned requestId. A definite failure is not retried with that ID. Changed arguments are rejected."),
 				"includeOffscreenFrames": map[string]any{"type": "boolean", "description": "read: also read frames outside the viewport."},
 			}},
 	}
