@@ -1195,3 +1195,19 @@ requests are rejected. A changed process identity returns UNKNOWN without dispat
 transport loss also remains UNKNOWN; it is never blindly retried. The process retains at most
 10,000 receipts and refuses further new requests when full, preserving all existing receipts.
 Java owns durable claims, authorization, ordered delivery, visible history and queue state.
+
+### Whole-request text replies (`interaction_text_v1`)
+
+`respond_interaction.response_text` carries the user's original reply to an entire question,
+form or approval request. It is mutually exclusive with `decision` and `answers`; it never
+invents field values. The existing `<user_attachments>` envelope is preserved. Text is limited
+to 4000 characters; attachment-only replies are allowed under the existing attachment limits.
+Clients must check `interaction_text_v1` before sending this field. Older clients retain the
+existing structured-answer contract.
+
+Question/form tools return `{status:"replied",responseText}`. Approval prose declines the
+pending action and passes the original text back for the Agent to interpret; no wording can
+approve an action. Native Codex RPC questions/approvals receive the raw reply via the existing
+turn steering channel and close their pending structured request without selected values or
+approval. Portal owns response UUID deduplication and the persisted `answeredResponseText`
+receipt; a duplicate UUID with different content is invalid.

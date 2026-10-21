@@ -377,9 +377,9 @@ type interactiveState struct {
 	turnInterrupt          chan struct{} // protected by mu; open while /stop can end the foreground turn in place
 	pending                *pendingPermission
 	detached               map[string]*pendingPermission // interactions shown without pausing the turn, by interaction id
-	pendingMessages        []queuedMessage // messages queued while session was busy
-	approveAll             bool            // when true, auto-approve all permission requests for this session
-	fromVoice              bool            // true if current turn originated from voice transcription
+	pendingMessages        []queuedMessage               // messages queued while session was busy
+	approveAll             bool                          // when true, auto-approve all permission requests for this session
+	fromVoice              bool                          // true if current turn originated from voice transcription
 	sideText               string
 	deleteMode             *deleteModeState
 	modelSwitch            *modelSwitchState
@@ -3692,11 +3692,17 @@ func (e *Engine) RespondInteraction(sessionKey, interactionID, decision string, 
 // so the work that follows the answer is not refused for an expired token.
 func (e *Engine) RespondInteractionWithAuthority(sessionKey, interactionID, decision string,
 	answers map[string][]string, authority *SessionRuntime) error {
+	return e.RespondInteractionTextWithAuthority(sessionKey, interactionID, decision, answers, authority, "")
+}
+
+// A composer reply closes the waiting request without selecting fields or approving actions.
+func (e *Engine) RespondInteractionTextWithAuthority(sessionKey, interactionID, decision string,
+	answers map[string][]string, authority *SessionRuntime, responseText string) error {
 	state, pending := e.lookupPendingInteraction(sessionKey, interactionID)
 	if state == nil || pending == nil {
-		return e.respondDetachedInteraction(sessionKey, interactionID, decision, answers)
+		return e.respondDetachedInteractionText(sessionKey, interactionID, decision, answers, responseText)
 	}
-	result, err := interactionResult(pending, decision, answers)
+	result, err := interactionResultWithText(pending, decision, answers, responseText)
 	if err != nil {
 		return err
 	}
@@ -3818,11 +3824,15 @@ func (e *Engine) showDetachedInteraction(p Platform, replyCtx any, state *intera
 // the turn still running. Without one it reports the question as not pending, and the control
 // plane continues from the answer in a new turn.
 func (e *Engine) respondDetachedInteraction(sessionKey, interactionID, decision string, answers map[string][]string) error {
+	return e.respondDetachedInteractionText(sessionKey, interactionID, decision, answers, "")
+}
+
+func (e *Engine) respondDetachedInteractionText(sessionKey, interactionID, decision string, answers map[string][]string, responseText string) error {
 	state, pending := e.lookupDetachedInteraction(sessionKey, interactionID)
 	if state == nil || pending == nil {
 		return fmt.Errorf("%w: session %q", ErrInteractionNotPending, sessionKey)
 	}
-	result, err := interactionResult(pending, decision, answers)
+	result, err := interactionResultWithText(pending, decision, answers, responseText)
 	if err != nil {
 		return err
 	}

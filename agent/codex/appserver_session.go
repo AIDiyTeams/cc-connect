@@ -1140,6 +1140,14 @@ func (s *appServerSession) RespondPermission(requestID string, result core.Permi
 	if ch == nil {
 		return fmt.Errorf("codex app-server: no pending approval for request %s", requestID)
 	}
+	// Native RPC ids are JSON values; dynamic form/help ids are internal strings.
+	// Native approval replies cannot carry prose. Deliver the user's actual reply
+	// to the same turn before declining the action, never converting it to consent.
+	if text, ok := result.UpdatedInput["responseText"].(string); ok && text != "" && json.Valid([]byte(requestID)) {
+		if err := s.steer(result.Message); err != nil {
+			return err
+		}
+	}
 	select {
 	case ch <- result:
 	default:

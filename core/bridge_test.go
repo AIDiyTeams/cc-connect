@@ -146,7 +146,7 @@ func register(t *testing.T, conn *websocket.Conn, platform string, caps []string
 		t.Fatalf("register failed: %v", ack["error"])
 	}
 	capsOut, _ := ack["runtime_capabilities"].([]any)
-	for _, required := range []string{"output_schema_v1", "turn_budget_v1", "team_coordination_tool_v1", "execution_profile_v1", "external_isolation_v1", "turn_steer_v1"} {
+	for _, required := range []string{"output_schema_v1", "turn_budget_v1", "team_coordination_tool_v1", "execution_profile_v1", "external_isolation_v1", "turn_steer_v1", "interaction_text_v1"} {
 		found := false
 		for _, capability := range capsOut {
 			if capability == required {

@@ -123,6 +123,11 @@ func containsHan(text string) bool {
 
 // browserHelpResult tells the Agent what the user chose without treating it as proof.
 func browserHelpResult(question core.UserQuestion, result core.PermissionResult) (string, bool) {
+	if text, ok := result.UpdatedInput["responseText"].(string); ok && text != "" {
+		encoded, _ := json.Marshal(map[string]any{"status": "replied", "reply": text,
+			"next": "The user replied in their own words, without selecting an option. Interpret in context and verify any claimed browser state before relying on it."})
+		return string(encoded), true
+	}
 	if !strings.EqualFold(result.Behavior, "allow") {
 		return `{"status":"cancelled","next":"The request was closed without an answer. Do not assume the step was done."}`, false
 	}

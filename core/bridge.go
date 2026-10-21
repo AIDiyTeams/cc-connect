@@ -259,6 +259,7 @@ type bridgeRespondInteraction struct {
 	InteractionID string              `json:"interaction_id"`
 	Decision      string              `json:"decision,omitempty"`
 	Answers       map[string][]string `json:"answers,omitempty"`
+	ResponseText  string              `json:"response_text,omitempty"`
 	Project       string              `json:"project,omitempty"`
 	// Runtime carries freshly issued tool credentials for the paused turn.
 	Runtime *SessionRuntime `json:"runtime,omitempty"`
@@ -1639,7 +1640,7 @@ func (bs *BridgeServer) handleConnection(conn *websocket.Conn) {
 		// team_coordination_tool_v1: a runtime cmo_api gives the Agent the typed
 		// tomako_team_coordination tool, so Portal may name it in the prompt.
 		// execution_profile_v1: an unattended runtime gets no tool that waits on a person.
-		"runtime_capabilities": []string{"turn_steer_v1", "output_schema_v1", "turn_budget_v1", "team_coordination_tool_v1", "execution_profile_v1", "external_isolation_v1"},
+		"runtime_capabilities": []string{"interaction_text_v1", "turn_steer_v1", "output_schema_v1", "turn_budget_v1", "team_coordination_tool_v1", "execution_profile_v1", "external_isolation_v1"},
 		"instance_id":          bs.instanceID,
 	}); err != nil {
 		slog.Debug("bridge: write register ack failed", "error", err)
@@ -1727,8 +1728,8 @@ func (a *bridgeAdapter) handleRespondInteraction(raw json.RawMessage) {
 		normalized := normalizeSessionRuntime(*response.Runtime)
 		authority = &normalized
 	}
-	if err := ref.engine.RespondInteractionWithAuthority(response.SessionKey, response.InteractionID,
-		response.Decision, response.Answers, authority); err != nil {
+	if err := ref.engine.RespondInteractionTextWithAuthority(response.SessionKey, response.InteractionID,
+		response.Decision, response.Answers, authority, response.ResponseText); err != nil {
 		slog.Warn("bridge: interaction response rejected", "interaction_id", response.InteractionID, "error", err)
 		code := "INTERACTION_RUNTIME_REJECTED"
 		if errors.Is(err, ErrInteractionNotPending) {
