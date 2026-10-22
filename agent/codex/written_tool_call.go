@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 )
@@ -20,9 +21,10 @@ import (
 // or residue next to an element shaped like a call (an element whose content starts
 // with a child element), counts as a call that never ran.
 var (
-	dsmlMarker     = regexp.MustCompile(`</?\s*[｜|]{1,2}\s*DSML\s*[｜|]{1,2}[^>\n]*>`)
-	dsmlOpenCall   = regexp.MustCompile(`<\s*[｜|]{1,2}\s*DSML\s*[｜|]{1,2}\s*(?:invoke|function_calls|tool_calls)\b`)
-	callShapedNode = regexp.MustCompile(`<([a-z][a-z0-9_]*)>\s*<([a-zA-Z][a-zA-Z0-9_]*)>[^<]*</([a-zA-Z][a-zA-Z0-9_]*)>`)
+	dsmlMarker      = regexp.MustCompile(`</?\s*[｜|]{1,2}\s*DSML\s*[｜|]{1,2}[^>\n]*>`)
+	dsmlOpenCall    = regexp.MustCompile(`<\s*[｜|]{1,2}\s*DSML\s*[｜|]{1,2}\s*(?:invoke|function_calls|tool_calls)\b`)
+	callShapedNode  = regexp.MustCompile(`<([a-z][a-z0-9_]*)>\s*<([a-zA-Z][a-zA-Z0-9_]*)>[^<]*</([a-zA-Z][a-zA-Z0-9_]*)>`)
+	writtenFormCall = regexp.MustCompile(`(?s)(?:^|\n)[ \t]*<tomako_request_form>\s*(\{.*\})\s*</tomako_request_form>\s*$`)
 )
 
 // writtenToolCallPrompt is the follow-up a model receives after it wrote a tool call
@@ -35,6 +37,17 @@ const writtenToolCallPrompt = "Your previous message wrote a tool call as plain 
 // returns the prose before it, which is what the model meant to say to the user.
 func splitWrittenToolCall(text string) (prose string, written bool) {
 	cut := -1
+	// Test csess-838d305fa5184447 ended with a valid form request wrapped in
+	// XML, without DSML markers. This is protocol output, not a real tool call.
+	// Validate its shape and ask the model to use the tool; never execute prose.
+	if m := writtenFormCall.FindStringSubmatchIndex(text); m != nil {
+		var arguments map[string]any
+		if json.Unmarshal([]byte(text[m[2]:m[3]]), &arguments) == nil {
+			if _, _, err := parseFormRequest(arguments); err == nil {
+				return strings.TrimSpace(text[:m[0]]), true
+			}
+		}
+	}
 	if loc := dsmlOpenCall.FindStringIndex(text); loc != nil {
 		cut = loc[0]
 	} else if dsmlMarker.MatchString(text) {

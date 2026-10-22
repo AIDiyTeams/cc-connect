@@ -13,6 +13,10 @@ const writtenBrowserCall = "[[tomako:conversation-language=zh-CN]]\n大哥，我
 const answerWithDSMLResidue = "<tomako_public_response>\n大哥，验证完成了。\n</tomako_public_response>\n" +
 	"</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>"
 
+const writtenFormRequest = "表单在下面。\n\n<tomako_request_form>\n" +
+	`{"title":"活动信息补充","fields":[{"id":"activity_name","type":"text","label":"活动名称","required":true},{"id":"budget","type":"number","label":"预算","min":0}],"browser":null}` +
+	"\n</tomako_request_form>"
+
 func TestSplitWrittenToolCall(t *testing.T) {
 	for _, tc := range []struct {
 		name, text, prose string
@@ -24,6 +28,9 @@ func TestSplitWrittenToolCall(t *testing.T) {
 		{"answer with closing residue only", answerWithDSMLResidue, answerWithDSMLResidue, false},
 		{"answer with a structured envelope", "<tomako_conversation_title>\n{\"title\":\"删除邮件\",\"emoji\":\"\"}\n</tomako_conversation_title>\n已删除。", "", false},
 		{"markup in prose without DSML", "示例：<item><name>x</name></item>", "", false},
+		{"form JSON in XML without DSML", writtenFormRequest, "表单在下面。", true},
+		{"fenced form documentation", "```xml\n" + writtenFormRequest + "\n```", "", false},
+		{"invalid form is not a callable request", "<tomako_request_form>{\"title\":\"活动\",\"fields\":[]}</tomako_request_form>", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			prose, written := splitWrittenToolCall(tc.text)
@@ -37,6 +44,21 @@ func TestSplitWrittenToolCall(t *testing.T) {
 				t.Fatalf("text without a written call must be returned unchanged, got %q", prose)
 			}
 		})
+	}
+}
+
+func TestFinalReplyFollowUp_WrittenFormKeepsReplyOpenWithoutExecutingText(t *testing.T) {
+	s, stdin := finalReplyTestSession(t)
+	s.handleItemStarted(map[string]any{"type": "agentMessage", "id": "form", "phase": "final_answer"})
+	s.handleItemCompleted(map[string]any{"type": "agentMessage", "id": "form", "phase": "final_answer", "text": writtenFormRequest})
+	s.handleNotification("turn/completed", json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}`))
+	shown, _, results, errors := drainReplyEvents(s)
+	if shown != "表单在下面。" || results != 0 || errors != 0 {
+		t.Fatalf("shown=%q results=%d errors=%d; malformed call must not complete the reply", shown, results, errors)
+	}
+	start := startFollowUpTurn(t, s, stdin, "turn-2")
+	if input := start.Params["input"].([]any); input[0].(map[string]any)["text"] != writtenToolCallPrompt {
+		t.Fatalf("expected a native tool retry, got %#v", input)
 	}
 }
 
