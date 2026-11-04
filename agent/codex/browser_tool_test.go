@@ -69,6 +69,16 @@ func TestBrowserToolInputKeepsTheSchemaShape(t *testing.T) {
 	}
 }
 
+func TestBrowserToolFinalGroupHandoffIsAnExplicitBoolean(t *testing.T) {
+	input, err := browserToolInput(map[string]any{"action": "close", "releaseGroup": true})
+	if err != nil || !strings.Contains(string(input), `"releaseGroup":true`) {
+		t.Fatalf("final handoff must reach the browser helper: %s, %v", input, err)
+	}
+	if _, err := browserToolInput(map[string]any{"action": "close", "releaseGroup": "true"}); err == nil {
+		t.Fatal("string disposition must be rejected")
+	}
+}
+
 func TestBrowserToolRecoveryContractAcceptsReturnedRequestIdentity(t *testing.T) {
 	input, err := browserToolInput(map[string]any{"action": "click", "ref": "4", "requestId": "returned-request-1234"})
 	if err != nil || !strings.Contains(string(input), `"requestId":"returned-request-1234"`) {

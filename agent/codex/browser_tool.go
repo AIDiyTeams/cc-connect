@@ -41,7 +41,7 @@ var browserToolFields = map[string]bool{
 	"action": true, "path": true, "tab": true, "url": true, "ref": true, "text": true, "option": true, "checked": true,
 	"key": true, "direction": true, "time": true, "x": true, "y": true, "toX": true, "toY": true, "screenshotId": true,
 	"human": true, "currentPage": true, "find": true, "newTab": true, "closeTab": true, "taskName": true, "includeOffscreenFrames": true,
-	"requestId": true,
+	"requestId": true, "releaseGroup": true,
 }
 
 func browserDynamicTool() map[string]any {
@@ -76,6 +76,7 @@ func browserDynamicTool() map[string]any {
 				"find":                   str("Show only controls and text lines containing this word."),
 				"newTab":                 map[string]any{"type": "boolean", "description": "open: a fresh tab even if the conversation has one."},
 				"closeTab":               map[string]any{"type": "boolean", "description": "close: also close the tab Tomako opened."},
+				"releaseGroup":           map[string]any{"type": "boolean", "description": "close, local-chrome: final handoff keeps result pages but removes the temporary task group. Omit while pausing, waiting for the user or continuing later. closeTab=true cleans up disposable pages and their group."},
 				"taskName":               str("Required for every open, including claiming or resuming a tab: a short task name without emoji or private data."),
 				"requestId":              str("Optional stable ID for a write. Normally omitted and allocated by the tool. If a request got no reply, first status/read; retry the identical operation with the returned requestId. A definite failure is not retried with that ID. Changed arguments are rejected."),
 				"includeOffscreenFrames": map[string]any{"type": "boolean", "description": "read: also read frames outside the viewport."},
@@ -125,7 +126,7 @@ func browserToolInput(arguments map[string]any) ([]byte, error) {
 		if value == nil {
 			continue
 		}
-		if key == "currentPage" || key == "human" {
+		if key == "currentPage" || key == "human" || key == "releaseGroup" {
 			if _, ok := value.(bool); !ok {
 				return nil, fmt.Errorf("%s must be boolean", key)
 			}
