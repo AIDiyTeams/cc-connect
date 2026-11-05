@@ -1,14 +1,81 @@
 package codex
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+func TestPublicResearchProfileTransitionAfterProcessRestart(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake app-server")
+	}
+	for _, tc := range []struct {
+		name, previousBase, nextProfile string
+		wantFresh                       bool
+	}{
+		{"review keeps research history", publicResearchBaseInstructions, core.ToolProfilePublicResearch, false},
+		{"selection restores execution", publicResearchBaseInstructions, "", true},
+		{"legacy research restores execution", strings.TrimPrefix(publicResearchBaseInstructions, publicResearchProfileMarker+"\n"), "", true},
+		{"enter research", "ordinary application instructions", core.ToolProfilePublicResearch, true},
+		{"ordinary resume unchanged", "ordinary application instructions", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			requests := filepath.Join(workDir, "requests.jsonl")
+			rollout := filepath.Join(workDir, "rollout.jsonl")
+			meta, _ := json.Marshal(map[string]any{"type": "session_meta", "payload": map[string]any{"base_instructions": map[string]any{"text": tc.previousBase}}})
+			if err := os.WriteFile(rollout, append(meta, '\n'), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			script := `#!/bin/sh
+REQUESTS=` + shellSingleQuote(requests) + `
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$REQUESTS"
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) result='{}' ;;
+    *'"method":"thread/start"'*) result='{"thread":{"id":"thread-current-tools"}}' ;;
+    *'"method":"thread/resume"'*) result='{"thread":{"id":"thread-previous","path":` + mustJSON(rollout) + `}}' ;;
+    *'"method":"account/rateLimits/read"'*) result='{}' ;;
+    *) continue ;;
+  esac
+  printf '{"id":%s,"result":%s}\n' "$id" "$result"
+done
+`
+			writeFakeCodexScript(t, workDir, script, "")
+			t.Setenv("PATH", workDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			startup := cmoRuntime()
+			startup.ToolProfile = tc.nextProfile
+			startup.DeveloperInstructions = "Current Portal conversation and product context"
+			s, err := newAppServerSession(context.Background(), "", workDir, "test-model", "low", "", "", "thread-previous", "", "", nil, "", startup)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			wantID := "thread-previous"
+			if tc.wantFresh {
+				wantID = "thread-current-tools"
+			}
+			if s.CurrentSessionID() != wantID {
+				t.Fatalf("current thread = %s, want %s", s.CurrentSessionID(), wantID)
+			}
+			body, err := os.ReadFile(requests)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(string(body), `"method":"thread/start"`); got != tc.wantFresh {
+				t.Fatalf("replacement thread = %v, want %v", got, tc.wantFresh)
+			}
+		})
+	}
+}
 
 func TestPublicResearchProfileLimitsToolsAndContextWithoutChangingFences(t *testing.T) {
 	s := webReadTestSession(t, "")

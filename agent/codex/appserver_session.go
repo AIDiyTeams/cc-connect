@@ -543,6 +543,12 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 		if resp.Thread.ID == "" {
 			return fmt.Errorf("codex app-server resume returned empty thread id")
 		}
+		if s.resumedResearchProfileChanged(resp.Thread.ID, resp.Thread.Path) {
+			// Portal supplies the current conversation/product context. A fresh
+			// thread restores the correct tools without rewriting the old history.
+			slog.Info("codex app-server research profile changed; starting current tool scope", "thread_id", resp.Thread.ID)
+			return s.ensureThread("")
+		}
 		s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 		s.threadID.Store(resp.Thread.ID)
 		s.threadBrandTools = s.isBrandAnalysisRuntime()
