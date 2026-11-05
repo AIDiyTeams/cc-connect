@@ -259,7 +259,12 @@ type SessionRuntime struct {
 	// ExecutionProfile "unattended" marks work Portal runs on a schedule with
 	// nobody watching (a standing task's run): no tool may wait on a person.
 	ExecutionProfile string `json:"execution_profile,omitempty"`
+	// ToolProfile is a trusted control-plane capability selection, never inferred
+	// from user text. Public research exposes search/reading without workbench actions.
+	ToolProfile string `json:"tool_profile,omitempty"`
 }
+
+const ToolProfilePublicResearch = "public_research"
 
 // ExecutionProfileUnattended is the only ExecutionProfile value; see SessionRuntime.
 const ExecutionProfileUnattended = "unattended"

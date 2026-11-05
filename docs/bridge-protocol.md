@@ -27,6 +27,16 @@ Codex 图片工具按工作依赖选择 `waitForResult`，不按图片数量强�
 ### Native constrained output (optional runtime capability)
 
 Successful `register_ack` responses advertise `runtime_capabilities: ["output_schema_v1", "turn_budget_v1"]`.
+
+Application-managed public research can supply `runtime.tool_profile="public_research"`.
+It selects platform search/page reading and a focused evidence-research context, omitting the
+workbench Skill catalog, workspace documents, shell/plan/media/team tools and user questions.
+Scoped credentials and all filesystem/network/tenant fences remain unchanged. Unknown profiles
+are rejected. The profile is trusted runtime metadata, never derived from user prose. Draft and
+review use the same profile to preserve evidence history; switching to ordinary user execution
+refreshes the tool context. Catalog-backed models also omit native patch/shell descriptors for
+this process; the normal model catalog is unchanged. Codex 0.153.4 compatibility is checked with
+an isolated request-capture probe before release; native tool discovery may remain registered.
 This advertises protocol support; the selected Agent session is checked independently before
 dispatch. Adapters requiring constrained output must refuse an older Bridge without the capability.
 

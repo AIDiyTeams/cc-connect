@@ -130,6 +130,14 @@ func isDeepSeekGatewayModel(model string) bool {
 // modelCatalogFor names the startup catalog a runtime needs, or "" for none. The catalog
 // is a process start argument, so a live process serves a runtime only when they agree.
 func modelCatalogFor(runtime core.SessionRuntime) string {
+	kind := baseModelCatalogFor(runtime)
+	if kind != "" && runtime.ToolProfile == core.ToolProfilePublicResearch {
+		return "public-research:" + kind
+	}
+	return kind
+}
+
+func baseModelCatalogFor(runtime core.SessionRuntime) string {
 	if needsNativeWebModelCatalog(runtime) {
 		return nativeWebModelCatalogTag
 	}
@@ -140,14 +148,43 @@ func modelCatalogFor(runtime core.SessionRuntime) string {
 }
 
 func writeModelCatalog(envFile string, runtime core.SessionRuntime) (string, error) {
-	switch kind := modelCatalogFor(runtime); {
+	var path string
+	var err error
+	switch kind := baseModelCatalogFor(runtime); {
 	case kind == nativeWebModelCatalogTag:
-		return writeNativeWebModelCatalog(envFile)
+		path, err = writeNativeWebModelCatalog(envFile)
 	case strings.HasPrefix(kind, deepSeekConversationCatalogTag):
-		return writeDeepSeekConversationCatalog(envFile, strings.TrimPrefix(kind, deepSeekConversationCatalogTag))
+		path, err = writeDeepSeekConversationCatalog(envFile, strings.TrimPrefix(kind, deepSeekConversationCatalogTag))
 	default:
 		return "", nil
 	}
+	if err != nil || runtime.ToolProfile != core.ToolProfilePublicResearch {
+		return path, err
+	}
+	// Keep the selected model's metadata, but remove local mutation tools for
+	// this process only. Codex 0.153 ignores the retired apply_patch feature flag.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var catalog struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err = json.Unmarshal(data, &catalog); err != nil {
+		return "", err
+	}
+	for _, model := range catalog.Models {
+		model["apply_patch_tool_type"] = nil
+		model["shell_type"] = "disabled"
+	}
+	data, err = json.Marshal(catalog)
+	if err != nil {
+		return "", err
+	}
+	if err = os.WriteFile(path, data, 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func writeDeepSeekConversationCatalog(envFile, slug string) (string, error) {

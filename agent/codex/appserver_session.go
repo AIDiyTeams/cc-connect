@@ -697,6 +697,7 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 			params["sandbox"] = sandbox
 		}
 	}
+	s.applyPublicResearchProfile(params, config)
 	s.shareFencedPromptPrefix(params, config)
 	return params
 }
@@ -880,6 +881,12 @@ func (s *appServerSession) turnStartParams(threadID string, input []map[string]a
 // session only. turn/start repeats the model on every turn, so concurrent
 // sessions never depend on the Agent's process-wide provider switcher.
 func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error {
+	if runtime.ToolProfile != "" && runtime.ToolProfile != core.ToolProfilePublicResearch {
+		return fmt.Errorf("codex: unsupported tool profile")
+	}
+	if runtime.ToolProfile != "" && (runtime.ChatSessionID == "" || runtime.DeveloperInstructions == "") {
+		return fmt.Errorf("codex: public research requires application-managed conversation context")
+	}
 	if err := core.ValidateIsolationKey(runtime.IsolationKey); err != nil {
 		return err
 	}
@@ -909,7 +916,7 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	}
 	s.taskRuntimeEnvFile = envFile
 	searchChanged := s.webSearch != normalizeWebSearch(runtime.WebSearch)
-	profileChanged := s.runtime.Unattended() != runtime.Unattended()
+	profileChanged := s.runtime.Unattended() != runtime.Unattended() || s.runtime.ToolProfile != runtime.ToolProfile
 	previousReasoningCapability := needsReasoningCapability(s.model, s.effort)
 	s.runtime = runtime
 	// A CMO turn may need the team coordination fallback below its policy.
@@ -1020,17 +1027,17 @@ func (s *appServerSession) turnDeveloperInstructions() map[string]any {
 	}
 	var instructions any
 	policy := s.runtime.DeveloperInstructions
-	if imageRuntimeAuthorized(s.runtime) {
+	if s.runtime.ToolProfile != core.ToolProfilePublicResearch && imageRuntimeAuthorized(s.runtime) {
 		policy = imageFramingInstructions + "\n\n" + imageSchedulingInstructions + "\n\n" + policy
 	}
-	if s.runtime.CmoAPI != "" && !s.threadTeamTool.Load() {
+	if s.runtime.ToolProfile != core.ToolProfilePublicResearch && s.runtime.CmoAPI != "" && !s.threadTeamTool.Load() {
 		policy = teamCoordinationHelperFallback + "\n\n" + policy
 	}
 	if policy != "" {
 		prefix := "You are in Default mode. The following current application instructions replace earlier application instructions in this collaboration-mode block and remain in effect until replaced by later collaboration instructions.\n\n"
 		// Describe only the directory prepared for this fenced workspace. A
 		// resumed thread may report another cwd; never advertise its old path.
-		if tmpDir := envValue(s.extraEnv, "TMPDIR"); strings.TrimSpace(s.permissionsProfile) != "" &&
+		if tmpDir := envValue(s.extraEnv, "TMPDIR"); s.runtime.ToolProfile != core.ToolProfilePublicResearch && strings.TrimSpace(s.permissionsProfile) != "" &&
 			filepath.IsAbs(s.workDir) && (tmpDir == filepath.Join(s.workDir, ".tmp") ||
 			tmpDir == s.sandboxScratchDir && conversationScratchReady(tmpDir)) {
 			scratch := conversationScratchPath(s.workDir, s.permissionsProfile, s.runtime.ChatSessionID)
@@ -1375,6 +1382,10 @@ func (s *appServerSession) handleDynamicToolCall(rawID json.RawMessage, paramsRa
 	}
 	if err := json.Unmarshal(paramsRaw, &params); err != nil {
 		s.writeDynamicToolResponse(rawID, false, "invalid tool arguments")
+		return
+	}
+	if s.publicResearch() && params.Tool != webSearchToolName && params.Tool != webReadToolName {
+		s.writeDynamicToolResponse(rawID, false, "this research turn only permits public search and page reading")
 		return
 	}
 	if params.Tool == formToolName {
@@ -2335,7 +2346,7 @@ func unattendedRequestUserInputResponse(questions []appServerRequestUserInputQue
 func (s *appServerSession) unattended() bool {
 	s.runtimeMu.RLock()
 	defer s.runtimeMu.RUnlock()
-	return s.runtime.Unattended()
+	return s.runtime.Unattended() || s.runtime.ToolProfile == core.ToolProfilePublicResearch
 }
 
 func appServerRequestUserInputResponseFromResult(questions []appServerRequestUserInputQuestion, result core.PermissionResult) appServerRequestUserInputResponse {

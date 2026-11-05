@@ -210,6 +210,9 @@ func (s *appServerSession) baseInstructionsOverride() string {
 	if !managed {
 		return ""
 	}
+	if s.publicResearch() {
+		return publicResearchBaseInstructions
+	}
 	text, err := publicConversationBaseInstructions()
 	if err != nil {
 		slog.Warn("codex: public conversation base instructions unavailable; keeping native base", "error", err)
