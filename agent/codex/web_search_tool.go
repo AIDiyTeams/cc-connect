@@ -235,7 +235,8 @@ type webSearchResponse struct {
 }
 
 // webSearchAttemptError tells the caller whether another provider may succeed
-// where this one failed: outages and rate limits yes, credentials and bad queries no.
+// where this one failed: outages, exhausted provider credit and rate limits yes;
+// authentication, permission and bad-query errors still stop the request.
 type webSearchAttemptError struct {
 	message   string
 	retryable bool
@@ -362,7 +363,7 @@ func braveSearchAttempt(parent context.Context, config webSearchConfig, query st
 		}
 		return nil, &webSearchAttemptError{
 			message:   fmt.Sprintf("brave returned HTTP %d: %s", status, limitRunes(reason, 200)),
-			retryable: status == http.StatusTooManyRequests || status >= 500,
+			retryable: webSearchProviderUnavailable(status),
 		}
 	}
 	if parseErr != nil {
@@ -414,7 +415,7 @@ func cloudflareSearchAttempt(parent context.Context, config webSearchConfig, pro
 		if len(envelope.Errors) > 0 && strings.TrimSpace(envelope.Errors[0].Message) != "" {
 			reason = envelope.Errors[0].Message
 		}
-		retryable := status == http.StatusTooManyRequests || status >= 500
+		retryable := webSearchProviderUnavailable(status)
 		return nil, &webSearchAttemptError{
 			message:   fmt.Sprintf("%s returned HTTP %d: %s", provider, status, limitRunes(reason, 200)),
 			retryable: retryable,
@@ -429,6 +430,12 @@ func cloudflareSearchAttempt(parent context.Context, config webSearchConfig, pro
 		return nil, &webSearchAttemptError{message: provider + " returned an unreadable response", retryable: true}
 	}
 	return &parsed, nil
+}
+
+// Only already-configured providers are eligible; this never purchases credit
+// or changes credentials. An exhausted supplier does not exhaust the others.
+func webSearchProviderUnavailable(status int) bool {
+	return status == http.StatusPaymentRequired || status == http.StatusTooManyRequests || status >= 500
 }
 
 // formatWebSearchResults keeps snippets short (providers can return pages of

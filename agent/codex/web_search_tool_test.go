@@ -219,6 +219,26 @@ func TestWebSearchStopsOnCredentialErrors(t *testing.T) {
 	}
 }
 
+func TestWebSearchExhaustedCreditFallsBackToConfiguredProvider(t *testing.T) {
+	for _, exhausted := range []string{"exa", "brave"} {
+		t.Run(exhausted, func(t *testing.T) {
+			writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nBRAVE_API_KEY=brave-1\nWEB_SEARCH_PROVIDERS="+exhausted+",linkup\n")
+			calls := fakeWebSearchAPI(t, map[string]func(http.ResponseWriter){
+				"exa":    respond(402, `{"errors":[{"message":"Payment Required"}]}`),
+				"linkup": respond(200, `{"items":[{"url":"https://example.com/","title":"Source","description":"found"}]}`),
+			})
+			brave := fakeBraveAPI(t, 402, `{"error":{"detail":"credit exhausted"}}`)
+			output, err := webSearchTestSession(t).searchWeb(map[string]any{"query": "credit fallback " + exhausted})
+			if err != nil || !strings.Contains(output, "Results: 1 from linkup") {
+				t.Fatalf("output=%q err=%v", output, err)
+			}
+			if exhausted == "exa" && (len(*calls) != 2 || len(*brave) != 0) || exhausted == "brave" && (len(*calls) != 1 || len(*brave) != 1) {
+				t.Fatalf("cloudflare=%d brave=%d", len(*calls), len(*brave))
+			}
+		})
+	}
+}
+
 func TestWebSearchReportsNoResultsWithoutFailing(t *testing.T) {
 	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nWEB_SEARCH_PROVIDERS=ceramic,exa,linkup\n")
 	fakeWebSearchAPI(t, map[string]func(http.ResponseWriter){
