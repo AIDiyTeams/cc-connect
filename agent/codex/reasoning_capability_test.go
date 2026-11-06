@@ -18,6 +18,9 @@ func TestReasoningCapabilityIsBoundToKnownModelAndRequestedEffort(t *testing.T) 
 		{"gpt-6-astra", "medium", true},
 		{"tomako/gpt-6-astra", "", false},
 		{"other/gpt-6-astra", "medium", false},
+		{"openrouter/openai/gpt-6-astra", "high", true},
+		{"openrouter/openai/gpt-6.1-sol", "max", true},
+		{"openrouter/openai/gpt-6.1-sol", "", false},
 		{"tomako/gpt-6.1-sol", "medium", true},
 		{"gpt-6.1-sol", "medium", true},
 		{"tomako/gpt-6.1-sol", "", false},
@@ -54,6 +57,23 @@ func TestReasoningCapabilityIsBoundToKnownModelAndRequestedEffort(t *testing.T) 
 				t.Fatalf("thread reasoning capability = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestManualChatReasoningEffortSurvivesModelSwitchAndFollowup(t *testing.T) {
+	s := &appServerSession{model: "tomako/deepseek-v4-flash-vision-exp", effort: "medium"}
+	s.alive.Store(true)
+	for _, model := range []string{"openrouter/openai/gpt-6-astra", "openrouter/openai/gpt-6.1-sol", "tomako/deepseek-v4-flash-vision-exp"} {
+		for _, effort := range []string{"low", "medium", "high", "max"} {
+			if err := s.SetSessionRuntime(core.SessionRuntime{GatewayModel: model, ReasoningEffort: effort}); err != nil {
+				t.Fatal(err)
+			}
+			config := s.threadRequestParams()["config"].(map[string]any)
+			turn := s.turnStartParams("thread", nil)
+			if config["model_supports_reasoning_summaries"] != true || config["model_reasoning_effort"] != effort || turn["effort"] != effort || turn["model"] != model {
+				t.Fatalf("selected model/effort lost: config=%v turn=%v", config, turn)
+			}
+		}
 	}
 }
 
