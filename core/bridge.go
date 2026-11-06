@@ -1947,7 +1947,7 @@ func normalizeSessionRuntime(runtime SessionRuntime) SessionRuntime {
 	// Not a secret, but a malformed API must be dropped whole, never truncated.
 	runtime.CmoAPI = boundedSecretValue(runtime.CmoAPI, 512)
 	switch strings.ToLower(strings.TrimSpace(runtime.ReasoningEffort)) {
-	case "low", "medium", "high", "xhigh":
+	case "low", "medium", "high", "xhigh", "max", "ultra":
 		runtime.ReasoningEffort = strings.ToLower(strings.TrimSpace(runtime.ReasoningEffort))
 	default:
 		runtime.ReasoningEffort = ""
