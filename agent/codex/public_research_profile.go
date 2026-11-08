@@ -72,7 +72,14 @@ func (s *appServerSession) applyPublicResearchProfile(params, config map[string]
 	}
 	tools := []map[string]any{}
 	if s.webSearchToolAvailable() {
-		tools = append(tools, webSearchDynamicTool())
+		search := webSearchDynamicTool()
+		search["supportsParallelToolCalls"] = true
+		if s.webReadToolAvailable() {
+			props := search["inputSchema"].(map[string]any)["properties"].(map[string]any)
+			props["readTop"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 2,
+				"description": "Also fetch short original body excerpts for the first one or two distinct public result URLs, concurrently via direct HTTP. Use for focused queries. Only successful readable excerpts can verify facts; inspect other results with the page reader as needed."}
+		}
+		tools = append(tools, search)
 	}
 	if s.webReadToolAvailable() {
 		tools = append(tools, s.webReadThreadTool())

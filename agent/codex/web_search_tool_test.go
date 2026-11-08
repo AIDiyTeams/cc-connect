@@ -421,3 +421,32 @@ func TestWebSearchCacheStaysBounded(t *testing.T) {
 		t.Fatalf("size=%d oldestKept=%v newestKept=%v", size, oldestKept, newestKept)
 	}
 }
+
+func TestResearchSearchCanReturnBoundedOriginalPagesWithCachedIndex(t *testing.T) {
+	s := webReadTestSession(t, "process.stdout.write(process.argv.slice(2).join(' '))")
+	s.runtime.ToolProfile = core.ToolProfilePublicResearch
+	writeWebSearchConfig(t, "BRAVE_API_KEY=test\nWEB_SEARCH_PROVIDERS=brave\n")
+	query := "two original public pages"
+	key := webSearchCacheKey(query, webSearchDefaultLimit)
+	rememberWebSearch(key, webSearchCacheEntry{at: time.Now(), provider: "brave", response: webSearchResponse{
+		Items: []webSearchItem{{URL: "http://127.0.0.1/p"}, {URL: "https://example.com/a"}, {URL: "https://example.com/a#part"}, {URL: "https://example.org/b"}, {URL: "https://example.net/c"}},
+	}})
+	t.Cleanup(resetWebSearchCache)
+	args := map[string]any{"query": query, "readTop": float64(2)}
+	out, err := s.searchWeb(args)
+	if err != nil || !strings.HasSuffix(out, "--render=never --max-chars=3000 https://example.com/a https://example.org/b") {
+		t.Fatalf("unexpected read targets: %s / %v", out, err)
+	}
+	if len(webInventorySlots) != 0 {
+		t.Fatal("the direct-HTTP slot did not release")
+	}
+	args["readTop"] = float64(3)
+	if _, err := s.searchWeb(args); err == nil {
+		t.Fatal("unbounded read accepted")
+	}
+	s.runtime.ToolProfile = ""
+	args["readTop"] = float64(1)
+	if _, err := s.searchWeb(args); err == nil {
+		t.Fatal("an unadvertised read outside the research profile was accepted")
+	}
+}

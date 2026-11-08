@@ -256,25 +256,49 @@ func (s *appServerSession) searchWeb(arguments map[string]any) (string, error) {
 	if requested, ok := nonNegativeInt(arguments["limit"]); ok && requested > 0 {
 		limit = min(requested, webSearchMaxLimit)
 	}
+	readTop := 0
+	if value, requested := arguments["readTop"]; requested {
+		n, valid := nonNegativeInt(value)
+		if !valid || n < 1 || n > 2 || !s.publicResearch() || !s.webReadToolAvailable() {
+			return "", errors.New("readTop requires public research, an installed reader and a count of 1 or 2")
+		}
+		readTop = n
+	}
+	response, provider, err := s.lookupWeb(query, limit)
+	if err != nil {
+		return "", err
+	}
+	if response == nil {
+		return "[Web search results]\nQuery: " + query + "\nNo results. Try other words, a broader query, or the language the sources are written in.", nil
+	}
+	results := formatWebSearchResults(query, provider, response)
+	if readTop > 0 {
+		results += "\n\n" + s.readSearchResults(response.Items, readTop)
+	}
+	return results, nil
+}
+
+// Release the search slot before any optional original-page reads.
+func (s *appServerSession) lookupWeb(query string, limit int) (*webSearchResponse, string, error) {
 	config, err := loadWebSearchConfig()
 	if err != nil {
-		return "", errors.New("web search is not available right now")
+		return nil, "", errors.New("web search is not available right now")
 	}
 	key := webSearchCacheKey(query, limit)
 	if entry, ok := cachedWebSearch(key, time.Now()); ok {
 		age := time.Since(entry.at).Round(time.Minute)
 		response := entry.response
 		response.Metadata.LatencyMs = 0
-		return formatWebSearchResults(query, fmt.Sprintf("%s, searched %s ago", entry.provider, age), &response), nil
+		return &response, fmt.Sprintf("%s, searched %s ago", entry.provider, age), nil
 	}
 
 	select {
 	case webSearchSlots <- struct{}{}:
 		defer func() { <-webSearchSlots }()
 	case <-time.After(webSearchQueueWait):
-		return "", errors.New("web search is busy; try again shortly")
+		return nil, "", errors.New("web search is busy; try again shortly")
 	case <-s.ctx.Done():
-		return "", s.ctx.Err()
+		return nil, "", s.ctx.Err()
 	}
 
 	var failures []string
@@ -292,17 +316,17 @@ func (s *appServerSession) searchWeb(arguments map[string]any) (string, error) {
 		}
 		if len(response.Items) > 0 {
 			rememberWebSearch(key, webSearchCacheEntry{provider: provider, response: *response, at: time.Now()})
-			return formatWebSearchResults(query, provider, response), nil
+			return response, provider, nil
 		}
 		answered = true
 	}
 	if s.ctx.Err() != nil {
-		return "", s.ctx.Err()
+		return nil, "", s.ctx.Err()
 	}
 	if answered {
-		return "[Web search results]\nQuery: " + query + "\nNo results. Try other words, a broader query, or the language the sources are written in.", nil
+		return nil, "", nil
 	}
-	return "", fmt.Errorf("web search failed: %s", limitRunes(strings.Join(failures, "; "), 400))
+	return nil, "", fmt.Errorf("web search failed: %s", limitRunes(strings.Join(failures, "; "), 400))
 }
 
 func webSearchAttempt(parent context.Context, config webSearchConfig, provider, query string, limit int) (*webSearchResponse, error) {
