@@ -117,7 +117,7 @@ func (s *appServerSession) supplementFirstVisitSearch(query string, limit int) (
 		}
 		return nil
 	}
-	args := map[string]any{"query": query, "max_results": limit, "search_depth": "basic"}
+	args := map[string]any{"body": map[string]any{"query": query, "max_results": limit, "search_depth": "basic"}}
 	input := map[string]any{"operationId": "post_tavily_search", "arguments": args}
 	var quote struct {
 		ContractRevision string

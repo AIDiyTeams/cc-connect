@@ -82,7 +82,7 @@ func (s *appServerSession) applyPublicResearchProfile(params, config map[string]
 	if s.webSearchToolAvailable() {
 		search := webSearchDynamicTool()
 		if s.firstVisitSearch() {
-			search["description"] = "Search DeepSeek first (query up to 128 characters). Verify claims using original pages. If initial sources do not establish a material fact, refine that question and set supplement=true to search AIsa/Tavily. A snippet is not verification."
+			search["description"] = "Search DeepSeek first (query up to 128 characters). Verify claims using original pages. For an unresolved fact (e.g. only a mirrored profile, no direct contact route, or an incomplete answer), set supplement=true on a focused AIsa/Tavily follow-up or omit the unsupported claim. Skip supplementation when original sources suffice."
 			props := search["inputSchema"].(map[string]any)["properties"].(map[string]any)
 			props["query"].(map[string]any)["maxLength"] = 128
 			props["supplement"] = map[string]any{"type": "boolean", "description": "Use the secondary index only for an unresolved evidence gap."}

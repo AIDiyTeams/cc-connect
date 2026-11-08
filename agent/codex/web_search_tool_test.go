@@ -468,10 +468,10 @@ func TestFirstVisitSupplementUsesQuotedScopedReceiptWithoutSharingPrimaryCache(t
 const input=JSON.parse(readFileSync(0,'utf8')), action=process.argv[2];
 if (!readFileSync(process.env.TOMAKO_TASK_ENV_FILE,'utf8').includes('cmsg-a')) process.exit(1);
 if(action==='describe'||action==='execute'){
- if(input.operationId!=='post_tavily_search'||input.arguments.query!=='target'||input.arguments.max_results!==3||input.arguments.search_depth!=='basic')process.exit(2);
+ if(input.operationId!=='post_tavily_search'||input.arguments.body?.query!=='target'||input.arguments.body.max_results!==3||input.arguments.body.search_depth!=='basic')process.exit(2);
 }
-if(action==='describe') console.log(JSON.stringify({price:{currency:'USD',amount_usd:0.008},contractRevision:'r'}));
-else if(action==='execute' && input.maxPriceUsd===0.008 && input.contractRevision==='r' && input.requestId.startsWith('first-search-'))console.log(JSON.stringify({status:'SUCCEEDED',resultId:'abc'}));
+if(action==='describe') console.log(JSON.stringify({price:{currency:'USD',amount_usd:0.016},contractRevision:'r'}));
+else if(action==='execute' && input.maxPriceUsd===0.016 && input.contractRevision==='r' && input.requestId.startsWith('first-search-'))console.log(JSON.stringify({status:'SUCCEEDED',resultId:'abc'}));
 else if(action==='read' && input.resultId==='abc' && input.pointer==='/data/results' && input.limit===3) console.log(JSON.stringify({status:'SUCCEEDED',data:[{title:'Original',url:'https://example.com/report',content:'Original text'}]}));
 else process.exit(3);`
 	if err := os.WriteFile(filepath.Join(dir, "tomako-external-data.mjs"), []byte(source), 0600); err != nil {
