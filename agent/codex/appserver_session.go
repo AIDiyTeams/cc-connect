@@ -922,7 +922,7 @@ func (s *appServerSession) SetSessionRuntime(runtime core.SessionRuntime) error 
 	}
 	s.taskRuntimeEnvFile = envFile
 	searchChanged := s.webSearch != normalizeWebSearch(runtime.WebSearch)
-	profileChanged := s.runtime.Unattended() != runtime.Unattended() || s.runtime.ToolProfile != runtime.ToolProfile
+	profileChanged := s.runtime.Unattended() != runtime.Unattended() || s.runtime.ToolProfile != runtime.ToolProfile || s.runtime.FirstVisitSearch != runtime.FirstVisitSearch
 	previousReasoningCapability := needsReasoningCapability(s.model, s.effort)
 	s.runtime = runtime
 	// A CMO turn may need the team coordination fallback below its policy.

@@ -261,7 +261,8 @@ type SessionRuntime struct {
 	ExecutionProfile string `json:"execution_profile,omitempty"`
 	// ToolProfile is a trusted control-plane capability selection, never inferred
 	// from user text. Public research exposes search/reading without workbench actions.
-	ToolProfile string `json:"tool_profile,omitempty"`
+	ToolProfile      string `json:"tool_profile,omitempty"`
+	FirstVisitSearch bool   `json:"first_visit_search,omitempty"`
 }
 
 const ToolProfilePublicResearch = "public_research"

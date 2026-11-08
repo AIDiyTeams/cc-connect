@@ -450,3 +450,46 @@ func TestResearchSearchCanReturnBoundedOriginalPagesWithCachedIndex(t *testing.T
 		t.Fatal("an unadvertised read outside the research profile was accepted")
 	}
 }
+
+func TestFirstVisitSupplementUsesQuotedScopedReceiptWithoutSharingPrimaryCache(t *testing.T) {
+	s := webSearchTestSession(t)
+	s.runtime.FirstVisitSearch = true
+	s.runtime.ToolProfile = core.ToolProfilePublicResearch
+	s.runtime.ImageCapabilityToken = "fake-image-token"
+	path, err := updateTaskRuntimeEnv("", s.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.taskRuntimeEnvFile = path
+	t.Cleanup(func() { removeTaskRuntimeEnv(path) })
+	dir := t.TempDir()
+	t.Setenv("SKILLS_OL_DIR", dir)
+	source := `import {readFileSync} from 'node:fs';
+const input=JSON.parse(readFileSync(0,'utf8')), action=process.argv[2];
+if (!readFileSync(process.env.TOMAKO_TASK_ENV_FILE,'utf8').includes('cmsg-a')) process.exit(1);
+if(action==='describe'||action==='execute'){
+ if(input.operationId!=='post_tavily_search'||input.arguments.query!=='target'||input.arguments.max_results!==3||input.arguments.search_depth!=='basic')process.exit(2);
+}
+if(action==='describe') console.log(JSON.stringify({price:{currency:'USD',amount_usd:0.008},contractRevision:'r'}));
+else if(action==='execute' && input.maxPriceUsd===0.008 && input.contractRevision==='r' && input.requestId.startsWith('first-search-'))console.log(JSON.stringify({status:'SUCCEEDED',resultId:'abc'}));
+else if(action==='read' && input.resultId==='abc' && input.pointer==='/data/results' && input.limit===3) console.log(JSON.stringify({status:'SUCCEEDED',data:[{title:'Original',url:'https://example.com/report',content:'Original text'}]}));
+else process.exit(3);`
+	if err := os.WriteFile(filepath.Join(dir, "tomako-external-data.mjs"), []byte(source), 0600); err != nil {
+		t.Fatal(err)
+	}
+	key := "deepseek:" + webSearchCacheKey("target", 3)
+	primary := webSearchResponse{Items: []webSearchItem{{URL: "https://example.com/primary"}}}
+	rememberWebSearch(key, webSearchCacheEntry{provider: "deepseek", response: primary, at: time.Now()})
+	first, err := s.searchWeb(map[string]any{"query": "target", "limit": float64(3)})
+	if err != nil || !strings.Contains(first, "https://example.com/primary") {
+		t.Fatalf("primary: %q, %v", first, err)
+	}
+	got, err := s.searchWeb(map[string]any{"query": "target", "limit": float64(3), "supplement": true})
+	if err != nil || !strings.Contains(got, "aisa/tavily") || !strings.Contains(got, "https://example.com/report") {
+		t.Fatalf("supplement: %q, %v", got, err)
+	}
+	s.runtime.FirstVisitSearch = false
+	if _, err := s.searchWeb(map[string]any{"query": "target", "supplement": true}); err == nil {
+		t.Fatal("supplement accepted outside first visit")
+	}
+}

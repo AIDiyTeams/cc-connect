@@ -210,6 +210,9 @@ func (s *appServerSession) baseInstructionsOverride() string {
 	if !managed {
 		return ""
 	}
+	if s.firstVisitSearch() {
+		return publicResearchBaseInstructions + "\n" + firstVisitSearchMarker
+	}
 	if s.publicResearch() {
 		return publicResearchBaseInstructions
 	}

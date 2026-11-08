@@ -28,7 +28,7 @@ Codex 图片工具按工作依赖选择 `waitForResult`，不按图片数量强�
 
 Successful `register_ack` responses advertise `runtime_capabilities: ["output_schema_v1", "turn_budget_v1"]`.
 
-Application-managed public research can supply `runtime.tool_profile="public_research"`.
+Application-managed public research can supply `runtime.tool_profile="public_research"`. Within that profile, Portal sets `first_visit_search=true` only for compact onboarding research. This selects DeepSeek public search and exposes an optional task-scoped secondary search for missing evidence.
 The profile is recorded in the thread's base-instruction metadata. Entering or leaving it starts a new thread even after an app-server restart, because Codex resumes the original dynamic tools. Research-to-review resumes retain the same evidence history; ordinary execution uses the current Portal conversation context and its full tool scope.
 It selects platform search/page reading and a focused evidence-research context, omitting the
 workbench Skill catalog, workspace documents, shell/plan/media/team tools and user questions.

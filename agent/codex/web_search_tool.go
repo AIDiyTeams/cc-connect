@@ -212,6 +212,9 @@ func (s *appServerSession) webSearchToolAvailable() bool {
 	if !conversation {
 		return false
 	}
+	if s.firstVisitSearch() {
+		return true
+	}
 	if _, err := loadWebSearchConfig(); err != nil {
 		if os.Getenv(webSearchConfigEnv) != "" {
 			slog.Warn("codex: web search is configured but unusable", "error", err)
@@ -264,7 +267,12 @@ func (s *appServerSession) searchWeb(arguments map[string]any) (string, error) {
 		}
 		readTop = n
 	}
-	response, provider, err := s.lookupWeb(query, limit)
+	supplement, requested := arguments["supplement"]
+	useSupplement, valid := supplement.(bool)
+	if requested && (!s.firstVisitSearch() || !valid) {
+		return "", errors.New("supplement requires a first-visit research turn and boolean value")
+	}
+	response, provider, err := s.lookupWeb(query, limit, useSupplement)
 	if err != nil {
 		return "", err
 	}
@@ -279,13 +287,23 @@ func (s *appServerSession) searchWeb(arguments map[string]any) (string, error) {
 }
 
 // Release the search slot before any optional original-page reads.
-func (s *appServerSession) lookupWeb(query string, limit int) (*webSearchResponse, string, error) {
-	config, err := loadWebSearchConfig()
-	if err != nil {
-		return nil, "", errors.New("web search is not available right now")
-	}
+func (s *appServerSession) lookupWeb(query string, limit int, supplement bool) (*webSearchResponse, string, error) {
+	var config webSearchConfig
 	key := webSearchCacheKey(query, limit)
-	if entry, ok := cachedWebSearch(key, time.Now()); ok {
+	first := s.firstVisitSearch()
+	if first {
+		if len([]rune(query)) > 128 {
+			return nil, "", errors.New("first visit search query must be at most 128 characters")
+		}
+		key = "deepseek:" + key
+	} else {
+		var err error
+		config, err = loadWebSearchConfig()
+		if err != nil {
+			return nil, "", errors.New("web search is not available right now")
+		}
+	}
+	if entry, ok := cachedWebSearch(key, time.Now()); ok && !supplement {
 		age := time.Since(entry.at).Round(time.Minute)
 		response := entry.response
 		response.Metadata.LatencyMs = 0
@@ -301,6 +319,17 @@ func (s *appServerSession) lookupWeb(query string, limit int) (*webSearchRespons
 		return nil, "", s.ctx.Err()
 	}
 
+	if first {
+		if supplement {
+			response, err := s.supplementFirstVisitSearch(query, limit)
+			return response, "aisa/tavily", err
+		}
+		response, err := deepSeekSearch(s.ctx, query, limit)
+		if err == nil && len(response.Items) > 0 {
+			rememberWebSearch(key, webSearchCacheEntry{provider: "deepseek", response: *response, at: time.Now()})
+		}
+		return response, "deepseek", err
+	}
 	var failures []string
 	answered := false
 	for _, provider := range config.Providers {
