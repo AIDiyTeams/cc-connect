@@ -30,6 +30,17 @@ func TestBrowserHelpRequest_BuildsOneQuestionWithTheStep(t *testing.T) {
 	}
 }
 
+func TestBrowserPairingNeedsNoWebsite(t *testing.T) {
+	for _, sites := range []any{nil, []any{""}, []any{"example.com"}} {
+		action, question, err := browserHelpRequest(map[string]any{
+			"kind": "connect_local_chrome", "browser": "local-chrome", "message": "Connect your browser.", "sites": sites,
+		})
+		if err != nil || action.Site != "Chrome" || len(action.Sites) != 0 || question.Options[0].ID != browserHelpDoneID {
+			t.Fatalf("pairing without a known website: %+v, %v", action, err)
+		}
+	}
+}
+
 func TestBrowserHelpRequest_RejectsInvalidSteps(t *testing.T) {
 	cases := []map[string]any{
 		{"kind": "pay", "site": "a.com", "browser": "cloud", "message": "m"},

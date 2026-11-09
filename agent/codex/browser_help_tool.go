@@ -38,11 +38,11 @@ func browserHelpDynamicTool() map[string]any {
 	}
 	return map[string]any{"type": "function", "name": browserHelpToolName, "deferLoading": false,
 		"description": "Ask the user for a browser step they alone can do. For a local page, login or unfinished draft, use tomako_browser status directly. If that path is needed and NOT_PAIRED, call this tool immediately with kind=connect_local_chrome, browser=local-chrome. A cloud login cannot access an unsaved local draft. Respect the selected path and identity; use available public sources or an equivalent authorized session when sufficient. For sign_in, confirm login is missing and list all sites once; local cards prepare their HTTPS pages and show opening receipts, not proof of login. For private inputs, CAPTCHA, accepting terms or complex controls use take_over; for ordinary missing fields use tomako_request_form. Confirm control(human=true) before cloud handoff. Ask directly in the user's language, stating what this step unlocks. The card stays open without pausing other work. After handback reclaim cloud control and verify the page before continuing. If declined, deliver what you can and identify the missing part. Ask if sign-in identity is unclear. Never claim an opened page without a receipt.",
-		"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"kind", "sites", "browser", "message"},
+		"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"kind", "browser", "message"},
 			"properties": map[string]any{
 				"kind": map[string]any{"type": "string", "enum": []string{"sign_in", "connect_local_chrome", "take_over"}},
 				"sites": map[string]any{"type": "array", "minItems": 1, "maxItems": browserHelpMaxSites, "items": text(120, "A website or service, e.g. its domain."),
-					"description": "Every website or service this request needs the step on, e.g. their domains."},
+					"description": "Required for sign_in or take_over. Omit for connect_local_chrome, which pairs the browser itself."},
 				"browser": map[string]any{"type": "string", "enum": []string{"local-chrome", "cloud"}, "description": "Where the user does the step; respect their selected path and keep this conversation's browser."},
 				"message": text(300, "One or two sentences to the user, in the user's language, describing things as they are: only the step the user needs to do and what it unlocks in their request. Do not claim pages are already opened or accounts are signed in: the system opens local sign-in sites and the card displays each actual page receipt separately."),
 			}},
@@ -59,6 +59,11 @@ func browserHelpRequest(arguments map[string]any) (core.InteractionUserAction, c
 	raw, _ := arguments["sites"].([]any)
 	if single := strings.TrimSpace(stringArg(arguments["site"])); single != "" {
 		raw = append([]any{single}, raw...)
+	}
+	// Pairing applies to Chrome itself. Older Web clients require a non-empty
+	// display target on every card, including ones without a website.
+	if action.Kind == "connect_local_chrome" {
+		raw = []any{"Chrome"}
 	}
 	seen := map[string]bool{}
 	for _, value := range raw {
