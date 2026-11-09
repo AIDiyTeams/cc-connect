@@ -18,6 +18,7 @@ func needsReasoningCapability(model, effort string) bool {
 	case "gpt-5.6-sol", "tomako/gpt-5.6-sol", "gpt-6-astra", "tomako/gpt-6-astra",
 		"openrouter/openai/gpt-6-astra", "openrouter/openai/gpt-6.1-sol",
 		"gpt-6.1-sol", "tomako/gpt-6.1-sol", "deepseek-v4-flash", "tomako/deepseek-v4-flash",
+		"gpt-6.1-terra", "tomako/gpt-6.1-terra", "openrouter/openai/gpt-6.1-terra",
 		"gpt-6-sol", "tomako/gpt-6-sol", "gpt-6-luna", "tomako/gpt-6-luna", "openrouter/openai/gpt-6-luna",
 		"deepseek-v4-flash-vision-exp", "tomako/deepseek-v4-flash-vision-exp":
 		return true
