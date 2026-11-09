@@ -31,6 +31,7 @@ func TestReasoningCapabilityIsBoundToKnownModelAndRequestedEffort(t *testing.T) 
 		{"other/gpt-6-sol", "medium", false},
 		{"tomako/gpt-6-luna", "medium", true},
 		{"gpt-6-luna", "medium", true},
+		{"openrouter/openai/gpt-6-luna", "max", true},
 		{"tomako/gpt-6-luna", "", false},
 		{"other/gpt-6-luna", "medium", false},
 		{"tomako/deepseek-v4-flash", "high", true},
