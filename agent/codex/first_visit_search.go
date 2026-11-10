@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,7 +70,7 @@ func (s *appServerSession) supplementFirstVisitSearch(query string, limit int) (
 		cmd.WaitDelay = time.Second
 		raw, err := cmd.Output()
 		if err != nil {
-			return attemptError(webSearchProviderAIsa, webSearchUnavailable, 0, "AIsa %s failed through the task capability: %v", action, err)
+			return aisaScriptError(action, err)
 		}
 		if err = json.Unmarshal(raw, result); err != nil {
 			return fmt.Errorf("AIsa %s returned an unreadable receipt", action)
@@ -118,4 +120,28 @@ func (s *appServerSession) supplementFirstVisitSearch(query string, limit int) (
 		}
 	}
 	return response, nil
+}
+
+// aisaStatus is the HTTP status the external-data client prints for a refused
+// Portal request, e.g. "第三方数据请求失败 (503): AIsa MCP 工具执行错误".
+var aisaStatus = regexp.MustCompile(`\((\d{3})\)`)
+
+// aisaScriptError keeps the client's own reason (Portal's fixed copy) so the
+// bridge log, the Agent and the search ledger say why AIsa failed instead of
+// only "exit status 1", and classifies it by the reported HTTP status.
+func aisaScriptError(action string, err error) *webSearchAttemptError {
+	reason := ""
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		reason = limitRunes(strings.Join(strings.Fields(string(exit.Stderr)), " "), 240)
+	}
+	if reason == "" {
+		return attemptError(webSearchProviderAIsa, webSearchUnavailable, 0, "AIsa %s failed through the task capability: %v", action, err)
+	}
+	category, status := webSearchUnavailable, 0
+	if match := aisaStatus.FindStringSubmatch(reason); match != nil {
+		status, _ = strconv.Atoi(match[1])
+		category = webSearchHTTPCategory(status)
+	}
+	return attemptError(webSearchProviderAIsa, category, status, "AIsa %s failed through the task capability: %s", action, reason)
 }

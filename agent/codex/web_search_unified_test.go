@@ -316,3 +316,37 @@ func (s *appServerSession) baseInstructionsOverrideForTest() string {
 	s.runtimeMu.Unlock()
 	return s.baseInstructionsOverride()
 }
+
+// Regression for R1 arm C: every supplement failed as "exit status 1" and the
+// reason Portal returned (HTTP 503 from the AIsa quote) was lost.
+func TestAIsaSupplementFailureKeepsThePortalReason(t *testing.T) {
+	useDeepSeekOnly(t)
+	s := webSearchTestSession(t)
+	s.runtime.ToolProfile = core.ToolProfilePublicResearch
+	s.runtime.ResearchSearchSupplement = true
+	fakeAIsaScript(t, s, "research-search-")
+	failing := `process.stderr.write("第三方数据请求失败 (503): AIsa MCP 工具执行错误\n"); process.exitCode = 1;`
+	if err := os.WriteFile(filepath.Join(os.Getenv("SKILLS_OL_DIR"), "tomako-external-data.mjs"), []byte(failing), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.searchWeb(map[string]any{"query": "gap", "supplement": true})
+	if err == nil || !strings.Contains(err.Error(), "AIsa describe failed through the task capability: 第三方数据请求失败 (503): AIsa MCP 工具执行错误") {
+		t.Fatalf("err=%v", err)
+	}
+	receipts := drainUsageReceipts(s)
+	if len(receipts) != 1 || receipts[0]["error_category"] != "unavailable" || receipts[0]["http_status"] != 503 {
+		t.Fatalf("receipts=%+v", receipts)
+	}
+
+	refused := `process.stderr.write("第三方数据请求失败 (402): AIsa HTTP 402\n"); process.exitCode = 1;`
+	if err := os.WriteFile(filepath.Join(os.Getenv("SKILLS_OL_DIR"), "tomako-external-data.mjs"), []byte(refused), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.searchWeb(map[string]any{"query": "gap two", "supplement": true}); err == nil {
+		t.Fatal("a refused supplement succeeded")
+	}
+	receipts = drainUsageReceipts(s)
+	if len(receipts) != 1 || receipts[0]["error_category"] != "payment_required" || receipts[0]["alert"] != true {
+		t.Fatalf("an unpaid AIsa account did not raise the payment alert: %+v", receipts)
+	}
+}
