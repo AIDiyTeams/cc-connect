@@ -377,3 +377,37 @@ func TestImageToolCannotUploadHiddenRuntimeOrOtherSessionFiles(t *testing.T) {
 		t.Fatal("followed a swapped parent symlink")
 	}
 }
+
+func TestImageToolRequiresTheJudgmentBehindThePromptAndForwardsItUnchanged(t *testing.T) {
+	schema := imageDynamicTools()[0]["inputSchema"].(map[string]any)
+	if !strings.Contains(strings.Join(schema["required"].([]string), ","), "brief") {
+		t.Fatal("the judgment written in guidance alone was skipped by every model tested; the schema must require it")
+	}
+	brief := schema["properties"].(map[string]any)["brief"].(map[string]any)
+	if got := strings.Join(brief["required"].([]string), ","); got != "placement,job,grounding,brandRecognition,textLanguage" {
+		t.Fatalf("brief fields = %s", got)
+	}
+	if brief["additionalProperties"] != false {
+		t.Fatal("brief must not accept fields the backend rejects")
+	}
+	value := map[string]any{"placement": "X feed", "job": "announce", "grounding": "logo ref 1",
+		"brandRecognition": "logo", "textLanguage": "en"}
+	s := imageToolTestSession(t, "")
+	cmd, cancel, cleanup, err := s.prepareImageTool("tomako_generate_image", map[string]any{
+		"operation": "create", "prompt": "asset", "deliveryRole": "DELIVERABLE", "brief": value})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	defer cleanup()
+	input, _ := io.ReadAll(cmd.Stdin)
+	var call map[string]any
+	if json.Unmarshal(input, &call) != nil {
+		t.Fatal("invalid staged call")
+	}
+	got, _ := json.Marshal(call["arguments"].(map[string]any)["brief"])
+	want, _ := json.Marshal(value)
+	if string(got) != string(want) {
+		t.Fatalf("brief forwarded as %s", got)
+	}
+}
