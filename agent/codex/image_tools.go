@@ -45,6 +45,24 @@ const imageFramingInstructions = "Tomako image framing: when the user specifies 
 
 const imageSchedulingInstructions = "Choose waiting by dependency, not image count: set waitForResult=false when independent authorized work can proceed while an image generates, including preparing editable text/layout for a single supporting image. Then use tomako_image_status with the accepted id before final composition or delivery. Keep the default wait for an image-only deliverable or when the next step requires the actual image. Submit independent images before waiting; an image that uses another generated result must wait for that result. Pending, failed or unconfirmed results never authorize resubmission or claims of completion."
 
+// The judgment a designer makes before writing an image prompt. The Agent fills it in its own words;
+// the backend only checks that it is complete. Required so the order of thought is not optional.
+func imageBriefSchema() map[string]any {
+	field := func(description string) map[string]any {
+		return map[string]any{"type": "string", "minLength": 1, "description": description}
+	}
+	return map[string]any{"type": "object", "additionalProperties": false,
+		"description": "Decide these before writing prompt; see the create-image skill.",
+		"required":    []string{"placement", "job", "grounding", "brandRecognition", "textLanguage"},
+		"properties": map[string]any{
+			"placement":        field("Where and how the image is seen: platform, position, displayed size, how long a viewer looks."),
+			"job":              field("What the image must do for that viewer: one thing to understand, or brand recognition/mood. It need not illustrate the whole text."),
+			"grounding":        field("Which real materials (by referenceImages position) and verified facts the concrete content comes from, and what stays general because no real material exists."),
+			"brandRecognition": field("How a viewer will know whose image this is (which supplied brand references are used), or why it should not carry the brand."),
+			"textLanguage":     field("Language of any text in the image, chosen for the audience where it is published, not the language of the request; none when there is no text."),
+		}}
+}
+
 func imageDynamicTools() []map[string]any {
 	text := map[string]any{"type": "string", "minLength": 1}
 	slot := func(description string) map[string]any {
@@ -54,8 +72,9 @@ func imageDynamicTools() []map[string]any {
 		{"type": "function", "name": "tomako_generate_image", "deferLoading": false,
 			"description": "Preferred Tomako image generation/edit entry, including explicit model choices. Follow the shared image policy and edit-image skill. One call submits one image; put the edited source first. Discussion does not authorize generation. For unsupported options use the shared helper. Does not attach images to documents.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false,
-				"required": []string{"operation", "prompt", "deliveryRole"}, "properties": map[string]any{
+				"required": []string{"operation", "brief", "prompt", "deliveryRole"}, "properties": map[string]any{
 					"operation":          map[string]any{"type": "string", "enum": []string{"create", "edit", "variation"}},
+					"brief":              imageBriefSchema(),
 					"model":              map[string]any{"type": "string", "enum": []string{"tomako-image-fast", "tomako-image-standard", "tomako-image-precision"}, "description": "User-selected image capability: Nano Banana 2 Lite=fast, Nano Banana 2=standard, GPT Image=precision. Omit to retain the platform default."},
 					"prompt":             text,
 					"deliveryRole":       map[string]any{"type": "string", "enum": []string{"DELIVERABLE", "SUPPORTING"}, "description": "按用户最终目标声明用途：独立交付的图片用 DELIVERABLE；用于可编辑画布、PPT、文章、视频等最终作品的底图、配图或装饰用 SUPPORTING。中间素材即使先生成成功，也不单独成为成果；不要等最终作品保存后才区分。"},
