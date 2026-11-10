@@ -263,6 +263,11 @@ type SessionRuntime struct {
 	// from user text. Public research exposes search/reading without workbench actions.
 	ToolProfile      string `json:"tool_profile,omitempty"`
 	FirstVisitSearch bool   `json:"first_visit_search,omitempty"`
+	// ResearchSearchSupplement lets an ordinary public-research turn (not a
+	// first visit) make explicit supplement=true searches through the task's
+	// AIsa capability. Regular searches keep the research route. Trusted
+	// control-plane metadata only; ignored outside public research.
+	ResearchSearchSupplement bool `json:"research_search_supplement,omitempty"`
 }
 
 const ToolProfilePublicResearch = "public_research"

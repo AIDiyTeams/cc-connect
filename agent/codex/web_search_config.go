@@ -32,11 +32,16 @@ const (
 	webSearchScenarioResearch             webSearchScenario = "research"
 	webSearchScenarioFirstVisit           webSearchScenario = "first_visit"
 	webSearchScenarioFirstVisitSupplement webSearchScenario = "first_visit_supplement"
+	webSearchScenarioResearchSupplement   webSearchScenario = "research_supplement"
 )
+
+func (s webSearchScenario) supplement() bool {
+	return s == webSearchScenarioFirstVisitSupplement || s == webSearchScenarioResearchSupplement
+}
 
 var webSearchScenarios = []webSearchScenario{
 	webSearchScenarioConversation, webSearchScenarioResearch,
-	webSearchScenarioFirstVisit, webSearchScenarioFirstVisitSupplement,
+	webSearchScenarioFirstVisit, webSearchScenarioFirstVisitSupplement, webSearchScenarioResearchSupplement,
 }
 
 const (
@@ -45,13 +50,15 @@ const (
 	webSearchProviderAIsa     = "aisa"
 )
 
-// Defaults: DeepSeek answers every scenario; the explicit first-visit
-// supplement goes to AIsa/Tavily, which is billed through the task capability.
+// Defaults: DeepSeek answers every scenario; the explicit supplement of a first
+// visit or of a supplement-enabled research turn goes to AIsa/Tavily, which is
+// billed through the task capability.
 var webSearchDefaultChains = map[webSearchScenario][]string{
 	webSearchScenarioConversation:         {webSearchProviderDeepSeek},
 	webSearchScenarioResearch:             {webSearchProviderDeepSeek},
 	webSearchScenarioFirstVisit:           {webSearchProviderDeepSeek},
 	webSearchScenarioFirstVisitSupplement: {webSearchProviderAIsa},
+	webSearchScenarioResearchSupplement:   {webSearchProviderAIsa},
 }
 
 type webSearchConfig struct {
@@ -176,7 +183,7 @@ func loadWebSearchConfig() (webSearchConfig, error) {
 	shared := parseWebSearchChain(values["SEARCH_PROVIDERS"])
 	for _, scenario := range webSearchScenarios {
 		chain := parseWebSearchChain(values["SEARCH_PROVIDERS_"+strings.ToUpper(string(scenario))])
-		if len(chain) == 0 && scenario != webSearchScenarioFirstVisitSupplement {
+		if len(chain) == 0 && !scenario.supplement() {
 			chain = shared
 		}
 		if len(chain) > 0 {
@@ -202,10 +209,11 @@ func loadWebSearchConfig() (webSearchConfig, error) {
 var errWebSearchUnconfigured = errors.New("web search configuration has no credentials for its providers")
 
 // usableChain returns the providers of scenario that can be called now.
-func (c webSearchConfig) usableChain(scenario webSearchScenario, firstVisitAuthorized bool) []string {
+// AIsa needs a turn whose task authority allows a supplement.
+func (c webSearchConfig) usableChain(scenario webSearchScenario, supplementAuthorized bool) []string {
 	var usable []string
 	for _, provider := range c.chain(scenario) {
-		if provider == webSearchProviderAIsa && !firstVisitAuthorized {
+		if provider == webSearchProviderAIsa && !supplementAuthorized {
 			continue
 		}
 		if c.hasCredentials(provider) {

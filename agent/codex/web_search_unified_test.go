@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -206,4 +208,111 @@ func TestWebSearchFirstVisitUsesDeepSeekFromTheUnifiedEntry(t *testing.T) {
 	if receipts := drainUsageReceipts(s); len(receipts) != 1 || receipts[0]["scenario"] != "first_visit" {
 		t.Fatalf("receipts=%+v", receipts)
 	}
+}
+
+// fakeAIsaScript installs a Skills external-data client that answers a Tavily
+// search through AIsa only for the expected request id prefix.
+func fakeAIsaScript(t *testing.T, s *appServerSession, requestPrefix string) {
+	t.Helper()
+	s.runtime.ImageCapabilityToken = "fake-image-token"
+	path, err := updateTaskRuntimeEnv("", s.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.taskRuntimeEnvFile = path
+	t.Cleanup(func() { removeTaskRuntimeEnv(path) })
+	dir := t.TempDir()
+	t.Setenv("SKILLS_OL_DIR", dir)
+	source := `import {readFileSync} from 'node:fs';
+const input=JSON.parse(readFileSync(0,'utf8')), action=process.argv[2];
+if(action==='describe') console.log(JSON.stringify({price:{currency:'USD',amount_usd:0.016},contractRevision:'r'}));
+else if(action==='execute' && input.requestId.startsWith('` + requestPrefix + `') && input.operationId==='post_tavily_search') console.log(JSON.stringify({status:'SUCCEEDED',resultId:'abc'}));
+else if(action==='read') console.log(JSON.stringify({status:'SUCCEEDED',data:[{title:'Secondary',url:'https://example.com/secondary',content:'found'}]}));
+else process.exit(3);`
+	if err := os.WriteFile(filepath.Join(dir, "tomako-external-data.mjs"), []byte(source), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResearchSearchSupplementFlagAllowsAIsaOnlyWhenRequested(t *testing.T) {
+	useDeepSeekOnly(t)
+	deepseek := fakeDeepSeekAPI(t, 200, `{"results":[{"url":"https://example.com/primary","title":"p","snippet":"p"}]}`)
+	s := webSearchTestSession(t)
+	s.runtime.ToolProfile = core.ToolProfilePublicResearch
+
+	// Without the flag an ordinary research turn refuses a supplement.
+	if _, err := s.searchWeb(map[string]any{"query": "gap", "supplement": true}); err == nil {
+		t.Fatal("supplement accepted without research_search_supplement")
+	}
+	params := map[string]any{}
+	s.applyPublicResearchProfile(params, map[string]any{})
+	if supplementAdvertised(params) {
+		t.Fatal("supplement advertised without the flag")
+	}
+
+	s.runtime.ResearchSearchSupplement = true
+	fakeAIsaScript(t, s, "research-search-")
+	params = map[string]any{}
+	s.applyPublicResearchProfile(params, map[string]any{})
+	if !supplementAdvertised(params) || !strings.HasSuffix(s.baseInstructionsOverrideForTest(), researchSupplementMarker) {
+		t.Fatal("the flagged research turn did not advertise supplement or pin its profile")
+	}
+	out, err := s.searchWeb(map[string]any{"query": "gap"})
+	if err != nil || !strings.Contains(out, "from deepseek") || len(*deepseek) != 1 {
+		t.Fatalf("regular search left the research route: %q %v", out, err)
+	}
+	out, err = s.searchWeb(map[string]any{"query": "gap", "supplement": true})
+	if err != nil || !strings.Contains(out, "aisa/tavily") || !strings.Contains(out, "https://example.com/secondary") || len(*deepseek) != 1 {
+		t.Fatalf("supplement: %q %v", out, err)
+	}
+	// More than one supplement is allowed in the same turn.
+	if out, err = s.searchWeb(map[string]any{"query": "another gap", "supplement": true}); err != nil || !strings.Contains(out, "aisa/tavily") {
+		t.Fatalf("second supplement: %q %v", out, err)
+	}
+	receipts := drainUsageReceipts(s)
+	if len(receipts) != 3 || receipts[0]["scenario"] != "research" || receipts[1]["scenario"] != "research_supplement" ||
+		receipts[1]["provider"] != "aisa" || receipts[2]["scenario"] != "research_supplement" {
+		t.Fatalf("receipts=%+v", receipts)
+	}
+	if _, priced := receipts[1]["cost_usd"]; priced {
+		t.Fatal("the AIsa supplement was priced in the search ledger")
+	}
+}
+
+func TestResearchSearchSupplementFlagIsIgnoredOutsideOrdinaryResearch(t *testing.T) {
+	useDeepSeekOnly(t)
+	s := webSearchTestSession(t)
+	s.runtime.ResearchSearchSupplement = true
+	if s.searchSupplementAllowed() {
+		t.Fatal("the flag opened a supplement outside public research")
+	}
+	if _, err := s.searchWeb(map[string]any{"query": "chat", "supplement": true}); err == nil {
+		t.Fatal("a conversation accepted a supplement")
+	}
+	// A first visit keeps its own scenario and request ids.
+	s.runtime.ToolProfile = core.ToolProfilePublicResearch
+	s.runtime.FirstVisitSearch = true
+	if s.researchSearchSupplement() || s.webSearchScenario(true) != webSearchScenarioFirstVisitSupplement {
+		t.Fatal("the research flag changed first-visit behaviour")
+	}
+}
+
+func supplementAdvertised(params map[string]any) bool {
+	tools, _ := params["dynamicTools"].([]map[string]any)
+	for _, tool := range tools {
+		if tool["name"] != webSearchToolName {
+			continue
+		}
+		props := tool["inputSchema"].(map[string]any)["properties"].(map[string]any)
+		_, ok := props["supplement"]
+		return ok
+	}
+	return false
+}
+
+func (s *appServerSession) baseInstructionsOverrideForTest() string {
+	s.runtimeMu.Lock()
+	s.runtime.DeveloperInstructions = "research"
+	s.runtimeMu.Unlock()
+	return s.baseInstructionsOverride()
 }

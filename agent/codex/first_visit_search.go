@@ -22,7 +22,12 @@ func (s *appServerSession) supplementFirstVisitSearch(query string, limit int) (
 	script := s.webReaderScript("tomako-external-data.mjs")
 	s.runtimeMu.RLock()
 	taskID := s.runtime.TaskID
-	authorized := s.runtime.FirstVisitSearch && s.runtime.ToolProfile == core.ToolProfilePublicResearch && taskID != ""
+	authorized := (s.runtime.FirstVisitSearch || s.runtime.ResearchSearchSupplement) &&
+		s.runtime.ToolProfile == core.ToolProfilePublicResearch && taskID != ""
+	requestPrefix := "first-search-"
+	if !s.runtime.FirstVisitSearch {
+		requestPrefix = "research-search-"
+	}
 	var authority []byte
 	var err error
 	if authorized {
@@ -88,7 +93,7 @@ func (s *appServerSession) supplementFirstVisitSearch(query string, limit int) (
 	}
 	input["contractRevision"] = quote.ContractRevision
 	input["maxPriceUsd"] = quote.Price.Amount
-	input["requestId"] = fmt.Sprintf("first-search-%x", sha256.Sum256([]byte(fmt.Sprintf("%s\n%s\n%d", taskID, strings.TrimSpace(query), limit))))
+	input["requestId"] = fmt.Sprintf(requestPrefix+"%x", sha256.Sum256([]byte(fmt.Sprintf("%s\n%s\n%d", taskID, strings.TrimSpace(query), limit))))
 	var receipt struct{ ResultID, Status string }
 	if err = call("execute", input, &receipt); err != nil {
 		return nil, err

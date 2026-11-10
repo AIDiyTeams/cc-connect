@@ -33,6 +33,23 @@ func (s *appServerSession) firstVisitSearch() bool {
 	return s.runtime.ToolProfile == core.ToolProfilePublicResearch && s.runtime.FirstVisitSearch
 }
 
+// researchSupplementMarker pins an ordinary research thread whose search tool
+// accepts supplement=true, so a resumed thread with the other tool shape restarts.
+const researchSupplementMarker = "[tomako_search:research_supplement/v1]"
+
+// researchSearchSupplement reports an ordinary (non-first-visit) public-research
+// turn that Portal allowed to use the supplemental AIsa search.
+func (s *appServerSession) researchSearchSupplement() bool {
+	s.runtimeMu.RLock()
+	defer s.runtimeMu.RUnlock()
+	return s.runtime.ToolProfile == core.ToolProfilePublicResearch && !s.runtime.FirstVisitSearch && s.runtime.ResearchSearchSupplement
+}
+
+// searchSupplementAllowed reports whether supplement=true may reach AIsa.
+func (s *appServerSession) searchSupplementAllowed() bool {
+	return s.firstVisitSearch() || s.researchSearchSupplement()
+}
+
 func (s *appServerSession) publicResearch() bool {
 	s.runtimeMu.RLock()
 	defer s.runtimeMu.RUnlock()
@@ -72,7 +89,8 @@ func (s *appServerSession) resumedResearchProfileChanged(threadID, path string) 
 	// existing Test threads can also return to the ordinary execution tools.
 	legacyBase := strings.TrimPrefix(publicResearchBaseInstructions, publicResearchProfileMarker+"\n")
 	wasResearch := strings.HasPrefix(base, publicResearchProfileMarker+"\n") || base == legacyBase
-	return wasResearch != s.publicResearch() || strings.HasSuffix(base, "\n"+firstVisitSearchMarker) != s.firstVisitSearch()
+	return wasResearch != s.publicResearch() || strings.HasSuffix(base, "\n"+firstVisitSearchMarker) != s.firstVisitSearch() ||
+		strings.HasSuffix(base, "\n"+researchSupplementMarker) != s.researchSearchSupplement()
 }
 
 func (s *appServerSession) applyPublicResearchProfile(params, config map[string]any) {
@@ -87,6 +105,10 @@ func (s *appServerSession) applyPublicResearchProfile(params, config map[string]
 			search["description"] = fmt.Sprintf("Search the primary index first (query up to %v characters). Verify claims using original pages. For an unresolved fact (e.g. only a mirrored profile, no direct contact route, or an incomplete answer), set supplement=true on a focused follow-up through the secondary index or omit the unsupported claim. Skip supplementation when original sources suffice.", limit)
 			props := search["inputSchema"].(map[string]any)["properties"].(map[string]any)
 			props["supplement"] = map[string]any{"type": "boolean", "description": "Use the secondary index only for an unresolved evidence gap."}
+		} else if s.researchSearchSupplement() {
+			search["description"] = search["description"].(string) + " When the primary results leave a material evidence gap, you may repeat a focused query with supplement=true to search the secondary index; ordinary searches omit it."
+			props := search["inputSchema"].(map[string]any)["properties"].(map[string]any)
+			props["supplement"] = map[string]any{"type": "boolean", "description": "Search the secondary index for an unresolved evidence gap; omit for ordinary searches."}
 		}
 		search["supportsParallelToolCalls"] = true
 		if s.webReadToolAvailable() {

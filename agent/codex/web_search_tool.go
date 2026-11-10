@@ -111,6 +111,8 @@ func (s *appServerSession) webSearchScenario(supplement bool) webSearchScenario 
 	switch {
 	case s.firstVisitSearch() && supplement:
 		return webSearchScenarioFirstVisitSupplement
+	case s.researchSearchSupplement() && supplement:
+		return webSearchScenarioResearchSupplement
 	case s.firstVisitSearch():
 		return webSearchScenarioFirstVisit
 	case s.publicResearch():
@@ -125,7 +127,7 @@ func (s *appServerSession) webSearchQueryMaxRunes() int {
 	if err != nil {
 		return webSearchMaxQueryRunes
 	}
-	if chain := config.usableChain(s.webSearchScenario(false), s.firstVisitSearch()); len(chain) > 0 {
+	if chain := config.usableChain(s.webSearchScenario(false), s.searchSupplementAllowed()); len(chain) > 0 {
 		return webSearchQueryLimit(chain[0])
 	}
 	return webSearchMaxQueryRunes
@@ -148,11 +150,11 @@ func (s *appServerSession) webSearchToolAvailable() bool {
 		slog.Warn("codex: web search is configured but unusable", "error", err)
 		return false
 	}
-	first := s.firstVisitSearch()
-	if len(config.usableChain(s.webSearchScenario(false), first)) > 0 {
+	allowed := s.searchSupplementAllowed()
+	if len(config.usableChain(s.webSearchScenario(false), allowed)) > 0 {
 		return true
 	}
-	return first && len(config.usableChain(webSearchScenarioFirstVisitSupplement, true)) > 0
+	return allowed && len(config.usableChain(s.webSearchScenario(true), true)) > 0
 }
 
 type webSearchItem struct {
@@ -190,8 +192,8 @@ func (s *appServerSession) searchWeb(arguments map[string]any) (string, error) {
 	}
 	supplement, requested := arguments["supplement"]
 	useSupplement, valid := supplement.(bool)
-	if requested && (!s.firstVisitSearch() || !valid) {
-		return "", errors.New("supplement requires a first-visit research turn and boolean value")
+	if requested && (!s.searchSupplementAllowed() || !valid) {
+		return "", errors.New("supplement requires a first-visit or supplement-enabled research turn and a boolean value")
 	}
 	response, provider, err := s.lookupWeb(query, limit, useSupplement)
 	if err != nil {
@@ -219,7 +221,7 @@ func (s *appServerSession) lookupWeb(query string, limit int, supplement bool) (
 		slog.Warn("codex: web search configuration is unusable", "error", err)
 		return nil, "", errors.New("web search is not available right now")
 	}
-	chain := config.usableChain(scenario, s.firstVisitSearch())
+	chain := config.usableChain(scenario, s.searchSupplementAllowed())
 	if len(chain) == 0 {
 		slog.Error("codex: web search has no usable provider", "alert", "WEB_SEARCH_PROVIDER_ALERT",
 			"scenario", string(scenario), "configured", strings.Join(config.chain(scenario), ","))
