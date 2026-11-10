@@ -23,6 +23,7 @@ func writeWebSearchConfig(t *testing.T, content string) {
 		t.Fatal(err)
 	}
 	t.Setenv(webSearchConfigEnv, path)
+	t.Setenv("DEEPSEEK_API_KEY", "")
 }
 
 func resetWebSearchCache() {
@@ -101,32 +102,58 @@ func TestWebSearchConfigurationReadsTheCredentialsFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	if config.AccountID != "acc-1" || config.Token != "tok-1" || config.GatewayID != "default" ||
-		strings.Join(config.Providers, ",") != "exa,linkup" {
+		strings.Join(config.chain(webSearchScenarioConversation), ",") != "deepseek" ||
+		strings.Join(config.chain(webSearchScenarioFirstVisitSupplement), ",") != "aisa" {
 		t.Fatalf("config=%+v", config)
 	}
+	if len(config.usableChain(webSearchScenarioConversation, false)) != 0 {
+		t.Fatal("DeepSeek was usable without a key")
+	}
 
-	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nCLOUDFLARE_AI_GATEWAY_ID=search\nWEB_SEARCH_PROVIDERS= exa , ceramic\n")
+	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nCLOUDFLARE_AI_GATEWAY_ID=search\nSEARCH_PROVIDERS= Exa , ceramic,exa\nSEARCH_PROVIDERS_FIRST_VISIT=deepseek\nSEARCH_PRICE_USD_EXA=0.005\n")
 	config, err = loadWebSearchConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.GatewayID != "search" || strings.Join(config.Providers, ",") != "exa,ceramic" {
+	if config.GatewayID != "search" || strings.Join(config.chain(webSearchScenarioConversation), ",") != "exa,ceramic" ||
+		strings.Join(config.chain(webSearchScenarioResearch), ",") != "exa,ceramic" ||
+		strings.Join(config.chain(webSearchScenarioFirstVisit), ",") != "deepseek" ||
+		strings.Join(config.chain(webSearchScenarioFirstVisitSupplement), ",") != "aisa" || config.Prices["exa"] != 0.005 {
 		t.Fatalf("config=%+v", config)
 	}
 
-	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\n")
+	writeWebSearchConfig(t, "SEARCH_PRICE_USD_EXA=cheap\n")
 	if _, err := loadWebSearchConfig(); err == nil {
-		t.Fatal("a configuration without a token was accepted")
+		t.Fatal("an unreadable price was accepted")
 	}
 
-	writeWebSearchConfig(t, "BRAVE_API_KEY=brave-1\nWEB_SEARCH_PROVIDERS=brave\n")
+	writeWebSearchConfig(t, "BRAVE_API_KEY=brave-1\nSEARCH_PROVIDERS=brave\n")
 	config, err = loadWebSearchConfig()
-	if err != nil || config.BraveKey != "brave-1" || strings.Join(config.Providers, ",") != "brave" {
+	if err != nil || config.BraveKey != "brave-1" || strings.Join(config.usableChain(webSearchScenarioConversation, false), ",") != "brave" {
 		t.Fatalf("Brave alone did not configure search: %+v %v", config, err)
 	}
+
+	// Without a configuration file the bridge's own DeepSeek key is enough.
 	t.Setenv(webSearchConfigEnv, "")
-	if _, err := loadWebSearchConfig(); err == nil {
-		t.Fatal("search was configured without a credentials file")
+	t.Setenv("DEEPSEEK_API_KEY", "ds-1")
+	config, err = loadWebSearchConfig()
+	if err != nil || strings.Join(config.usableChain(webSearchScenarioConversation, false), ",") != "deepseek" || config.DeepSeekKey != "ds-1" {
+		t.Fatalf("config=%+v err=%v", config, err)
+	}
+}
+
+// Regression for the 2026-11-08 Test outage: WEB_SEARCH_PROVIDERS pinned every
+// conversation to Exa/Brave/Linkup and all three returned HTTP 402.
+func TestWebSearchIgnoresTheLegacyProviderListAndUsesDeepSeek(t *testing.T) {
+	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nBRAVE_API_KEY=b\nWEB_SEARCH_PROVIDERS=exa,brave,linkup\nDEEPSEEK_API_KEY=ds-file\n")
+	deepseek := fakeDeepSeekAPI(t, 200, `{"results":[{"url":"https://buffer.com/pricing","title":"Pricing","snippet":"plans"}]}`)
+	cloudflare := fakeWebSearchAPI(t, map[string]func(http.ResponseWriter){})
+	output, err := webSearchTestSession(t).searchWeb(map[string]any{"query": "buffer pricing"})
+	if err != nil || !strings.Contains(output, "Results: 1 from deepseek") || len(*deepseek) != 1 || len(*cloudflare) != 0 {
+		t.Fatalf("output=%q err=%v deepseek=%d cloudflare=%d", output, err, len(*deepseek), len(*cloudflare))
+	}
+	if (*deepseek)[0].Authorization != "Bearer ds-file" {
+		t.Fatalf("the configuration file's key was not used: %+v", (*deepseek)[0])
 	}
 }
 
@@ -136,7 +163,19 @@ func TestWebSearchToolOfferedToConversationsOnlyWhenConfigured(t *testing.T) {
 	if advertisesWebSearch(s) {
 		t.Fatal("the tool was offered without credentials")
 	}
+	t.Setenv("DEEPSEEK_API_KEY", "")
+	if advertisesWebSearch(s) {
+		t.Fatal("the tool was offered without a DeepSeek key")
+	}
+	t.Setenv("DEEPSEEK_API_KEY", "ds-1")
+	if !advertisesWebSearch(s) {
+		t.Fatal("the default DeepSeek provider did not offer the tool")
+	}
 	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\n")
+	if advertisesWebSearch(s) {
+		t.Fatal("Cloudflare credentials alone offered the tool while DeepSeek is the configured provider")
+	}
+	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nSEARCH_PROVIDERS=exa\n")
 	if !advertisesWebSearch(s) {
 		t.Fatal("a configured conversation did not get the tool")
 	}
@@ -152,7 +191,7 @@ func TestWebSearchToolOfferedToConversationsOnlyWhenConfigured(t *testing.T) {
 }
 
 func TestWebSearchSendsTheDocumentedRequest(t *testing.T) {
-	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\n")
+	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nSEARCH_PROVIDERS=exa\n")
 	calls := fakeWebSearchAPI(t, map[string]func(http.ResponseWriter){
 		"exa": respond(200, `{"success":true,"errors":[],"result":{"items":[
 			{"url":"https://buffer.com/pricing","title":"Buffer  Pricing &amp; Plans","description":"Essentials $6 per month per channel &#8211; billed yearly."},
@@ -186,7 +225,7 @@ func TestWebSearchSendsTheDocumentedRequest(t *testing.T) {
 }
 
 func TestWebSearchTriesTheNextProviderWhenOneIsUnavailableOrEmpty(t *testing.T) {
-	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nWEB_SEARCH_PROVIDERS=ceramic,exa,linkup\n")
+	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nSEARCH_PROVIDERS=ceramic,exa,linkup\n")
 	calls := fakeWebSearchAPI(t, map[string]func(http.ResponseWriter){
 		"ceramic": respond(503, `{"success":false,"errors":[{"code":7000,"message":"upstream unavailable"}]}`),
 		"exa":     respond(200, `{"items":[],"metadata":{}}`),
@@ -204,25 +243,44 @@ func TestWebSearchTriesTheNextProviderWhenOneIsUnavailableOrEmpty(t *testing.T) 
 	}
 }
 
-func TestWebSearchStopsOnCredentialErrors(t *testing.T) {
-	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\n")
+func TestWebSearchCredentialFailureAlertsAndFallsBack(t *testing.T) {
+	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nSEARCH_PROVIDERS=exa,linkup\n")
 	calls := fakeWebSearchAPI(t, map[string]func(http.ResponseWriter){
 		"exa":    respond(401, `{"success":false,"errors":[{"code":10000,"message":"Authentication error"}]}`),
 		"linkup": respond(200, `{"items":[{"url":"https://example.com/","title":"x","description":"y"}]}`),
 	})
-	_, err := webSearchTestSession(t).searchWeb(map[string]any{"query": "pricing"})
-	if err == nil || !strings.Contains(err.Error(), "HTTP 401: Authentication error") {
-		t.Fatalf("err=%v", err)
+	s := webSearchTestSession(t)
+	output, err := s.searchWeb(map[string]any{"query": "pricing"})
+	if err != nil || !strings.Contains(output, "from linkup") || len(*calls) != 2 {
+		t.Fatalf("output=%q err=%v calls=%d", output, err, len(*calls))
 	}
-	if len(*calls) != 1 {
-		t.Fatalf("a credential failure was retried with another provider: %d calls", len(*calls))
+	receipts := drainUsageReceipts(s)
+	if len(receipts) != 2 || receipts[0]["error_category"] != "credentials_invalid" || receipts[0]["alert"] != true ||
+		receipts[0]["http_status"] != 401 || receipts[1]["status"] != "SUCCEEDED" || receipts[1]["search_id"] != receipts[0]["search_id"] ||
+		receipts[1]["attempt_index"] != 1 {
+		t.Fatalf("receipts=%+v", receipts)
+	}
+	if _, priced := receipts[1]["cost_usd"]; priced {
+		t.Fatal("a provider without a configured price recorded a cost")
+	}
+}
+
+func TestWebSearchStopsOnABadRequest(t *testing.T) {
+	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nSEARCH_PROVIDERS=exa,linkup\n")
+	calls := fakeWebSearchAPI(t, map[string]func(http.ResponseWriter){
+		"exa":    respond(400, `{"success":false,"errors":[{"message":"invalid query"}]}`),
+		"linkup": respond(200, `{"items":[{"url":"https://example.com/","title":"x","description":"y"}]}`),
+	})
+	_, err := webSearchTestSession(t).searchWeb(map[string]any{"query": "pricing"})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 400: invalid query") || len(*calls) != 1 {
+		t.Fatalf("err=%v calls=%d", err, len(*calls))
 	}
 }
 
 func TestWebSearchExhaustedCreditFallsBackToConfiguredProvider(t *testing.T) {
 	for _, exhausted := range []string{"exa", "brave"} {
 		t.Run(exhausted, func(t *testing.T) {
-			writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nBRAVE_API_KEY=brave-1\nWEB_SEARCH_PROVIDERS="+exhausted+",linkup\n")
+			writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nBRAVE_API_KEY=brave-1\nSEARCH_PROVIDERS="+exhausted+",linkup\n")
 			calls := fakeWebSearchAPI(t, map[string]func(http.ResponseWriter){
 				"exa":    respond(402, `{"errors":[{"message":"Payment Required"}]}`),
 				"linkup": respond(200, `{"items":[{"url":"https://example.com/","title":"Source","description":"found"}]}`),
@@ -240,7 +298,7 @@ func TestWebSearchExhaustedCreditFallsBackToConfiguredProvider(t *testing.T) {
 }
 
 func TestWebSearchReportsNoResultsWithoutFailing(t *testing.T) {
-	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nWEB_SEARCH_PROVIDERS=ceramic,exa,linkup\n")
+	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nSEARCH_PROVIDERS=ceramic,exa,linkup\n")
 	fakeWebSearchAPI(t, map[string]func(http.ResponseWriter){
 		"ceramic": respond(200, `{"items":[]}`),
 		"exa":     respond(502, `bad gateway`),
@@ -253,7 +311,7 @@ func TestWebSearchReportsNoResultsWithoutFailing(t *testing.T) {
 }
 
 func TestWebSearchReportsFailureWhenNoProviderAnswers(t *testing.T) {
-	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\n")
+	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nSEARCH_PROVIDERS=exa,linkup\n")
 	fakeWebSearchAPI(t, map[string]func(http.ResponseWriter){
 		"exa":    respond(429, `{"success":false,"errors":[{"message":"rate limited"}]}`),
 		"linkup": respond(500, `not json`),
@@ -265,7 +323,7 @@ func TestWebSearchReportsFailureWhenNoProviderAnswers(t *testing.T) {
 }
 
 func TestWebSearchRejectsQueriesTheAPIWouldRefuse(t *testing.T) {
-	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\n")
+	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nSEARCH_PROVIDERS=exa\n")
 	calls := fakeWebSearchAPI(t, map[string]func(http.ResponseWriter){})
 	s := webSearchTestSession(t)
 	for _, query := range []any{"", "   ", nil, strings.Repeat("词", webSearchMaxQueryRunes+1)} {
@@ -333,7 +391,7 @@ func fakeBraveAPI(t *testing.T, status int, body string) *[]braveCall {
 }
 
 func TestWebSearchCallsBraveDirectly(t *testing.T) {
-	writeWebSearchConfig(t, "BRAVE_API_KEY=brave-key\nWEB_SEARCH_PROVIDERS=brave\n")
+	writeWebSearchConfig(t, "BRAVE_API_KEY=brave-key\nSEARCH_PROVIDERS=brave\n")
 	calls := fakeBraveAPI(t, 200, `{"web":{"results":[
 		{"title":"Buffer <strong>Pricing</strong> &amp; Plans","url":"https://buffer.com/pricing","description":"Start for <strong>free</strong>, Essentials $6 per channel."},
 		{"title":"Buffer review","url":"https://example.com/review","description":""}]}}`)
@@ -356,7 +414,7 @@ func TestWebSearchCallsBraveDirectly(t *testing.T) {
 }
 
 func TestWebSearchMovesFromBraveToCloudflareWhenBraveCannotAnswer(t *testing.T) {
-	writeWebSearchConfig(t, "BRAVE_API_KEY=brave-key\nCLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nWEB_SEARCH_PROVIDERS=brave,exa\n")
+	writeWebSearchConfig(t, "BRAVE_API_KEY=brave-key\nCLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nSEARCH_PROVIDERS=brave,exa\n")
 	braveCalls := fakeBraveAPI(t, 429, `{"type":"ErrorResponse","error":{"code":"RATE_LIMITED","detail":"Request rate limit exceeded"}}`)
 	cloudflareCalls := fakeWebSearchAPI(t, map[string]func(http.ResponseWriter){
 		"exa": respond(200, `{"items":[{"url":"https://buffer.com/pricing","title":"Pricing","description":"plans"}]}`),
@@ -370,7 +428,7 @@ func TestWebSearchMovesFromBraveToCloudflareWhenBraveCannotAnswer(t *testing.T) 
 	}
 
 	// Without a Brave key the provider is skipped rather than failing the search.
-	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nWEB_SEARCH_PROVIDERS=brave,exa\n")
+	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nSEARCH_PROVIDERS=brave,exa\n")
 	output, err = webSearchTestSession(t).searchWeb(map[string]any{"query": "buffer pricing"})
 	if err != nil || !strings.Contains(output, "from exa") || len(*braveCalls) != 1 {
 		t.Fatalf("output=%q err=%v brave=%d", output, err, len(*braveCalls))
@@ -378,7 +436,7 @@ func TestWebSearchMovesFromBraveToCloudflareWhenBraveCannotAnswer(t *testing.T) 
 }
 
 func TestWebSearchReusesARecentSearch(t *testing.T) {
-	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\n")
+	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=acc-1\nCLOUDFLARE_API_TOKEN=tok-1\nSEARCH_PROVIDERS=exa\n")
 	calls := fakeWebSearchAPI(t, map[string]func(http.ResponseWriter){
 		"exa": respond(200, `{"items":[{"url":"https://buffer.com/pricing","title":"Pricing","description":"plans"}],"metadata":{"latencyMs":300}}`),
 	})
@@ -394,7 +452,7 @@ func TestWebSearchReusesARecentSearch(t *testing.T) {
 		t.Fatalf("a different result count reused the cache: calls=%d err=%v", len(*calls), err)
 	}
 
-	key := webSearchCacheKey("buffer pricing", webSearchDefaultLimit)
+	key := "exa:" + webSearchCacheKey("buffer pricing", webSearchDefaultLimit)
 	webSearchCache.Lock()
 	entry := webSearchCache.entries[key]
 	entry.at = time.Now().Add(-webSearchCacheTTL - time.Minute)
@@ -425,9 +483,9 @@ func TestWebSearchCacheStaysBounded(t *testing.T) {
 func TestResearchSearchCanReturnBoundedOriginalPagesWithCachedIndex(t *testing.T) {
 	s := webReadTestSession(t, "process.stdout.write(process.argv.slice(2).join(' '))")
 	s.runtime.ToolProfile = core.ToolProfilePublicResearch
-	writeWebSearchConfig(t, "BRAVE_API_KEY=test\nWEB_SEARCH_PROVIDERS=brave\n")
+	writeWebSearchConfig(t, "BRAVE_API_KEY=test\nSEARCH_PROVIDERS=brave\n")
 	query := "two original public pages"
-	key := webSearchCacheKey(query, webSearchDefaultLimit)
+	key := "brave:" + webSearchCacheKey(query, webSearchDefaultLimit)
 	rememberWebSearch(key, webSearchCacheEntry{at: time.Now(), provider: "brave", response: webSearchResponse{
 		Items: []webSearchItem{{URL: "http://127.0.0.1/p"}, {URL: "https://example.com/a"}, {URL: "https://example.com/a#part"}, {URL: "https://example.org/b"}, {URL: "https://example.net/c"}},
 	}})
@@ -462,6 +520,8 @@ func TestFirstVisitSupplementUsesQuotedScopedReceiptWithoutSharingPrimaryCache(t
 	}
 	s.taskRuntimeEnvFile = path
 	t.Cleanup(func() { removeTaskRuntimeEnv(path) })
+	t.Setenv(webSearchConfigEnv, "")
+	t.Setenv("DEEPSEEK_API_KEY", "ds-1")
 	dir := t.TempDir()
 	t.Setenv("SKILLS_OL_DIR", dir)
 	source := `import {readFileSync} from 'node:fs';

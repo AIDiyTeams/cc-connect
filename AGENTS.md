@@ -8,6 +8,12 @@ and the applicable Skill before branch, synchronization or deployment actions. T
 component architecture and tests; deployment routes and authorization are maintained centrally.
 Use the workspace `docs/architecture/domain-responsibility.md` for ownership questions.
 
+## Platform web search
+
+All platform web searches go through one entry (cc-connect `lookupWeb`, default DeepSeek). Configuration,
+provider switching, pricing, ledger, alerts and troubleshooting are documented only in the workspace
+[`docs/architecture/web-search.md`](../docs/architecture/web-search.md); do not add another search provider client here.
+
 # CC-Connect Development Guide
 
 ## Project Overview

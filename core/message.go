@@ -298,6 +298,7 @@ const (
 	EventPlanUpdate        EventType = "plan_update"        // agent-authored task plan/status update
 	EventLifecycle         EventType = "lifecycle"          // internal runtime stage timing
 	EventStructuredResult  EventType = "structured_result"  // trusted structured stage result
+	EventUsageReceipt      EventType = "usage_receipt"      // provider usage for the control-plane ledger (Metadata["receipt"])
 )
 
 // UserQuestion represents a structured question from AskUserQuestion.

@@ -5739,6 +5739,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		if event.Type == EventThinking && event.ContentPartial {
 			continue
 		}
+		if event.Type == EventUsageReceipt {
+			receipt, _ := event.Metadata["receipt"].(map[string]any)
+			if reporter, ok := p.(UsageReceiptReporter); ok && receipt != nil {
+				if err := reporter.ReportUsageReceipt(e.ctx, replyCtx, receipt); err != nil {
+					slog.Warn("usage receipt report failed", "platform", p.Name(), "error", err)
+				}
+			}
+			continue
+		}
 		if event.Type == EventStructuredResult {
 			var deliveryErr error
 			if reporter, ok := p.(AgentStructuredResultReporter); ok && event.Metadata != nil {

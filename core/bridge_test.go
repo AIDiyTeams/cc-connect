@@ -1909,3 +1909,34 @@ func TestBridgeProvisionalSnapshotsRequireCapabilityAndFinalIdsSurvivePreview(t 
 		}
 	}
 }
+
+func TestBridge_ReportUsageReceiptOnlyToAdaptersThatRecordIt(t *testing.T) {
+	bs, wsURL := startTestBridge(t, "")
+	conn := dialWS(t, wsURL, nil)
+	register(t, conn, "backend", []string{"text", "agent_trace", "usage_receipt"})
+	bp := bs.NewPlatform("proj")
+	rc := newBridgeReplyCtx(bs.getAdapter("backend"), "backend:workspace:user", "cmsg-search")
+	receipt := map[string]any{"kind": "web_search", "provider": "deepseek", "cost_usd": 0.00075}
+	if err := bp.ReportUsageReceipt(context.Background(), rc, receipt); err != nil {
+		t.Fatal(err)
+	}
+	msg := readMsg(t, conn)
+	got, _ := msg["receipt"].(map[string]any)
+	if msg["type"] != "usage_receipt" || msg["reply_ctx"] != "cmsg-search" || got["provider"] != "deepseek" || got["cost_usd"] != 0.00075 {
+		t.Fatalf("unexpected payload: %v", msg)
+	}
+
+	legacy := dialWS(t, wsURL, nil)
+	register(t, legacy, "legacy", []string{"text", "agent_trace"})
+	oldCtx := newBridgeReplyCtx(bs.getAdapter("legacy"), "legacy:workspace:user", "cmsg-old")
+	if err := bp.ReportUsageReceipt(context.Background(), oldCtx, receipt); err != nil {
+		t.Fatalf("an adapter without the ledger failed the search: %v", err)
+	}
+	if err := legacy.SetReadDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	var unexpected map[string]any
+	if err := legacy.ReadJSON(&unexpected); err == nil {
+		t.Fatalf("a legacy adapter received a receipt: %v", unexpected)
+	}
+}

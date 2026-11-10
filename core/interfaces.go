@@ -51,6 +51,13 @@ type AgentStructuredResultReporter interface {
 	ReportAgentStructuredResult(ctx context.Context, replyCtx any, stage string, result map[string]any) error
 }
 
+// UsageReceiptReporter transports a provider usage receipt, such as one web
+// search attempt, to the control plane that owns the cost ledger. Receipts are
+// operational data: never visible chat output and never part of the tool audit.
+type UsageReceiptReporter interface {
+	ReportUsageReceipt(ctx context.Context, replyCtx any, receipt map[string]any) error
+}
+
 // TurnDispatchStatusReporter is an optional machine-readable transport for
 // admission-control outcomes. A queued or rejected turn is operational state,
 // not an Agent answer, so adapters must never receive it through Reply.

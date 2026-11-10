@@ -79,7 +79,7 @@ done
 
 func TestPublicResearchProfileLimitsToolsAndContextWithoutChangingFences(t *testing.T) {
 	s := webReadTestSession(t, "")
-	writeWebSearchConfig(t, "CLOUDFLARE_ACCOUNT_ID=account\nCLOUDFLARE_API_TOKEN=token\n")
+	writeWebSearchConfig(t, "DEEPSEEK_API_KEY=ds\n")
 	s.runtime.ToolProfile = core.ToolProfilePublicResearch
 	s.runtime.DeveloperInstructions = "Verify source evidence"
 	s.runtime.ImageCapabilityToken = "read-only-capability"

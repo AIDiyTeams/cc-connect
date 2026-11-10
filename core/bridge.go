@@ -756,6 +756,32 @@ func (bp *BridgePlatform) ReportAgentStructuredResult(
 	}
 }
 
+// ReportUsageReceipt forwards a usage receipt to adapters that declared the
+// usage_receipt capability. Older adapters ignore it; the receipt is then only
+// in the bridge log, so the ledger is incomplete until the adapter upgrades.
+func (bp *BridgePlatform) ReportUsageReceipt(_ context.Context, replyCtx any, receipt map[string]any) error {
+	rc, ok := replyCtx.(*bridgeReplyCtx)
+	if !ok {
+		return fmt.Errorf("bridge: usage receipt requires a bridge reply context")
+	}
+	a := bp.server.getAdapter(rc.Platform)
+	if a == nil {
+		return fmt.Errorf("bridge: adapter %q not connected", rc.Platform)
+	}
+	if !a.capabilities["usage_receipt"] {
+		slog.Debug("bridge: adapter does not record usage receipts", "platform", rc.Platform, "kind", receipt["kind"])
+		return nil
+	}
+	return writeJSON(a.conn, &a.writeMu, map[string]any{
+		"type":        "usage_receipt",
+		"session_key": rc.SessionKey,
+		"reply_ctx":   rc.ReplyCtx,
+		"turn_no":     rc.TurnNo,
+		"receipt":     receipt,
+		"occurred_at": time.Now().UTC().Format(time.RFC3339Nano),
+	})
+}
+
 func truncateBridgeTrace(value string, max int) string {
 	value = strings.TrimSpace(value)
 	if len(value) <= max {

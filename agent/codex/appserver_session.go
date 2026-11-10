@@ -678,7 +678,7 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	// ...and find them through the platform search; see web_search_tool.go.
 	if s.webSearchToolAvailable() {
 		tools, _ := params["dynamicTools"].([]map[string]any)
-		params["dynamicTools"] = append(tools, webSearchDynamicTool())
+		params["dynamicTools"] = append(tools, s.webSearchDynamicTool())
 	}
 	// Application-managed conversations replace the coding-assistant preamble
 	// guidance at the base-instruction level; see public_conversation_base.go.

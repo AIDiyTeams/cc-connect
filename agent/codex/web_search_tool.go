@@ -1,18 +1,11 @@
 package codex
 
 import (
-	"bufio"
-	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
-	"io"
 	"log/slog"
-	"net/http"
-	"net/url"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -32,13 +25,6 @@ const (
 	webSearchMaxLimit         = 10
 	webSearchDescriptionRunes = 700
 	webSearchResponseLimit    = 1 << 20
-)
-
-// webSearchAPIBase is Cloudflare's v4 API root and braveSearchAPIBase is
-// Brave's Search API root; tests point them at a local server.
-var (
-	webSearchAPIBase   = "https://api.cloudflare.com/client/v4"
-	braveSearchAPIBase = "https://api.search.brave.com/res/v1"
 )
 
 var htmlTags = regexp.MustCompile(`<[^>]+>`)
@@ -95,90 +81,9 @@ func rememberWebSearch(key string, entry webSearchCacheEntry) {
 	webSearchCache.entries[key] = entry
 }
 
-// webSearchConfigEnv names the file holding the search credentials. The bridge
-// reads it per call, so a rotated token needs no restart, and Agent commands
-// never see the credentials themselves (see agentShellExcludedEnv).
-const webSearchConfigEnv = "TOMAKO_WEB_SEARCH_CONFIG"
-
-type webSearchConfig struct {
-	AccountID string
-	Token     string
-	GatewayID string
-	BraveKey  string
-	// Providers are tried in order; a later one answers only when an earlier
-	// one is unavailable or finds nothing. Brave is called directly; the others
-	// go through Cloudflare's Web Search API. Exa leads by default: on research
-	// queries from real conversations it put the vendor's own page (pricing,
-	// docs) in the top results most often; Brave did as well on English queries
-	// but less often on Chinese ones; Linkup returns fresh, relevant third-party
-	// pages; Ceramic often returned nothing or off-topic pages.
-	Providers []string
-}
-
-// hasCredentials reports whether the configuration can call provider.
-func (c webSearchConfig) hasCredentials(provider string) bool {
-	if provider == "brave" {
-		return c.BraveKey != ""
-	}
-	return c.AccountID != "" && c.Token != ""
-}
-
-func loadWebSearchConfig() (webSearchConfig, error) {
-	path := strings.TrimSpace(os.Getenv(webSearchConfigEnv))
-	if path == "" {
-		return webSearchConfig{}, errors.New("web search is not configured")
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return webSearchConfig{}, fmt.Errorf("web search configuration is unreadable: %w", err)
-	}
-	defer file.Close()
-	values := map[string]string{}
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, value, ok := strings.Cut(strings.TrimPrefix(line, "export "), "=")
-		if !ok {
-			continue
-		}
-		value = strings.TrimSpace(value)
-		if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
-			value = value[1 : len(value)-1]
-		}
-		values[strings.TrimSpace(key)] = value
-	}
-	if err := scanner.Err(); err != nil {
-		return webSearchConfig{}, fmt.Errorf("web search configuration is unreadable: %w", err)
-	}
-	config := webSearchConfig{
-		AccountID: values["CLOUDFLARE_ACCOUNT_ID"],
-		Token:     values["CLOUDFLARE_API_TOKEN"],
-		GatewayID: values["CLOUDFLARE_AI_GATEWAY_ID"],
-		BraveKey:  values["BRAVE_API_KEY"],
-	}
-	if config.GatewayID == "" {
-		config.GatewayID = "default"
-	}
-	for _, provider := range strings.Split(values["WEB_SEARCH_PROVIDERS"], ",") {
-		if provider = strings.TrimSpace(provider); provider != "" {
-			config.Providers = append(config.Providers, provider)
-		}
-	}
-	if len(config.Providers) == 0 {
-		config.Providers = []string{"exa", "linkup"}
-	}
-	for _, provider := range config.Providers {
-		if config.hasCredentials(provider) {
-			return config, nil
-		}
-	}
-	return webSearchConfig{}, errors.New("web search configuration has no credentials for its providers")
-}
-
-func webSearchDynamicTool() map[string]any {
+// webSearchDynamicTool advertises the platform search. The query limit is the
+// one of the provider that answers first in this session's scenario.
+func (s *appServerSession) webSearchDynamicTool() map[string]any {
 	return map[string]any{
 		"type":         "function",
 		"name":         webSearchToolName,
@@ -191,7 +96,7 @@ func webSearchDynamicTool() map[string]any {
 		"inputSchema": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"query": map[string]any{"type": "string", "minLength": 1, "maxLength": webSearchMaxQueryRunes, "description": "Search query."},
+				"query": map[string]any{"type": "string", "minLength": 1, "maxLength": s.webSearchQueryMaxRunes(), "description": "Search query."},
 				"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": webSearchMaxLimit, "description": fmt.Sprintf("Number of results, at most %d; defaults to %d.", webSearchMaxLimit, webSearchDefaultLimit)},
 			},
 			"required":             []string{"query"},
@@ -200,8 +105,34 @@ func webSearchDynamicTool() map[string]any {
 	}
 }
 
-// webSearchToolAvailable follows the page reader: conversations get it once the
-// platform credentials are installed; dedicated workflows keep their own tools.
+// webSearchScenario derives the provider chain from trusted runtime metadata
+// and the explicit supplement argument.
+func (s *appServerSession) webSearchScenario(supplement bool) webSearchScenario {
+	switch {
+	case s.firstVisitSearch() && supplement:
+		return webSearchScenarioFirstVisitSupplement
+	case s.firstVisitSearch():
+		return webSearchScenarioFirstVisit
+	case s.publicResearch():
+		return webSearchScenarioResearch
+	default:
+		return webSearchScenarioConversation
+	}
+}
+
+func (s *appServerSession) webSearchQueryMaxRunes() int {
+	config, err := loadWebSearchConfig()
+	if err != nil {
+		return webSearchMaxQueryRunes
+	}
+	if chain := config.usableChain(s.webSearchScenario(false), s.firstVisitSearch()); len(chain) > 0 {
+		return webSearchQueryLimit(chain[0])
+	}
+	return webSearchMaxQueryRunes
+}
+
+// webSearchToolAvailable follows the page reader: conversations get it once a
+// provider of their scenario can be called; dedicated workflows keep their own tools.
 func (s *appServerSession) webSearchToolAvailable() bool {
 	if s.isBrandAnalysisRuntime() || s.isUserVoiceArchiveRuntime() || s.isUserVoiceJudgmentRuntime() {
 		return false
@@ -212,16 +143,16 @@ func (s *appServerSession) webSearchToolAvailable() bool {
 	if !conversation {
 		return false
 	}
-	if s.firstVisitSearch() {
-		return true
-	}
-	if _, err := loadWebSearchConfig(); err != nil {
-		if os.Getenv(webSearchConfigEnv) != "" {
-			slog.Warn("codex: web search is configured but unusable", "error", err)
-		}
+	config, err := loadWebSearchConfig()
+	if err != nil {
+		slog.Warn("codex: web search is configured but unusable", "error", err)
 		return false
 	}
-	return true
+	first := s.firstVisitSearch()
+	if len(config.usableChain(s.webSearchScenario(false), first)) > 0 {
+		return true
+	}
+	return first && len(config.usableChain(webSearchScenarioFirstVisitSupplement, true)) > 0
 }
 
 type webSearchItem struct {
@@ -236,16 +167,6 @@ type webSearchResponse struct {
 		LatencyMs float64 `json:"latencyMs"`
 	} `json:"metadata"`
 }
-
-// webSearchAttemptError tells the caller whether another provider may succeed
-// where this one failed: outages, exhausted provider credit and rate limits yes;
-// authentication, permission and bad-query errors still stop the request.
-type webSearchAttemptError struct {
-	message   string
-	retryable bool
-}
-
-func (e *webSearchAttemptError) Error() string { return e.message }
 
 func (s *appServerSession) searchWeb(arguments map[string]any) (string, error) {
 	query := strings.Join(strings.Fields(stringArg(arguments["query"])), " ")
@@ -286,28 +207,39 @@ func (s *appServerSession) searchWeb(arguments map[string]any) (string, error) {
 	return results, nil
 }
 
-// Release the search slot before any optional original-page reads.
+// lookupWeb is the single entry for every platform web search: it picks the
+// scenario's configured provider chain, reuses the cache and the shared slots,
+// records one ledger receipt per provider attempt and falls through to the next
+// provider on failure or an empty answer. The slot is released before any
+// optional original-page reads.
 func (s *appServerSession) lookupWeb(query string, limit int, supplement bool) (*webSearchResponse, string, error) {
-	var config webSearchConfig
-	key := webSearchCacheKey(query, limit)
-	first := s.firstVisitSearch()
-	if first {
-		if len([]rune(query)) > 128 {
-			return nil, "", errors.New("first visit search query must be at most 128 characters")
-		}
-		key = "deepseek:" + key
-	} else {
-		var err error
-		config, err = loadWebSearchConfig()
-		if err != nil {
-			return nil, "", errors.New("web search is not available right now")
+	scenario := s.webSearchScenario(supplement)
+	config, err := loadWebSearchConfig()
+	if err != nil {
+		slog.Warn("codex: web search configuration is unusable", "error", err)
+		return nil, "", errors.New("web search is not available right now")
+	}
+	chain := config.usableChain(scenario, s.firstVisitSearch())
+	if len(chain) == 0 {
+		slog.Error("codex: web search has no usable provider", "alert", "WEB_SEARCH_PROVIDER_ALERT",
+			"scenario", string(scenario), "configured", strings.Join(config.chain(scenario), ","))
+		return nil, "", errors.New("web search is not available right now")
+	}
+	var accepted []string
+	for _, provider := range chain {
+		if len([]rune(query)) <= webSearchQueryLimit(provider) {
+			accepted = append(accepted, provider)
 		}
 	}
+	if len(accepted) == 0 {
+		return nil, "", fmt.Errorf("query must be at most %d characters; write a shorter, focused query", webSearchQueryLimit(chain[0]))
+	}
+	key := strings.Join(accepted, ",") + ":" + webSearchCacheKey(query, limit)
 	if entry, ok := cachedWebSearch(key, time.Now()); ok && !supplement {
 		age := time.Since(entry.at).Round(time.Minute)
 		response := entry.response
 		response.Metadata.LatencyMs = 0
-		return &response, fmt.Sprintf("%s, searched %s ago", entry.provider, age), nil
+		return &response, fmt.Sprintf("%s, searched %s ago", webSearchProviderLabel(entry.provider), age), nil
 	}
 
 	select {
@@ -319,38 +251,41 @@ func (s *appServerSession) lookupWeb(query string, limit int, supplement bool) (
 		return nil, "", s.ctx.Err()
 	}
 
-	if first {
-		if supplement {
-			response, err := s.supplementFirstVisitSearch(query, limit)
-			return response, "aisa/tavily", err
-		}
-		response, err := deepSeekSearch(s.ctx, query, limit)
-		if err == nil && len(response.Items) > 0 {
-			rememberWebSearch(key, webSearchCacheEntry{provider: "deepseek", response: *response, at: time.Now()})
-		}
-		return response, "deepseek", err
-	}
+	searchID := newWebSearchID()
 	var failures []string
 	answered := false
-	for _, provider := range config.Providers {
-		response, err := webSearchAttempt(s.ctx, config, provider, query, limit)
+	for index, provider := range accepted {
+		started := time.Now()
+		response, err := s.webSearchAttempt(config, provider, query, limit)
+		if s.ctx.Err() != nil {
+			return nil, "", s.ctx.Err()
+		}
+		record := webSearchAttemptRecord{searchID: searchID, index: index, scenario: scenario, provider: provider,
+			query: query, latency: time.Since(started), occurred: started}
 		if err != nil {
-			slog.Warn("codex: web search attempt failed", "provider", provider, "error", err)
-			failures = append(failures, err.Error())
-			var attempt *webSearchAttemptError
-			if errors.As(err, &attempt) && !attempt.retryable {
+			attempt := classifyAttemptError(provider, err)
+			record.status, record.err = webSearchStatusFailed, attempt
+			record.costUSD = webSearchAttemptCost(config, provider, record.status)
+			s.recordWebSearchAttempt(record)
+			slog.Warn("codex: web search attempt failed", "provider", provider, "category", string(attempt.category), "error", attempt.message)
+			failures = append(failures, attempt.message)
+			if !attempt.retryable() {
 				break
 			}
 			continue
 		}
-		if len(response.Items) > 0 {
+		record.results = len(response.Items)
+		record.status = webSearchStatusEmpty
+		if record.results > 0 {
+			record.status = webSearchStatusSucceeded
+		}
+		record.costUSD = webSearchAttemptCost(config, provider, record.status)
+		s.recordWebSearchAttempt(record)
+		if record.results > 0 {
 			rememberWebSearch(key, webSearchCacheEntry{provider: provider, response: *response, at: time.Now()})
-			return response, provider, nil
+			return response, webSearchProviderLabel(provider), nil
 		}
 		answered = true
-	}
-	if s.ctx.Err() != nil {
-		return nil, "", s.ctx.Err()
 	}
 	if answered {
 		return nil, "", nil
@@ -358,137 +293,11 @@ func (s *appServerSession) lookupWeb(query string, limit int, supplement bool) (
 	return nil, "", fmt.Errorf("web search failed: %s", limitRunes(strings.Join(failures, "; "), 400))
 }
 
-func webSearchAttempt(parent context.Context, config webSearchConfig, provider, query string, limit int) (*webSearchResponse, error) {
-	if !config.hasCredentials(provider) {
-		return nil, &webSearchAttemptError{message: provider + " has no credentials configured", retryable: true}
+func webSearchProviderLabel(provider string) string {
+	if provider == webSearchProviderAIsa {
+		return "aisa/tavily"
 	}
-	if provider == "brave" {
-		return braveSearchAttempt(parent, config, query, limit)
-	}
-	return cloudflareSearchAttempt(parent, config, provider, query, limit)
-}
-
-// sendWebSearchRequest returns the response body and status, or an attempt
-// error that lets the caller try the next provider.
-func sendWebSearchRequest(ctx, parent context.Context, request *http.Request, provider string) ([]byte, int, error) {
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		if ctx.Err() != nil && parent.Err() == nil {
-			return nil, 0, &webSearchAttemptError{message: provider + " timed out", retryable: true}
-		}
-		return nil, 0, &webSearchAttemptError{message: provider + " was unreachable", retryable: true}
-	}
-	defer response.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(response.Body, webSearchResponseLimit))
-	if err != nil {
-		return nil, 0, &webSearchAttemptError{message: provider + " response was cut off", retryable: true}
-	}
-	return raw, response.StatusCode, nil
-}
-
-func braveSearchAttempt(parent context.Context, config webSearchConfig, query string, limit int) (*webSearchResponse, error) {
-	ctx, cancel := context.WithTimeout(parent, webSearchAttemptTimeout)
-	defer cancel()
-	endpoint := braveSearchAPIBase + "/web/search?" + url.Values{"q": {query}, "count": {strconv.Itoa(limit)}}.Encode()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Set("Accept", "application/json")
-	request.Header.Set("X-Subscription-Token", config.BraveKey)
-	raw, status, err := sendWebSearchRequest(ctx, parent, request, "brave")
-	if err != nil {
-		return nil, err
-	}
-	var payload struct {
-		Web struct {
-			Results []webSearchItem `json:"results"`
-		} `json:"web"`
-		Error struct {
-			Detail string `json:"detail"`
-		} `json:"error"`
-	}
-	parseErr := json.Unmarshal(raw, &payload)
-	if status < 200 || status > 299 {
-		reason := http.StatusText(status)
-		if strings.TrimSpace(payload.Error.Detail) != "" {
-			reason = payload.Error.Detail
-		}
-		return nil, &webSearchAttemptError{
-			message:   fmt.Sprintf("brave returned HTTP %d: %s", status, limitRunes(reason, 200)),
-			retryable: webSearchProviderUnavailable(status),
-		}
-	}
-	if parseErr != nil {
-		return nil, &webSearchAttemptError{message: "brave returned an unreadable response", retryable: true}
-	}
-	// Brave marks the matched words with <strong> in titles and snippets.
-	response := &webSearchResponse{}
-	for _, item := range payload.Web.Results {
-		item.Title = htmlTags.ReplaceAllString(item.Title, "")
-		item.Description = htmlTags.ReplaceAllString(item.Description, "")
-		response.Items = append(response.Items, item)
-	}
-	return response, nil
-}
-
-func cloudflareSearchAttempt(parent context.Context, config webSearchConfig, provider, query string, limit int) (*webSearchResponse, error) {
-	body, err := json.Marshal(map[string]any{
-		"query":    query,
-		"provider": provider,
-		"limit":    limit,
-		"options":  map[string]any{"gateway": map[string]any{"id": config.GatewayID}},
-	})
-	if err != nil {
-		return nil, err
-	}
-	ctx, cancel := context.WithTimeout(parent, webSearchAttemptTimeout)
-	defer cancel()
-	endpoint := webSearchAPIBase + "/accounts/" + url.PathEscape(config.AccountID) + "/ai/websearch/"
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Set("Authorization", "Bearer "+config.Token)
-	request.Header.Set("Content-Type", "application/json")
-	raw, status, err := sendWebSearchRequest(ctx, parent, request, provider)
-	if err != nil {
-		return nil, err
-	}
-
-	var envelope struct {
-		Result json.RawMessage `json:"result"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	_ = json.Unmarshal(raw, &envelope)
-	if status < 200 || status > 299 {
-		reason := http.StatusText(status)
-		if len(envelope.Errors) > 0 && strings.TrimSpace(envelope.Errors[0].Message) != "" {
-			reason = envelope.Errors[0].Message
-		}
-		retryable := webSearchProviderUnavailable(status)
-		return nil, &webSearchAttemptError{
-			message:   fmt.Sprintf("%s returned HTTP %d: %s", provider, status, limitRunes(reason, 200)),
-			retryable: retryable,
-		}
-	}
-	payload := raw
-	if len(envelope.Result) > 0 && string(envelope.Result) != "null" {
-		payload = envelope.Result
-	}
-	var parsed webSearchResponse
-	if err := json.Unmarshal(payload, &parsed); err != nil {
-		return nil, &webSearchAttemptError{message: provider + " returned an unreadable response", retryable: true}
-	}
-	return &parsed, nil
-}
-
-// Only already-configured providers are eligible; this never purchases credit
-// or changes credentials. An exhausted supplier does not exhaust the others.
-func webSearchProviderUnavailable(status int) bool {
-	return status == http.StatusPaymentRequired || status == http.StatusTooManyRequests || status >= 500
+	return provider
 }
 
 // formatWebSearchResults keeps snippets short (providers can return pages of

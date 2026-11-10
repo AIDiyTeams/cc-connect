@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -80,11 +81,11 @@ func (s *appServerSession) applyPublicResearchProfile(params, config map[string]
 	}
 	tools := []map[string]any{}
 	if s.webSearchToolAvailable() {
-		search := webSearchDynamicTool()
+		search := s.webSearchDynamicTool()
 		if s.firstVisitSearch() {
-			search["description"] = "Search DeepSeek first (query up to 128 characters). Verify claims using original pages. For an unresolved fact (e.g. only a mirrored profile, no direct contact route, or an incomplete answer), set supplement=true on a focused AIsa/Tavily follow-up or omit the unsupported claim. Skip supplementation when original sources suffice."
+			limit := search["inputSchema"].(map[string]any)["properties"].(map[string]any)["query"].(map[string]any)["maxLength"]
+			search["description"] = fmt.Sprintf("Search the primary index first (query up to %v characters). Verify claims using original pages. For an unresolved fact (e.g. only a mirrored profile, no direct contact route, or an incomplete answer), set supplement=true on a focused follow-up through the secondary index or omit the unsupported claim. Skip supplementation when original sources suffice.", limit)
 			props := search["inputSchema"].(map[string]any)["properties"].(map[string]any)
-			props["query"].(map[string]any)["maxLength"] = 128
 			props["supplement"] = map[string]any{"type": "boolean", "description": "Use the secondary index only for an unresolved evidence gap."}
 		}
 		search["supportsParallelToolCalls"] = true
