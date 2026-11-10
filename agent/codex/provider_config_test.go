@@ -351,3 +351,29 @@ trust_level = "trusted"
 		t.Fatalf("workspace trust was not preserved:\n%s", got)
 	}
 }
+
+func TestWorkspaceCatalogStaysAtTOMLRootAfterRepeatedProviderSync(t *testing.T) {
+	global := t.TempDir()
+	per := t.TempDir()
+	t.Setenv("CODEX_HOME", global)
+	if err := os.WriteFile(filepath.Join(global, "config.toml"), []byte("model_provider = \"custom\"\n[model_providers.custom]\nname = \"Gateway\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(per, "config.toml")
+	input := "model_catalog_json = \"models.json\"\n[projects.qa]\ntrust_level = \"trusted\"\n"
+	if err := os.WriteFile(path, []byte(input), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := ensureCodexHomeInheritedConfig(per, "", ""); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(string(data), "model_catalog_json = \"models.json\"\n") || strings.Count(string(data), "model_catalog_json") != 1 || !strings.Contains(string(data), "[projects.qa]") {
+			t.Fatalf("workspace catalog moved inside a shared table: %s", data)
+		}
+	}
+}

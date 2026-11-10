@@ -146,12 +146,12 @@ func ensureCodexHomeInheritedConfig(codexHome, permissionsProfile, sharedSkillsD
 				}
 				slog.Debug("codex: created per-user config.toml with global provider config", "dst", perUserConfig)
 			case perr == nil:
-				trustPart := extractTrustOnly(string(perUserData))
+				catalogSetting, trustPart := workspaceModelCatalogSetting(extractTrustOnly(string(perUserData)))
 				// TOML top-level keys must precede any [table] section. providerCfg
 				// starts with top-level keys (model_provider, model, ...) then
 				// [model_providers.*]; per-user [projects.*] trust must come after
 				// to keep provider keys at the root scope.
-				merged := providerCfg + "\n\n" + strings.TrimRight(trustPart, "\n") + "\n"
+				merged := catalogSetting + providerCfg + "\n\n" + strings.TrimRight(trustPart, "\n") + "\n"
 				if werr := writeFileAtomic(perUserConfig, []byte(merged), 0o600); werr != nil {
 					return fmt.Errorf("codex: sync provider config: %w", werr)
 				}
@@ -182,6 +182,29 @@ func ensureCodexHomeInheritedConfig(codexHome, permissionsProfile, sharedSkillsD
 		}
 	}
 	return nil
+}
+
+// model_catalog_json is a native Codex root setting. The provider config ends in
+// a TOML table, so appending this operator-managed workspace setting after it
+// silently makes it a provider or permissions field on the next session start.
+func workspaceModelCatalogSetting(config string) (setting, rest string) {
+	for start := 0; start < len(config); {
+		line, _, more := strings.Cut(config[start:], "\n")
+		text := strings.TrimSpace(line)
+		if strings.HasPrefix(text, "[") {
+			break
+		}
+		end := start + len(line)
+		if more {
+			end++
+		}
+		key, _, ok := strings.Cut(text, "=")
+		if ok && strings.TrimSpace(key) == "model_catalog_json" {
+			return line + "\n", config[:start] + config[end:]
+		}
+		start = end
+	}
+	return "", config
 }
 
 // extractTrustOnly returns the per-user-specific parts of a codex config.toml
