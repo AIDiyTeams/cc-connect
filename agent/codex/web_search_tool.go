@@ -215,17 +215,45 @@ func (s *appServerSession) searchWeb(arguments map[string]any) (string, error) {
 // provider on failure or an empty answer. The slot is released before any
 // optional original-page reads.
 func (s *appServerSession) lookupWeb(query string, limit int, supplement bool) (*webSearchResponse, string, error) {
+	result, err := s.runWebSearch(webSearchEntryTool, query, limit, supplement)
+	if err != nil || result.response == nil {
+		return nil, "", err
+	}
+	if result.cached {
+		return result.response, fmt.Sprintf("%s, searched %s ago", webSearchProviderLabel(result.provider), result.age.Round(time.Minute)), nil
+	}
+	return result.response, webSearchProviderLabel(result.provider), nil
+}
+
+// Entries name the caller of lookupWeb in the ledger receipt, so rows written
+// for a Skill script can be told apart from the Agent's own tool calls.
+const (
+	webSearchEntryTool   = "tool"
+	webSearchEntryBroker = "capability_broker"
+)
+
+// webSearchLookup is the outcome of one lookup: a nil response means every
+// provider answered with no results.
+type webSearchLookup struct {
+	response *webSearchResponse
+	provider string
+	cached   bool
+	age      time.Duration
+}
+
+// runWebSearch implements lookupWeb for every entry.
+func (s *appServerSession) runWebSearch(entry, query string, limit int, supplement bool) (webSearchLookup, error) {
 	scenario := s.webSearchScenario(supplement)
 	config, err := loadWebSearchConfig()
 	if err != nil {
 		slog.Warn("codex: web search configuration is unusable", "error", err)
-		return nil, "", errors.New("web search is not available right now")
+		return webSearchLookup{}, errors.New("web search is not available right now")
 	}
 	chain := config.usableChain(scenario, s.searchSupplementAllowed())
 	if len(chain) == 0 {
 		slog.Error("codex: web search has no usable provider", "alert", "WEB_SEARCH_PROVIDER_ALERT",
 			"scenario", string(scenario), "configured", strings.Join(config.chain(scenario), ","))
-		return nil, "", errors.New("web search is not available right now")
+		return webSearchLookup{}, errors.New("web search is not available right now")
 	}
 	var accepted []string
 	for _, provider := range chain {
@@ -234,23 +262,22 @@ func (s *appServerSession) lookupWeb(query string, limit int, supplement bool) (
 		}
 	}
 	if len(accepted) == 0 {
-		return nil, "", fmt.Errorf("query must be at most %d characters; write a shorter, focused query", webSearchQueryLimit(chain[0]))
+		return webSearchLookup{}, fmt.Errorf("query must be at most %d characters; write a shorter, focused query", webSearchQueryLimit(chain[0]))
 	}
 	key := strings.Join(accepted, ",") + ":" + webSearchCacheKey(query, limit)
 	if entry, ok := cachedWebSearch(key, time.Now()); ok && !supplement {
-		age := time.Since(entry.at).Round(time.Minute)
 		response := entry.response
 		response.Metadata.LatencyMs = 0
-		return &response, fmt.Sprintf("%s, searched %s ago", webSearchProviderLabel(entry.provider), age), nil
+		return webSearchLookup{response: &response, provider: entry.provider, cached: true, age: time.Since(entry.at)}, nil
 	}
 
 	select {
 	case webSearchSlots <- struct{}{}:
 		defer func() { <-webSearchSlots }()
 	case <-time.After(webSearchQueueWait):
-		return nil, "", errors.New("web search is busy; try again shortly")
+		return webSearchLookup{}, errors.New("web search is busy; try again shortly")
 	case <-s.ctx.Done():
-		return nil, "", s.ctx.Err()
+		return webSearchLookup{}, s.ctx.Err()
 	}
 
 	searchID := newWebSearchID()
@@ -260,9 +287,9 @@ func (s *appServerSession) lookupWeb(query string, limit int, supplement bool) (
 		started := time.Now()
 		response, err := s.webSearchAttempt(config, provider, query, limit)
 		if s.ctx.Err() != nil {
-			return nil, "", s.ctx.Err()
+			return webSearchLookup{}, s.ctx.Err()
 		}
-		record := webSearchAttemptRecord{searchID: searchID, index: index, scenario: scenario, provider: provider,
+		record := webSearchAttemptRecord{searchID: searchID, entry: entry, index: index, scenario: scenario, provider: provider,
 			query: query, latency: time.Since(started), occurred: started}
 		if err != nil {
 			attempt := classifyAttemptError(provider, err)
@@ -285,14 +312,14 @@ func (s *appServerSession) lookupWeb(query string, limit int, supplement bool) (
 		s.recordWebSearchAttempt(record)
 		if record.results > 0 {
 			rememberWebSearch(key, webSearchCacheEntry{provider: provider, response: *response, at: time.Now()})
-			return response, webSearchProviderLabel(provider), nil
+			return webSearchLookup{response: response, provider: provider}, nil
 		}
 		answered = true
 	}
 	if answered {
-		return nil, "", nil
+		return webSearchLookup{}, nil
 	}
-	return nil, "", fmt.Errorf("web search failed: %s", limitRunes(strings.Join(failures, "; "), 400))
+	return webSearchLookup{}, fmt.Errorf("web search failed: %s", limitRunes(strings.Join(failures, "; "), 400))
 }
 
 func webSearchProviderLabel(provider string) string {

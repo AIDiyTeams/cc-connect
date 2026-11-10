@@ -28,6 +28,7 @@ const webSearchUsageKind = "web_search"
 
 type webSearchAttemptRecord struct {
 	searchID string
+	entry    string
 	index    int
 	scenario webSearchScenario
 	provider string
@@ -60,6 +61,7 @@ func (s *appServerSession) recordWebSearchAttempt(record webSearchAttemptRecord)
 	receipt := map[string]any{
 		"kind":            webSearchUsageKind,
 		"search_id":       record.searchID,
+		"entry":           record.entry,
 		"attempt_index":   record.index,
 		"scenario":        string(record.scenario),
 		"provider":        record.provider,

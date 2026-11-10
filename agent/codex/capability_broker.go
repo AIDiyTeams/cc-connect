@@ -172,6 +172,10 @@ func (b *capabilityBroker) serve(w http.ResponseWriter, r *http.Request) {
 		b.serveXSearch(w, r)
 		return
 	}
+	if r.Method == http.MethodPost && r.URL.RequestURI() == "/v1/web-search" {
+		b.serveWebSearch(w, r)
+		return
+	}
 	if r.Method != http.MethodPost || r.URL.RequestURI() != "/v1/portal" {
 		brokerReject(w, http.StatusNotFound)
 		return
