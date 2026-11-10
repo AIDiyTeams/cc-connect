@@ -336,8 +336,11 @@ func (s *appServerSession) callWebReaderModel(route core.HelperModelRoute, promp
 // naming the helper's own route, so usage is never booked to the main model.
 func (s *appServerSession) webReaderMetadata(route core.HelperModelRoute) map[string]string {
 	metadata := s.responsesAPIClientMetadata()
-	for _, key := range []string{"tomako.logical_model", "tomako.route_policy_id", "tomako.route_policy_version"} {
+	for _, key := range []string{"tomako.logical_model", "tomako.route_policy_id", "tomako.route_policy_version", "tomako.route_grant"} {
 		delete(metadata, key)
+	}
+	if route.RouteGrant != "" {
+		metadata["tomako.route_grant"] = route.RouteGrant
 	}
 	if route.LogicalModel != "" {
 		metadata["tomako.logical_model"] = route.LogicalModel

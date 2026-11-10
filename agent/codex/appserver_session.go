@@ -1107,6 +1107,7 @@ func (s *appServerSession) responsesAPIClientMetadata() map[string]string {
 		metadata["tomako.route_policy_version"] = fmt.Sprintf("%d", runtime.RoutePolicyVersion)
 	}
 	put("tomako.inference_request_id", runtime.InferenceRequestID)
+	put("tomako.route_grant", runtime.RouteGrant)
 	put("tomako.workspace_id", runtime.WorkspaceID)
 	put("tomako.brand_id", runtime.BrandID)
 	put("tomako.user_id", runtime.UserID)

@@ -471,7 +471,19 @@ func TestAppServerSession_SessionRuntimeSelectsTurnModelAndMetadata(t *testing.T
 	if got := s.GetReasoningEffort(); got != "low" {
 		t.Fatalf("reasoning effort = %q", got)
 	}
+	s.runtime.RouteGrant = "one-turn-fixture"
 	metadata := s.responsesAPIClientMetadata()
+	if metadata["tomako.route_grant"] != "one-turn-fixture" {
+		t.Fatal("missing main grant")
+	}
+	helper := s.webReaderMetadata(core.HelperModelRoute{LogicalModel: "search", RouteGrant: "reader-fixture"})
+	if helper["tomako.route_grant"] != "reader-fixture" || helper["tomako.purpose"] != "web_reader" {
+		t.Fatal("reader did not replace the main grant")
+	}
+	if _, ok := s.webReaderMetadata(core.HelperModelRoute{LogicalModel: "search"})["tomako.route_grant"]; ok {
+		t.Fatal("unsigned helper reused the main grant")
+	}
+
 	if metadata["tomako.inference_request_id"] != "infer-123" {
 		t.Fatalf("metadata = %#v", metadata)
 	}

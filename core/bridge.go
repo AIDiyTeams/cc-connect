@@ -1955,6 +1955,7 @@ func normalizeSessionRuntime(runtime SessionRuntime) SessionRuntime {
 	default:
 		runtime.WebSearch = ""
 	}
+	runtime.RouteGrant = boundedSecretValue(runtime.RouteGrant, 12*1024)
 	runtime.RoutePolicyID = boundedOpaqueValue(runtime.RoutePolicyID, 64)
 	runtime.InferenceRequestID = boundedOpaqueValue(runtime.InferenceRequestID, 96)
 	runtime.WorkspaceID = boundedOpaqueValue(runtime.WorkspaceID, 64)
@@ -2013,6 +2014,7 @@ func normalizeHelperModelRoute(route *HelperModelRoute) *HelperModelRoute {
 		return nil
 	}
 	out := HelperModelRoute{
+		RouteGrant:    boundedSecretValue(route.RouteGrant, 12*1024),
 		LogicalModel:  boundedOpaqueValue(route.LogicalModel, 64),
 		GatewayModel:  boundedSecretValue(route.GatewayModel, 128),
 		RoutePolicyID: boundedOpaqueValue(route.RoutePolicyID, 64),

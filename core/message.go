@@ -220,6 +220,7 @@ type SessionRuntime struct {
 	RoutePolicyID      string   `json:"route_policy_id,omitempty"`
 	RoutePolicyVersion int64    `json:"route_policy_version,omitempty"`
 	InferenceRequestID string   `json:"inference_request_id,omitempty"`
+	RouteGrant         string   `json:"route_grant,omitempty"`
 	RequiredModalities []string `json:"required_modalities,omitempty"`
 	WorkspaceID        string   `json:"workspace_id,omitempty"`
 	BrandID            string   `json:"brand_id,omitempty"`
@@ -281,6 +282,7 @@ func (r SessionRuntime) Unattended() bool { return r.ExecutionProfile == Executi
 // HelperModelRoute is a Portal-owned route for a bounded helper call made on a
 // turn's behalf. The bridge never picks or defaults such a model itself.
 type HelperModelRoute struct {
+	RouteGrant         string `json:"route_grant,omitempty"`
 	LogicalModel       string `json:"logical_model,omitempty"`
 	GatewayModel       string `json:"gateway_model,omitempty"`
 	RoutePolicyID      string `json:"route_policy_id,omitempty"`
