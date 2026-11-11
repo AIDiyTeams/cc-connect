@@ -23,10 +23,18 @@ func webPublicActivity(item map[string]any, status string) *core.PublicActivity 
 	}
 	activity := &core.PublicActivity{Kind: kind, Status: status}
 	if raw, ok := action["url"].(string); ok && len(raw) <= 2048 {
-		if parsed, err := url.Parse(raw); err == nil && parsed.Hostname() != "" && parsed.User == nil && parsed.RawQuery == "" &&
+		if parsed, err := url.Parse(raw); err == nil && isPublicHostname(parsed.Hostname()) && parsed.User == nil &&
 			(parsed.Scheme == "https" || parsed.Scheme == "http") {
+			// Keep the public site identity even when the exact link cannot be
+			// exposed. Never copy query values into the display label.
+			if host := parsed.Hostname(); len(host) <= 80 {
+				activity.Label = host
+			}
 			// Query-bearing links can contain signed tokens; omit them rather
 			// than silently linking to a different resource. Fragments are local.
+			if parsed.RawQuery != "" {
+				return activity
+			}
 			parsed.Fragment = ""
 			activity.URL = strings.TrimSpace(parsed.String())
 		}

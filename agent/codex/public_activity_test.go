@@ -44,6 +44,26 @@ func TestWebPublicActivityUsesTypedActionOnly(t *testing.T) {
 	}
 }
 
+func TestWebPublicActivity_QueryURLRetainsSiteWithoutExposingParameters(t *testing.T) {
+	for _, status := range []string{"running", "returned"} {
+		for _, address := range []string{
+			"https://www.facebook.com/ads/library/?active_status=active&view_all_page_id=123",
+			"https://www.facebook.com/private?token=secret#private-fragment",
+		} {
+			got := webReadPublicActivity(map[string]any{"url": address}, status)
+			if got == nil || got.Kind != "open_page" || got.Status != status || got.Label != "www.facebook.com" || got.URL != "" {
+				t.Fatalf("query-redacted page must retain only its site identity: %+v", got)
+			}
+		}
+	}
+	for _, address := range []string{"http://127.0.0.1/private?token=secret", "https://user:secret@example.com/", "https://service.internal/"} {
+		got := webReadPublicActivity(map[string]any{"url": address}, "returned")
+		if got.Label != "" || got.URL != "" {
+			t.Fatalf("unsafe target leaked a site identity: %+v", got)
+		}
+	}
+}
+
 func TestReasoningTextAcceptsRawContentParts(t *testing.T) {
 	item := map[string]any{"type": "reasoning", "summary": []any{},
 		"content": []any{map[string]any{"type": "reasoning_text", "text": "比较两家定价"}, map[string]any{"type": "reasoning_text", "text": "核对席位规则"}}}
