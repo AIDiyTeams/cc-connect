@@ -243,6 +243,7 @@ func (s *appServerSession) readWebPage(arguments map[string]any) (string, error)
 	if err != nil {
 		return "", err
 	}
+	s.recordPageRead([]string{parsed.String()}, output)
 	if truncated {
 		output += "\n[Output cut at the tool limit; continue with start to read further.]"
 	}

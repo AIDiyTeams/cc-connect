@@ -40,6 +40,7 @@ func (s *appServerSession) readSearchResults(items []webSearchItem, count int) s
 	if err != nil {
 		return fmt.Sprintf("Original-page reads failed for %s: %v. Index snippets alone do not verify facts.", strings.Join(urls, ", "), err)
 	}
+	s.recordPageRead(urls, body)
 	if truncated {
 		body += "\n[Original-page output truncated; only visible body excerpts can support a claim.]"
 	}
